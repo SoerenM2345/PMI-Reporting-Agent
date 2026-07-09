@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PMI Reporting Agent</title>
+<style>
+  :root { --green:#2E7D32; --green-dark:#1B5E20; --light:#E8F5E9; --grey:#757575;
+          --red:#C62828; --amber:#F9A825; }
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif; margin:0;
+         background:#F5F6F5; color:#1A1A1A; }
+  header { background:#fff; border-bottom:4px solid var(--green); padding:18px 32px;
+           display:flex; align-items:baseline; gap:14px; }
+  header h1 { margin:0; font-size:22px; }
+  header span { color:var(--grey); font-size:13px; }
+  main { max-width:960px; margin:28px auto; padding:0 20px; display:grid; gap:22px; }
+  .card { background:#fff; border:1px solid #E0E0E0; border-radius:10px; padding:22px; }
+  .card h2 { margin:0 0 4px; font-size:15px; text-transform:uppercase;
+             letter-spacing:.6px; color:var(--green-dark); }
+  .card p.hint { margin:0 0 14px; color:var(--grey); font-size:13px; }
+  #dropzone { border:2px dashed var(--green); border-radius:10px; background:var(--light);
+              padding:42px 20px; text-align:center; cursor:pointer; transition:.15s; }
+  #dropzone.drag { background:#C8E6C9; border-style:solid; transform:scale(1.005); }
+  #dropzone strong { color:var(--green-dark); }
+  #dropzone small { display:block; margin-top:8px; color:var(--grey); }
+  ul#filelist { list-style:none; margin:14px 0 0; padding:0; }
+  ul#filelist li { padding:7px 12px; background:#FAFAFA; border:1px solid #EEE;
+                   border-radius:6px; margin-bottom:6px; font-size:14px;
+                   display:flex; justify-content:space-between; }
+  ul#filelist li em { color:var(--grey); font-style:normal; font-size:12px; }
+  textarea { width:100%; min-height:70px; border:1px solid #CCC; border-radius:8px;
+             padding:12px; font:inherit; font-size:15px; resize:vertical; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  select { padding:9px 12px; border:1px solid #CCC; border-radius:8px; font:inherit; }
+  button.primary { background:var(--green); color:#fff; border:none; border-radius:8px;
+                   padding:11px 26px; font-size:15px; font-weight:600; cursor:pointer; }
+  button.primary:hover { background:var(--green-dark); }
+  button.primary:disabled { background:#BDBDBD; cursor:not-allowed; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .chip { background:#fff; border:1px solid var(--green); color:var(--green-dark);
+          border-radius:16px; padding:5px 14px; font-size:13px; cursor:pointer; }
+  .chip:hover { background:var(--light); }
+  #status { font-size:14px; color:var(--grey); min-height:20px; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid #CCC;
+             border-top-color:var(--green); border-radius:50%;
+             animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg);} }
+  #results { display:none; }
+  #results ul { margin:8px 0; padding-left:20px; }
+  #results li { margin-bottom:5px; font-size:14px; }
+  .dl { display:inline-block; margin:6px 10px 0 0; padding:9px 18px; background:var(--green);
+        color:#fff; border-radius:8px; text-decoration:none; font-size:14px; font-weight:600; }
+  .conflict { border-left:4px solid var(--amber); background:#FFF8E1; padding:10px 14px;
+              border-radius:6px; margin-top:8px; font-size:13px; }
+  .conflict.unresolved { border-left-color:var(--red); background:#FFEBEE; }
+  .statgrid { display:flex; gap:18px; flex-wrap:wrap; margin-top:6px; }
+  .stat { background:var(--light); border-radius:8px; padding:10px 16px; text-align:center; }
+  .stat b { display:block; font-size:20px; color:var(--green-dark); }
+  .stat span { font-size:12px; color:var(--grey); }
+  #audiencePrompt { display:none; border-left:4px solid var(--green); background:var(--light);
+                    padding:14px; border-radius:6px; margin-top:12px; }
+  footer { text-align:center; color:var(--grey); font-size:12px; padding:24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PMI Reporting Agent</h1>
+  <span>Automated Reporting &amp; Status Updates · TUM Project Study x Deloitte 2026</span>
+</header>
+
+<main>
+  <div class="card">
+    <h2>1 · Upload PMI files</h2>
+    <p class="hint">Drag &amp; drop your weekly material: Excel trackers, PowerPoint updates, Word meeting notes, PDFs, HTML exports.</p>
+    <div id="dropzone">
+      <strong>Drop files here</strong> or click to browse
+      <small>.xlsx · .pptx · .docx · .pdf · .html</small>
+      <input type="file" id="fileinput" multiple hidden
+             accept=".xlsx,.xlsm,.xls,.pptx,.docx,.pdf,.html,.htm">
+    </div>
+    <ul id="filelist"></ul>
+  </div>
+
+  <div class="card">
+    <h2>2 · What do you need?</h2>
+    <p class="hint">Describe the output — e.g. a SteerCo deck or a task dashboard with assignments per person.</p>
+    <textarea id="request" placeholder='e.g. "Create a SteerCo PowerPoint with tasks per owner" or "Create a Finance Excel dashboard"'></textarea>
+    <div class="chips">
+      <span class="chip">Create a SteerCo PowerPoint</span>
+      <span class="chip">Create a PMO Excel dashboard with tasks per person</span>
+      <span class="chip">Create a chart about risks</span>
+    </div>
+    <div class="row">
+      <label>Audience:
+        <select id="audience">
+          <option value="">Auto-detect</option>
+          <option>Executive</option><option>PMO</option><option>Finance</option>
+        </select>
+      </label>
+      <label>Conflicts:
+        <select id="strategy">
+          <option value="priority">Auto-resolve (Excel &gt; Word/PDF &gt; PPT &gt; HTML)</option>
+          <option value="ask">Ask me on critical conflicts</option>
+        </select>
+      </label>
+      <button class="primary" id="go" disabled>Generate report</button>
+    </div>
+    <div id="audiencePrompt">
+      <b>Who is this report for?</b>
+      <div class="chips" id="audienceChips">
+        <span class="chip" data-a="Executive">Executive</span>
+        <span class="chip" data-a="PMO">PMO</span>
+        <span class="chip" data-a="Finance">Finance</span>
+      </div>
+    </div>
+    <p id="status"></p>
+  </div>
+
+  <div class="card" id="results">
+    <h2>3 · Report ready</h2>
+    <div class="statgrid" id="stats"></div>
+    <h3 style="font-size:14px;margin:16px 0 4px">Summary</h3>
+    <ul id="summary"></ul>
+    <div id="conflicts"></div>
+    <div id="downloads"></div>
+  </div>
+</main>
+
+<footer>Prototype · single-agent workflow per 2026_DPID_PreCourseMeeting spec · outputs require Senior Manager review before stakeholder distribution</footer>
+
+<script>
+let sessionId = null;
+const $ = id => document.getElementById(id);
+
+async function ensureSession() {
+  if (sessionId) return sessionId;
+  const r = await fetch('/api/session', {method:'POST'});
+  sessionId = (await r.json()).session_id;
+  return sessionId;
+}
+
+// ---- drag & drop
+const dz = $('dropzone'), fi = $('fileinput');
+dz.addEventListener('click', () => fi.click());
+['dragenter','dragover'].forEach(e => dz.addEventListener(e, ev => {
+  ev.preventDefault(); dz.classList.add('drag'); }));
+['dragleave','drop'].forEach(e => dz.addEventListener(e, ev => {
+  ev.preventDefault(); dz.classList.remove('drag'); }));
+dz.addEventListener('drop', ev => uploadFiles(ev.dataTransfer.files));
+fi.addEventListener('change', () => uploadFiles(fi.files));
+
+async function uploadFiles(fileList) {
+  if (!fileList.length) return;
+  await ensureSession();
+  const fd = new FormData();
+  for (const f of fileList) fd.append('files', f);
+  setStatus('Uploading…', true);
+  const r = await fetch(`/api/upload?session_id=${sessionId}`, {method:'POST', body:fd});
+  const data = await r.json();
+  renderFiles(data.files);
+  let msg = `${data.saved.length} file(s) uploaded.`;
+  if (data.rejected.length) msg += ` Rejected (unsupported): ${data.rejected.join(', ')}`;
+  setStatus(msg, false);
+  $('go').disabled = !data.files.length;
+}
+
+function renderFiles(files) {
+  $('filelist').innerHTML = files.map(f =>
+    `<li>${f}<em>${f.split('.').pop().toUpperCase()}</em></li>`).join('');
+}
+
+// ---- request chips
+document.querySelectorAll('.chips .chip:not([data-a])').forEach(c =>
+  c.addEventListener('click', () => { $('request').value = c.textContent; }));
+
+// ---- audience prompt chips (agent step 2)
+$('audienceChips').addEventListener('click', ev => {
+  const a = ev.target.dataset.a;
+  if (!a) return;
+  $('audience').value = a;
+  $('audiencePrompt').style.display = 'none';
+  runReport();
+});
+
+$('go').addEventListener('click', runReport);
+
+async function runReport() {
+  const request_text = $('request').value.trim();
+  if (!request_text) { setStatus('Please describe the output you need.'); return; }
+  setStatus('Agent running: extract → standardize → consistency check → generate…', true);
+  $('go').disabled = true;
+  try {
+    const r = await fetch('/api/report', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        session_id: sessionId, request_text,
+        audience: $('audience').value || null,
+        conflict_strategy: $('strategy').value,
+      })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'Request failed');
+    if (data.needs_audience) {
+      setStatus('The agent needs to know the audience.');
+      $('audiencePrompt').style.display = 'block';
+      return;
+    }
+    renderResults(data);
+    setStatus('Done. Reminder: Senior Manager review before distribution.');
+  } catch (e) {
+    setStatus('Error: ' + e.message);
+  } finally {
+    $('go').disabled = false;
+  }
+}
+
+function renderResults(d) {
+  $('results').style.display = 'block';
+  $('stats').innerHTML = Object.entries(d.stats).map(([k,v]) =>
+    `<div class="stat"><b>${v}</b><span>${k.replace('_',' ')}</span></div>`).join('');
+  $('summary').innerHTML = d.summary.map(b => `<li>${b}</li>`).join('');
+  $('conflicts').innerHTML = d.conflicts.length
+    ? `<h3 style="font-size:14px;margin:16px 0 4px">Consistency checks (${d.conflicts.length} conflict(s))</h3>` +
+      d.conflicts.map(c => {
+        const vals = Object.entries(c.values).map(([f,v]) => `${f}: <b>${v}</b>`).join(' · ');
+        const res = c.resolved_value
+          ? `→ resolved to <b>${c.resolved_value}</b> (${c.resolved_from}, ${c.resolution})`
+          : '→ <b>unresolved — needs your decision</b>';
+        return `<div class="conflict ${c.resolved_value?'':'unresolved'}">
+                <b>${c.entity_key}</b> (${c.field}): ${vals} ${res}</div>`;
+      }).join('')
+    : '';
+  $('downloads').innerHTML =
+    `<h3 style="font-size:14px;margin:16px 0 4px">Downloads</h3>` +
+    d.outputs.map(f =>
+      `<a class="dl" href="/api/download/${sessionId}/${encodeURIComponent(f)}">⬇ ${f}</a>`).join('');
+  $('results').scrollIntoView({behavior:'smooth'});
+}
+
+function setStatus(msg, busy=false) {
+  $('status').innerHTML = (busy ? '<span class="spinner"></span>' : '') + msg;
+}
+</script>
+</body>
+</html>
