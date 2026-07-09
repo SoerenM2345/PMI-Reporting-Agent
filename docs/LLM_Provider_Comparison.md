@@ -101,6 +101,30 @@ throughput; the cheapest credible option is Claude Sonnet 5/Haiku 4.5 at
 3–10× below the spec's 20 EUR budget. Run the A/B on our own harness before
 committing; for production, governance (§4) dominates benchmarks.
 
+## 6. Filled scorecard: Claude Sonnet 5 vs OpenAI GPT-5.5 (standard)
+
+Project-specific fill-in, 2026-07-09. Workload basis: our pipeline makes 2 LLM
+calls per report — request classification (~0.3K in / ~0.05K out) and summary
+bullets from the serialized data model (~10–20K in / ~1–2K out). Numbers are
+deterministic upstream. Open items marked, [assumptions in brackets].
+
+| # | Parameter | Claude Sonnet 5 | OpenAI GPT-5.5 (standard) | Edge |
+|---|---|---|---|---|
+| 1 | **Cost per report** | Intro to 2026-08-31: $2/$10 → **$0.03–0.06**; from Sep: $3/$15 → $0.04–0.09. 20 EUR ≈ 350–1,000 reports/mo | $5/$30 → **$0.09–0.16**; caching cuts repeated system prompt ~90%. 20 EUR ≈ 130–250 reports/mo | Sonnet 5, ~2.5–3× cheaper [assumed volume ≤200 reports/mo: 5–10 workstreams × weekly + ad hoc — both fit spec's 20 EUR] |
+| 2 | **Structured-output (JSON) reliability** | Structured outputs / tool-use JSON schema supported | Native `response_format: json_object` — already implemented in `app/agent/llm.py` | OPEN — measure % valid parses over N=100 runs on our harness; no public benchmark isolates this. [Assumption: both ≥99% on our two small, simple schemas] |
+| 3 | **Numerical faithfulness** | Claude family better calibrated in 2026 hallucination studies | Higher fabrication tendency in same studies | OPEN — Stage-3 bullet-number precision test on held-out PMI set. [Assumption: both ≥95% since all figures are handed to the model in-prompt; risk is transcription, not recall] |
+| 4 | **Audience-fit quality (SteerCo register)** | Opus 4.8 leads OfficeQA Pro 66.2 vs 54.1 [assumption: Sonnet 5 inherits part of the doc-understanding edge — unverified, benchmark is Opus-only] | 54.1 OfficeQA Pro (flagship) | OPEN — blinded SM rating (1–5) on the 15–30 held-out examples is the only valid test; no public benchmark covers PMI reporting |
+| 5 | **Calibration (missing data → abstain, not invent)** | Claude abstains on ~64% of unknown-answer questions (attempt rate ~36%, measured on Opus 4.7/4.8) [assumption: family behavior carries to Sonnet 5] | Attempts ~86% of unknown-answer questions, mostly confidently wrong | Claude — directly relevant: absent owners/dates/status must surface as "unknown" in reports behind the SM gate |
+| 6 | **Latency (interactive UI, target <15 s/report)** | Anthropic's fast tier; short calls | ~2× faster than Opus-class on agentic benchmarks; flex/batch modes are async (not UI-suitable) | OPEN — measure on harness. [Assumption: both <10 s for our ≤20K-token calls; not a differentiator] |
+| 7 | **Governance / hosting** | Anthropic on project's governance-track shortlist; available via AWS Bedrock / GCP Vertex [EU-region availability of Sonnet 5 specifically: not verified] | Prototype-only clearance per prior research; no Deloitte alliance; Azure OpenAI EU hosting exists | Sonnet 5 for anything beyond prototype; tie for the current MVP |
+| 8 | **Engineering fit** | `langchain-anthropic` first-class in LangGraph; swap = one client class in `app/agent/llm.py` [~1 h effort incl. tests] | Already implemented (spec's choice); zero switching cost | GPT-5.5 today; delta trivial by design (env-switched provider layer) |
+
+**Read of the scorecard:** decided-by-evidence parameters lean Sonnet 5 (1, 5, 7);
+GPT-5.5 wins 8 trivially; 2, 3, 4, 6 are genuinely open and are exactly what the
+Stage 1–4 harness measures — run the A/B there before committing. If costs must
+shrink or a production path opens, Sonnet 5 is the default; if the team wants
+zero-touch continuity with the spec, GPT-5.5 stands.
+
 ## Sources
 
 - OpenAI pricing — https://developers.openai.com/api/docs/pricing ; https://www.morphllm.com/openai-api-pricing ; https://devtk.ai/en/blog/openai-api-pricing-guide-2026/
