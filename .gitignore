@@ -1,11 +1,25 @@
 __pycache__/
 *.pyc
-.env
-output/
-storage_data/
 .pytest_cache/
+.coverage
+htmlcov/
 .DS_Store
+
+# environments
+.env
 venv/
 .venv/
 
+# runtime artefacts
+output/
+storage_data/
+
+# frontend build artefacts — the Docker image builds these itself
+frontend/node_modules/
+frontend/dist/
+
 CLAUDE.md
+
+# the source spec — kept out of the repo, as before
+agent.md
+agent_description.txt
