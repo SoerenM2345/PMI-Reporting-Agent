@@ -9,6 +9,8 @@ htmlcov/
 .env
 venv/
 .venv/
+.venv-dataset/
+.venv-dataset/
 
 # runtime artefacts
 output/
