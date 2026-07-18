@@ -28,6 +28,33 @@ resolution (steps 5–6). The latter is tested with synthetic data
 (`scripts/make_sample_data.py`, tests) pending a team decision on whether a
 proxy corpus is worth hunting for.
 
+## qmsum/ — QMSum dataset
+
+Zhong et al. (2021), *QMSum: A New Benchmark for Query-based Multi-domain Meeting
+Summarization*, NAACL 2021, arXiv:2104.05938, MIT license.
+Source: https://github.com/Yale-LILY/QMSum.git
+
+| Split | Meetings | General-query pairs | Specific-query pairs | Total |
+|---|---|---|---|---|
+| train | 162 | 162 | 1,095 | 1,257 |
+| val | 35 | 35 | 237 | 272 |
+| test | 35 | 37 | 244 | 281 |
+
+Layout: `ALL/jsonl/{train,val,test}.jsonl` is the official combined split (use this
+as-is); `ALL/{train,val,test}/*.json` is the same data as one file per meeting.
+`Academic/`, `Committee/`, `Product/` re-group the same 232 meetings by domain. Each
+meeting record carries `meeting_transcripts` (speaker-turn dialogue), a
+`general_query_list` (one whole-meeting summary) and a `specific_query_list`
+(topic-scoped summaries) — see `qmsum/README.md` for the full JSON schema.
+
+**Purpose here:** the two-tier general/specific query structure maps naturally onto
+this agent's Executive-digest vs. Workstream-detail report types. Not wired into the
+runtime pipeline.
+
+**Known caveat:** source domain is academic/product-design/committee meetings, not
+PMI/M&A — vocabulary drift is the main transfer risk when using this as a proxy for
+PMI-domain report generation.
+
 ## samples/ — generated sample inputs
 
 Created by `python scripts/make_sample_data.py`. Contains a deliberate
