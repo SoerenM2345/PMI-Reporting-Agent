@@ -29,6 +29,8 @@ from app.models.pmi import (
     Severity,
     Status,
 )
+from app.report import format as fmt
+from app.report.format import NOT_REPORTED
 
 log = logging.getLogger("pmi.xlsx")
 
@@ -38,8 +40,6 @@ AMBER = "#FFF3CD"
 RED = "#F8D7DA"
 GREY = "#757575"
 DARK = "#1A1A1A"
-
-NOT_REPORTED = "Not Reported"
 
 
 def generate(
@@ -553,18 +553,13 @@ def _formats(workbook) -> dict:
 
 
 def _d(value) -> str:
-    return f"{value:%d-%m-%Y}" if value else NOT_REPORTED
+    return fmt.date_str(value, missing=NOT_REPORTED)
 
 
 def _cite(entity) -> str:
-    ref = entity.primary_source
-    if ref is None:
-        return NOT_REPORTED
-    where = ref.location
-    text = f"{ref.file_name} ({where})" if where else ref.file_name
-    if ref.is_low_confidence:
-        text += f" ⚠ {ref.extraction_confidence:.0%}"
-    return text
+    """A cell has the width for the sheet/cell reference, and a workbook reader
+    wants it — this is where someone goes to check a figure."""
+    return fmt.cite(entity, with_location=True, missing=NOT_REPORTED, warn_sep=" ")
 
 
 def _find_source(model: PMIDataModel, kind: str, label: str) -> str:

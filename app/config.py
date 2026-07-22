@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +95,58 @@ class Settings(BaseSettings):
         if self.llm_provider == "none":
             return False
         return bool(self.api_key_for(self.llm_provider))
+
+
+class ModelChoice(BaseModel):
+    """One model a user may pick, and what picking it means for this app."""
+
+    id: str
+    label: str
+    provider: Provider
+    #: Drives the chat's token budget (`app/agent/budget.py`), so it has to be
+    #: right per model rather than a single global guess.
+    context_window: int
+    #: §5.6 reads risk heatmaps and whiteboard photos. A model that cannot see
+    #: them does not fail — the extractor reports that it could not read the
+    #: image — but the user should know that before choosing.
+    vision: bool = True
+    note: str = ""
+
+
+#: The **only** place model IDs may appear (§21.10, enforced by a grep test over
+#: `app/**/*.py`). The picker fetches this over HTTP rather than hard-coding a
+#: list in JSX, so adding a model is a one-line change here and nowhere else.
+MODEL_CATALOGUE: list[ModelChoice] = [
+    ModelChoice(
+        id="claude-opus-4-8", label="Claude Opus 4.8", provider="anthropic",
+        context_window=1_000_000, vision=True,
+        note="Most capable. Best on long, messy file sets.",
+    ),
+    ModelChoice(
+        id="claude-sonnet-5", label="Claude Sonnet 5", provider="anthropic",
+        context_window=1_000_000, vision=True,
+        note="Faster and cheaper; strong on most weekly reporting.",
+    ),
+    ModelChoice(
+        id="claude-haiku-4-5", label="Claude Haiku 4.5", provider="anthropic",
+        context_window=200_000, vision=True,
+        note="Cheapest. Good for classification, weaker on judgement.",
+    ),
+    ModelChoice(
+        id="gpt-4o", label="GPT-4o", provider="openai",
+        context_window=128_000, vision=True,
+        note="Cannot read scanned PDFs natively — those fall back to text.",
+    ),
+    ModelChoice(
+        id="gpt-4o-mini", label="GPT-4o mini", provider="openai",
+        context_window=128_000, vision=True,
+        note="Cheapest OpenAI option; weaker on conflicting sources.",
+    ),
+]
+
+
+def model_choice(model_id: Optional[str]) -> Optional[ModelChoice]:
+    return next((m for m in MODEL_CATALOGUE if m.id == model_id), None)
 
 
 settings = Settings()

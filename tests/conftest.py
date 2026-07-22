@@ -44,6 +44,33 @@ def sample_files():
 
 
 @pytest.fixture(autouse=True)
+def _no_live_provider(monkeypatch):
+    """The suite must never reach a real provider.
+
+    `Settings` reads `.env`, so a developer whose `.env` points at a working key
+    had the tests quietly making **real, paid API calls** — the run went from 6s
+    to 58s, three tests failed (`test_no_key_yields_null_client` asserts the
+    *absence* of a client), and results depended on someone's local file.
+
+    Individual tests still opt in to a fake with the `fake_vision` fixture, or
+    to a provider by monkeypatching `llm_provider` themselves; this only removes
+    the ambient one. Tests that genuinely need a live model do not belong here.
+    """
+    # The shared singleton most code reads.
+    monkeypatch.setattr("app.config.settings.llm_provider", "none")
+    monkeypatch.setattr("app.config.settings.anthropic_api_key", None)
+    monkeypatch.setattr("app.config.settings.openai_api_key", None)
+
+    # ...and the ambient environment, because a few tests construct their own
+    # `Settings()` to exercise the class. Without this the suite passes or fails
+    # depending on what happens to be exported in the developer's shell, which
+    # is the same class of problem as reading `.env` — just harder to notice.
+    for name in ("LLM_PROVIDER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                 "LLM_MODEL", "VISION_MODEL", "FAST_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _clean_llm_state():
     """No test inherits another's client or warning buffer."""
     llm.reset_client()

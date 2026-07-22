@@ -357,3 +357,11 @@ class PMIProject(BaseModel):
     overall_progress_percentage: Optional[float] = Field(default=None, ge=0, le=100)
     target_audience: Optional[str] = None
     source_files: list[str] = Field(default_factory=list)
+
+    #: §9: "The user should be able to override this rule." Stored *here*, on
+    #: the project, because trust in a source is a property of one engagement —
+    #: a client whose tracker is unreliable says nothing about anyone else's.
+    #: It used to be written into the settings singleton, which meant one
+    #: session's override silently changed how every other session resolved its
+    #: conflicts, for the life of the process.
+    source_priority: Optional[dict[str, int]] = None

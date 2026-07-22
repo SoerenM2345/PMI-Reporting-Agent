@@ -40,7 +40,10 @@ from app.models.pmi import (
     IntegrationType,
     PMIProject,
 )
-from app.storage import json_store
+from app.report import store as report_store
+from app.report.planner import plan as plan_report
+from app.report.render.markdown import render_markdown
+from app.storage import chat_store, json_store
 from app.storage.json_store import SessionAnalysis
 
 logging.basicConfig(
@@ -91,6 +94,11 @@ class GenerateRequest(BaseModel):
     session_id: str
     #: Generate anyway, with unresolved critical conflicts. Recorded in the outputs.
     force: bool = False
+    #: Render the approved content as something else — "powerpoint" | "word" |
+    #: "pdf" | "html" | "excel" | "chart". Omitted keeps whatever the original
+    #: request asked for. Re-rendering is cheap: the content is already planned,
+    #: so no LLM call and no extraction happens, and the wording cannot change.
+    format: Optional[str] = None
 
 
 class ReportRequest(BaseModel):
@@ -141,11 +149,15 @@ def set_project(req: ProjectRequest) -> dict:
         closing_date=req.closing_date,
         integration_phase=req.integration_phase,
         integration_type=req.integration_type,
+        # §9's override lives on the project, not on the settings singleton.
+        # Writing it to settings made one session's judgement about which files
+        # to trust silently govern how every other session in the process
+        # resolved its conflicts — and it persisted until restart.
+        source_priority=req.source_priority,
     )
     json_store.save_project(req.session_id, project)
 
     if req.source_priority:
-        get_settings().source_priority = req.source_priority
         log.info("source priority overridden for %s: %s",
                  req.session_id, req.source_priority)
 
@@ -291,10 +303,23 @@ def generate(req: GenerateRequest) -> dict:
             },
         )
 
+    # Render the version the user read and approved, when there is one. Falls
+    # back to planning fresh, so a caller that never opens the preview behaves
+    # exactly as it did before this existed.
+    approved = report_store.load(req.session_id)
+    if approved is not None and report_store.is_stale(
+        approved, analysis.data_model, analysis.quality_report
+    ):
+        # The analysis moved after this was planned — almost always because a
+        # conflict was resolved. Rendering it would state the figure the user
+        # has since corrected, so it is discarded rather than trusted.
+        log.info("stored content for %s is stale; re-planning", req.session_id)
+        approved = None
+
     state: AgentState = {
         "session_id": req.session_id,
         "request_text": analysis.request_text,
-        "output_type": analysis.output_type,
+        "output_type": req.format or analysis.output_type,
         "topic": analysis.topic,
         "audience": analysis.audience,
         "data_model": analysis.data_model,
@@ -302,6 +327,7 @@ def generate(req: GenerateRequest) -> dict:
         "errors": analysis.errors,
         "warnings": analysis.warnings,
         "conflict_strategy": "hybrid",
+        "report_content": approved,
     }
     result = run_generation(state)
 
@@ -309,6 +335,7 @@ def generate(req: GenerateRequest) -> dict:
     meta.setdefault("runs", []).append({
         "request": analysis.request_text,
         "audience": _audience_str(analysis.audience),
+        "content_version": approved.version if approved else None,
         "outputs": outputs,
         "forced": bool(blocking and req.force),
     })
@@ -323,6 +350,373 @@ def generate(req: GenerateRequest) -> dict:
             c.conflict_id for c in blocking
         ] if blocking else [],
         "errors": result.get("errors", []),
+    }
+
+
+# ============================================================ report content
+# The §4 loop this enables: plan -> read it as text -> revise -> render. The
+# expensive half (extraction, vision) already happened during analysis and is
+# never repeated here, so a user can iterate on wording for free.
+def _content_payload(content, analysis, *, stale: bool = False) -> dict:
+    return {
+        "version": content.version,
+        "stale": stale,
+        "audience": _audience_str(content.audience),
+        "markdown": render_markdown(content),
+        "sections": [
+            {
+                "section_id": s.section_id,
+                "label": s.label,
+                "headline": s.headline,
+                "origin": s.origin,
+                "block_kinds": [b.kind for b in s.blocks],
+                "empty_explanation": s.empty_explanation,
+            }
+            for s in content.narrative()
+        ],
+        "warnings": content.warnings,
+    }
+
+
+@app.post("/api/content/{session_id}")
+def plan_content_route(session_id: str) -> dict:
+    """Plan (or re-plan) the report and store it as a new version."""
+    analysis = _analysis_or_404(session_id)
+    model, quality = analysis.data_model, analysis.quality_report
+
+    bullets: list[str] = []
+    existing = report_store.load(session_id)
+    if existing is not None:
+        # Keep the prose we already paid for; only the structure is re-derived.
+        section = existing.section("summary.executive")
+        if section and section.blocks:
+            bullets = [item.text for item in section.blocks[0].items]
+
+    content = plan_report(
+        model, analysis.audience or Audience.PMO,
+        session_id=session_id,
+        topic=analysis.topic,
+        bullets=bullets,
+        quality=quality,
+        fingerprint=report_store.fingerprint(model, quality),
+    )
+    stored = report_store.save(content)
+    return _content_payload(stored, analysis)
+
+
+@app.get("/api/content/{session_id}")
+def get_content(session_id: str, version: Optional[int] = None) -> dict:
+    """The current plan as text. 404 when nothing has been planned yet."""
+    analysis = _analysis_or_404(session_id)
+    content = report_store.load(session_id, version)
+    if content is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "no_content",
+                    "message": "Nothing has been planned for this session yet. "
+                               "POST to this path to plan it."},
+        )
+
+    stale = report_store.is_stale(
+        content, analysis.data_model, analysis.quality_report
+    )
+    return _content_payload(content, analysis, stale=stale)
+
+
+@app.get("/api/content/{session_id}/versions")
+def list_content_versions(session_id: str) -> dict:
+    _analysis_or_404(session_id)
+    return {"versions": [v.model_dump(mode="json")
+                         for v in report_store.versions(session_id)]}
+
+
+@app.post("/api/content/{session_id}/revert")
+def revert_content(session_id: str, version: int) -> dict:
+    """Restore an earlier version by appending it again — nothing is erased."""
+    analysis = _analysis_or_404(session_id)
+    restored = report_store.revert(session_id, version)
+    if restored is None:
+        raise HTTPException(status_code=404,
+                            detail={"error": "no_such_version",
+                                    "message": f"No version {version}."})
+    stale = report_store.is_stale(
+        restored, analysis.data_model, analysis.quality_report
+    )
+    return _content_payload(restored, analysis, stale=stale)
+
+
+@app.get("/api/models")
+def list_models() -> dict:
+    """What the picker offers, and which options are actually usable.
+
+    Served rather than hard-coded in the frontend because §21.10 confines model
+    IDs to `config.py`; a list in JSX would put them somewhere the grep test
+    cannot see and could drift from what the backend accepts.
+    """
+    from app.config import MODEL_CATALOGUE
+
+    settings = get_settings()
+    configured = {
+        provider: bool(settings.api_key_for(provider))
+        for provider in ("anthropic", "openai")
+    }
+
+    return {
+        "models": [
+            {**choice.model_dump(), "available": configured.get(choice.provider, False)}
+            for choice in MODEL_CATALOGUE
+        ],
+        "providers": configured,
+        "default": {"provider": settings.llm_provider, "model": settings.llm_model},
+        # With no key at all the app still runs end to end on the deterministic
+        # path; the picker should say so rather than looking broken.
+        "keyless": not settings.llm_configured(),
+    }
+
+
+# ==================================================================== chats
+# A chat owns a session id; uploads, analysis and outputs keep living exactly
+# where they did. That keeps the expensive artefacts out of the conversation's
+# failure domain, and lets every route above keep working untouched.
+class NewChatRequest(BaseModel):
+    title: str = "New chat"
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+class PatchChatRequest(BaseModel):
+    title: Optional[str] = None
+    archived: Optional[bool] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ChatMessageRequest(BaseModel):
+    text: str
+
+
+def _chat_or_404(chat_id: str):
+    chat = chat_store.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail={"error": "no_such_chat"})
+    return chat
+
+
+@app.post("/api/chats")
+def create_chat(req: NewChatRequest) -> dict:
+    """A chat and its session are created together — one conversation, one
+    working set of files."""
+    session_id = json_store.new_session()
+    chat = chat_store.create_chat(session_id, req.title,
+                                  provider=req.provider, model=req.model)
+    return {"chat": chat.model_dump(), "session_id": session_id}
+
+
+@app.get("/api/chats")
+def list_chats(include_archived: bool = False) -> dict:
+    return {"chats": [c.model_dump()
+                      for c in chat_store.list_chats(include_archived=include_archived)]}
+
+
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: str) -> dict:
+    """The whole transcript, for reopening a chat from the sidebar."""
+    from app.agent import budget
+
+    chat = _chat_or_404(chat_id)
+    return {
+        "chat": chat.model_dump(),
+        # Compacted turns are included: the user can still read what was said,
+        # even though a model no longer receives it.
+        "messages": [m.model_dump() for m in chat_store.list_messages(chat_id)],
+        "usage": budget.usage(chat),
+    }
+
+
+@app.patch("/api/chats/{chat_id}")
+def patch_chat(chat_id: str, req: PatchChatRequest) -> dict:
+    chat = _chat_or_404(chat_id)
+    if req.title is not None:
+        chat = chat_store.rename_chat(chat_id, req.title)
+    if req.archived is not None:
+        chat = chat_store.archive_chat(chat_id, req.archived)
+    if req.provider is not None or req.model is not None:
+        chat = chat_store.set_model(chat_id, provider=req.provider, model=req.model)
+    return {"chat": chat.model_dump()}
+
+
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str) -> dict:
+    """Deletes the conversation only.
+
+    Uploads, the analysis and any generated files survive. Discarding an
+    extraction — which cost real money in vision calls — because someone tidied
+    their sidebar would be a far bigger consequence than "delete chat" implies.
+    """
+    _chat_or_404(chat_id)
+    return {"deleted": chat_store.delete_chat(chat_id)}
+
+
+@app.post("/api/chats/{chat_id}/messages")
+def post_chat_message(chat_id: str, req: ChatMessageRequest) -> dict:
+    """One conversational turn: record what the user said, act, reply."""
+    from app.agent.conversation import respond
+
+    chat = _chat_or_404(chat_id)
+    user_message = chat_store.add_message(chat_id, "user", {"text": req.text})
+    replies = respond(chat, req.text)
+
+    stored = [
+        chat_store.add_message(chat_id, "agent", reply.content, kind=reply.kind)
+        for reply in replies
+    ]
+
+    # Keep the conversation inside the chosen model's window. Done after the
+    # turn rather than before it, so the reply the user is waiting for is never
+    # delayed by housekeeping.
+    from app.agent import budget
+
+    refreshed = chat_store.get_chat(chat_id)
+    compaction = budget.compact(refreshed) if budget.should_compact(refreshed) else None
+
+    return {
+        "messages": (
+            [user_message.model_dump()]
+            + [m.model_dump() for m in stored]
+            + ([compaction.model_dump()] if compaction else [])
+        ),
+        "chat": chat_store.get_chat(chat_id).model_dump(),
+        "usage": budget.usage(chat_store.get_chat(chat_id)),
+    }
+
+
+class ReviseRequest(BaseModel):
+    instruction: str
+
+
+@app.post("/api/content/{session_id}/revise")
+def revise_content(session_id: str, req: ReviseRequest) -> dict:
+    """"Add a slide about the TSA", "put risks first", "drop the dependencies".
+
+    A successful revision becomes a new version; the previous one stays on disk.
+    Nothing is dropped silently — anything refused comes back with the reason,
+    so the user learns the figure they asked for is not one the report holds.
+    """
+    from app.report.revise import revise
+
+    analysis = _analysis_or_404(session_id)
+    content = report_store.load(session_id)
+    if content is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "no_content",
+                    "message": "Plan the report before revising it."},
+        )
+
+    result, warnings = revise(content, req.instruction)
+
+    if result.content is None:
+        # Refusing is a real outcome, not an error: the instruction was not
+        # understood, or every op it implied was rejected. 200 with the reasons
+        # beats a 4xx the UI has to translate.
+        return {
+            "changed": False,
+            "version": content.version,
+            "applied": [],
+            "rejected": [r.model_dump() for r in result.rejected],
+            "warnings": warnings,
+            "markdown": render_markdown(content),
+        }
+
+    stored = report_store.save(result.content)
+    payload = _content_payload(stored, analysis)
+    payload.update({
+        "changed": True,
+        "applied": result.applied,
+        "rejected": [r.model_dump() for r in result.rejected],
+        "warnings": warnings,
+    })
+    return payload
+
+
+class FillIssueRequest(BaseModel):
+    issue_id: str
+    value: str
+
+
+@app.get("/api/issues/{session_id}")
+def list_issues(session_id: str) -> dict:
+    """The §8.2-8.4 findings, individually — not just a count.
+
+    Conflicts already had a UI; these did not, so the one category of finding a
+    person can actually answer was the one they could not see.
+    """
+    from app.agent.corrections import fillable
+
+    analysis = _analysis_or_404(session_id)
+    issues = analysis.data_model.validation_issues
+    answerable = {i.issue_id for i in fillable(issues)}
+
+    return {
+        "issues": [
+            {
+                **issue.model_dump(mode="json"),
+                # Whether *this user* can do anything about it. A recomputed
+                # arithmetic error is already fixed; a blank due date is not.
+                "fillable": issue.issue_id in answerable,
+            }
+            for issue in issues
+        ],
+        "fillable_count": len(answerable),
+    }
+
+
+@app.post("/api/issues/{session_id}/fill")
+def fill_issue(session_id: str, req: FillIssueRequest) -> dict:
+    """Supply a value the files never contained.
+
+    Re-runs the checks and re-scores afterwards, because a gap the user has just
+    closed must stop being reported — a quality score that ignores the fix is
+    worse than no score. Any drafted report is left stale by the fingerprint
+    change and gets re-planned before it is rendered.
+    """
+    from app.agent.consistency import run_checks
+    from app.agent.corrections import apply_correction
+    from app.agent.data_quality import build_report
+
+    analysis = _analysis_or_404(session_id)
+    model = analysis.data_model
+
+    issue = next(
+        (i for i in model.validation_issues if i.issue_id == req.issue_id), None
+    )
+    if issue is None:
+        raise HTTPException(status_code=404,
+                            detail={"error": "no_such_issue"})
+
+    result = apply_correction(model, issue, req.value)
+    if not result.applied:
+        # A rejected value is a normal outcome, not an error: the user typed
+        # something the field cannot hold and needs to be told what to type.
+        return {"applied": False, "message": result.message,
+                "issue_id": req.issue_id}
+
+    results = run_checks(model)
+    model.conflicts = results.conflicts
+    model.validation_issues = results.issues
+    analysis.quality_report = build_report(
+        model,
+        failed_files=_failed(analysis.errors),
+        warnings=analysis.warnings,
+    )
+    json_store.save_analysis(analysis)
+
+    return {
+        "applied": True,
+        "message": result.message,
+        "issue_id": req.issue_id,
+        "remaining": len(model.validation_issues),
+        "quality_score": analysis.quality_report.score,
     }
 
 

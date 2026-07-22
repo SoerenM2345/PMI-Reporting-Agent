@@ -28,6 +28,7 @@ def resolve_conflicts(
     conflicts: list[Conflict],
     strategy: Optional[str] = None,
     user_choices: Optional[dict[str, Any]] = None,
+    priority_override: Optional[dict[str, int]] = None,
 ) -> list[Conflict]:
     """Apply §9. `strategy` is "ask" | "priority" | "hybrid"; omit to use the config.
 
@@ -38,7 +39,7 @@ def resolve_conflicts(
     """
     strategy = strategy or MODE_TO_STRATEGY.get(get_settings().conflict_mode, "hybrid")
     choices = user_choices or {}
-    priority = source_priority()
+    priority = source_priority(priority_override)
 
     for conflict in conflicts:
         decision = choices.get(conflict.conflict_id)

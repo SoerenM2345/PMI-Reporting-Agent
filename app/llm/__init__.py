@@ -22,36 +22,45 @@ from app.llm.base import (
 
 log = logging.getLogger("pmi.llm")
 
-_client: LLMClient | None = None
+#: An explicit override wins over everything — this is how tests inject a fake.
+_override: LLMClient | None = None
+#: Otherwise one client per provider. Keyed rather than singular because a chat
+#: may choose its own provider, and a single global would mean the last chat to
+#: be opened silently decided which backend every other chat used.
+_clients: dict[str, LLMClient] = {}
 
 
-def get_client() -> LLMClient:
-    global _client
-    if _client is None:
-        _client = _build_client()
-    return _client
+def get_client(provider: str | None = None) -> LLMClient:
+    if _override is not None:
+        return _override
+
+    provider = provider or get_settings().llm_provider
+    if provider not in _clients:
+        _clients[provider] = _build_client(provider)
+    return _clients[provider]
 
 
 def set_client(client: LLMClient | None) -> None:
     """Inject a client (tests) or force a rebuild on the next call (`None`)."""
-    global _client
-    _client = client
+    global _override
+    _override = client
+    if client is None:
+        _clients.clear()
 
 
 def reset_client() -> None:
     set_client(None)
 
 
-def llm_available() -> bool:
+def llm_available(provider: str | None = None) -> bool:
     """True when a real provider is wired up (i.e. not the NullClient)."""
-    return get_client().name != "none"
+    return get_client(provider).name != "none"
 
 
-def _build_client() -> LLMClient:
+def _build_client(provider: str) -> LLMClient:
     from app.llm.null_client import NullClient
 
     settings = get_settings()
-    provider = settings.llm_provider
 
     if provider == "none":
         return NullClient("LLM_PROVIDER=none")

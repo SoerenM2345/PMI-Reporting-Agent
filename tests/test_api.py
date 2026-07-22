@@ -244,3 +244,65 @@ def test_project_metadata_enables_the_checks_that_depend_on_it(client, session):
     body = client.get(f"/api/session/{session}").json()
     assert body["project"]["project_name"] == "Project Aurora"
     assert body["project"]["day_1_date"] == "2026-06-15"
+
+
+def test_one_sessions_trust_override_does_not_leak_into_another(client, sample_files):
+    """§9 lets a user say "this client's tracker is unreliable". That judgement
+    belongs to one engagement.
+
+    It used to be written into the settings singleton, so the next session in
+    the same process resolved its conflicts by someone else's ranking — and kept
+    doing so until restart. The override now lives on the project.
+    """
+    from app.config import get_settings
+    from app.storage import json_store
+
+    before = dict(get_settings().source_priority)
+
+    first = client.post("/api/session").json()["session_id"]
+    client.post("/api/project", json={
+        "session_id": first,
+        "project_name": "Distrusts its tracker",
+        "source_priority": {"excel": 5, "image": 1},
+    })
+
+    # The process-wide default is untouched...
+    assert get_settings().source_priority == before
+
+    # ...the override is persisted against the project that asked for it...
+    assert json_store.load_project(first).source_priority == {"excel": 5, "image": 1}
+
+    # ...and a second session gets the defaults, not the first one's ranking.
+    second = client.post("/api/session").json()["session_id"]
+    client.post("/api/project", json={"session_id": second,
+                                      "project_name": "Unrelated"})
+    assert json_store.load_project(second).source_priority is None
+
+
+def test_a_project_override_actually_changes_how_conflicts_resolve():
+    """Otherwise the field is decoration."""
+    from app.agent.consistency import resolve_conflicts
+    from app.extractors.base import make_source
+    from app.models.pmi import Conflict, ConflictEvidence, Severity, SourceFormat
+
+    def evidence(name, fmt, value):
+        return ConflictEvidence(
+            source_reference=make_source(name, fmt), value=value
+        )
+
+    def conflict():
+        return Conflict(
+            check_id="PMI-002", entity_type="kpi", entity_key="Overall Progress",
+            field="value", severity=Severity.LOW,
+            evidence=[evidence("tracker.xlsx", SourceFormat.EXCEL, "82"),
+                      evidence("dashboard.png", SourceFormat.IMAGE, "75")],
+        )
+
+    # Default ranking trusts the spreadsheet over the screenshot.
+    assert resolve_conflicts([conflict()], strategy="priority")[0].resolved_value == "82"
+
+    # A project that distrusts its own tracker flips that, without touching
+    # anyone else's ranking.
+    flipped = resolve_conflicts([conflict()], strategy="priority",
+                                priority_override={"excel": 5, "image": 1})
+    assert flipped[0].resolved_value == "75"

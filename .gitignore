@@ -7,6 +7,7 @@ htmlcov/
 
 # environments
 .env
+.env.bak
 venv/
 .venv/
 
@@ -17,6 +18,7 @@ storage_data/
 # frontend build artefacts — the Docker image builds these itself
 frontend/node_modules/
 frontend/dist/
+frontend/CLAUDE.md
 
 CLAUDE.md
 

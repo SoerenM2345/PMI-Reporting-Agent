@@ -158,6 +158,7 @@ def resolve(state: AgentState) -> AgentState:
         model.conflicts,
         strategy=state.get("conflict_strategy"),
         user_choices=state.get("user_conflict_choices"),
+        priority_override=getattr(state.get("project"), "source_priority", None),
     )
     model = apply_resolutions(model)
 
@@ -173,21 +174,110 @@ def resolve(state: AgentState) -> AgentState:
 
 
 # ========================================================== generation nodes
+def plan_content(state: AgentState) -> AgentState:
+    """§10.25 `plan_pmi_report`, now an explicit step with a durable result.
+
+    Decides what the report *says* — sections, titles, which rows — before
+    anything is drawn. Split out for three reasons: the user can read and
+    approve it as text first; re-rendering into a second format reuses it
+    instead of re-rolling the summary prose; and a revision ("add a slide about
+    the TSA") edits this rather than re-running extraction.
+
+    An approved version passed in by the API wins. Otherwise we plan fresh, so
+    callers that never touch the preview behave exactly as they did before.
+    """
+    from app.report import store
+    from app.report.planner import plan
+
+    approved = state.get("report_content")
+    if approved is not None:
+        return {"report_content": approved,
+                "summary_bullets": _summary_bullets(approved)}
+
+    model = state["data_model"]
+    audience = state.get("audience") or Audience.PMO
+    report = state.get("quality_report")
+
+    bullets = tasks.write_summary(model, audience, state.get("request_text", ""))
+    content = plan(
+        model, audience,
+        session_id=state.get("session_id", ""),
+        topic=state.get("topic", "status"),
+        bullets=bullets,
+        quality=report,
+        fingerprint=store.fingerprint(model, report),
+    )
+    return {
+        "report_content": content,
+        "summary_bullets": bullets,
+        "warnings": list(state.get("warnings", [])) + tasks.drain_warnings(),
+    }
+
+
+def _render_document(output_type: str, content, out_dir: Path) -> Path:
+    """Word, PDF and HTML all read the same approved `ReportContent`."""
+    from datetime import date as _date
+
+    if content is None:
+        raise ValueError(
+            f"{output_type} output needs planned content; plan_content did not run"
+        )
+
+    if output_type == "word":
+        from app.report.render import docx as renderer
+
+        return renderer.render(content, out_dir)
+
+    if output_type == "pdf":
+        from app.report.render import pdf as renderer
+
+        return renderer.render(content, out_dir)
+
+    from app.report.render.html import render_html
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / (
+        f"PMI_Report_{content.audience.value}_{_date.today().isoformat()}.html"
+    )
+    path.write_text(render_html(content), encoding="utf-8")
+    return path
+
+
+def _summary_bullets(content) -> list[str]:
+    """Keep `/api/generate`'s response shape identical whichever path ran."""
+    section = content.section("summary.executive")
+    if section is None or not section.blocks:
+        return []
+    return [item.text for item in section.blocks[0].items]
+
+
 def generate_output(state: AgentState) -> AgentState:
-    """§10.24-31: the deliverable, plus the two reports the spec always requires."""
+    """§10.24-31: the deliverable, plus the two reports the spec always requires.
+
+    Makes no LLM call: the prose was written during `plan_content`. Generation
+    is therefore deterministic and free, and rendering the same approved content
+    into a second format cannot change a word of it.
+    """
     model = state["data_model"]
     audience = state.get("audience") or Audience.PMO
     out_dir = _out_dir(state)
 
-    bullets = tasks.write_summary(model, audience, state.get("request_text", ""))
+    content = state.get("report_content")
+    bullets = state.get("summary_bullets") or []
     output_type = state.get("output_type", "powerpoint")
     report = state.get("quality_report")
     files: list[str] = []
 
     if output_type == "powerpoint":
         files.append(str(
+            pptx_report.generate_from_content(content, out_dir, model)
+            if content is not None else
             pptx_report.generate(model, audience, bullets, out_dir, quality=report)
         ))
+    elif output_type in ("word", "pdf", "html"):
+        # These render straight from the approved content, so the document, the
+        # PDF and the web page state exactly what the user read in the preview.
+        files.append(str(_render_document(output_type, content, out_dir)))
     elif output_type == "excel":
         files.append(str(
             xlsx_dashboard.generate(model, audience, bullets, out_dir, quality=report)
@@ -249,8 +339,20 @@ def _open_check(path: Path) -> None:
 
         with Image.open(path) as image:
             image.verify()
-    elif suffix == ".md":
-        path.read_text(encoding="utf-8")
+    elif suffix == ".docx":
+        from docx import Document
+
+        Document(str(path))
+    elif suffix == ".pdf":
+        import fitz                       # PyMuPDF, already a dependency
+
+        with fitz.open(str(path)) as document:
+            if document.page_count == 0:
+                raise ValueError("PDF has no pages")
+    elif suffix in (".md", ".html", ".htm"):
+        text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            raise ValueError("file is empty")
     else:
         if path.stat().st_size == 0:
             raise ValueError("file is empty")
@@ -281,8 +383,10 @@ def _analysis_nodes(g: StateGraph) -> None:
 
 
 def _generation_nodes(g: StateGraph) -> None:
+    g.add_node("plan_content", plan_content)
     g.add_node("generate_output", generate_output)
     g.add_node("verify_outputs", verify_outputs)
+    g.add_edge("plan_content", "generate_output")
     g.add_edge("generate_output", "verify_outputs")
     g.add_edge("verify_outputs", END)
 
@@ -301,7 +405,7 @@ def build_generation_graph():
     g.add_node("apply_user_resolutions", resolve)
     g.set_entry_point("apply_user_resolutions")
     _generation_nodes(g)
-    g.add_edge("apply_user_resolutions", "generate_output")
+    g.add_edge("apply_user_resolutions", "plan_content")
     return g.compile()
 
 
@@ -310,7 +414,7 @@ def build_graph():
     g = StateGraph(AgentState)
     _analysis_nodes(g)
     _generation_nodes(g)
-    g.add_edge("resolve_conflicts", "generate_output")
+    g.add_edge("resolve_conflicts", "plan_content")
     return g.compile()
 
 

@@ -1,0 +1,14 @@
+# Test-only dependencies.
+#
+# Split out of requirements.txt so they do not ship in the production image:
+# a container that carries a test runner carries code nobody audited for
+# running in production, and it is dead weight in an image meant to be
+# handed to a client.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest>=8.0
+pytest-cov>=5.0
+httpx>=0.27

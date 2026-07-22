@@ -14,7 +14,10 @@ from pydantic import BaseModel, Field
 
 from app.models.pmi import Audience
 
-OutputType = Literal["powerpoint", "excel", "chart"]
+#: `word`, `pdf` and `html` render from the approved `ReportContent`, so they
+#: say exactly what the user read in the preview. `excel` remains a data dump of
+#: every sheet (§13) rather than an audience-shaped narrative.
+OutputType = Literal["powerpoint", "excel", "chart", "word", "pdf", "html"]
 
 
 class RequestParse(BaseModel):

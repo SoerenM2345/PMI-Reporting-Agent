@@ -24,14 +24,14 @@ class SourceFormat(str, Enum):
     IMAGE = "image"
 
 
-def source_priority() -> dict[SourceFormat, int]:
+def source_priority(override: "dict[str, int] | None" = None) -> dict[SourceFormat, int]:
     """Trust ranking for conflict resolution (§9). Lower = more trusted.
 
     Read from settings on every call so a project-specific override takes effect
     without a reimport. Images rank last: a value read out of a screenshot or a
     photo of a whiteboard is less reliable than one read from the tracker itself.
     """
-    configured = get_settings().source_priority
+    configured = override or get_settings().source_priority
     return {fmt: configured.get(fmt.value, 99) for fmt in SourceFormat}
 
 

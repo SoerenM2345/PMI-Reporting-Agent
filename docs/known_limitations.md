@@ -80,20 +80,30 @@ This is a prototype, and the storage layer says so.
 - Everything is in-process and synchronous. A 50-file session with vision extraction on
   every screenshot will block the request thread for minutes.
 
-## Not yet verified
+## Verification status
 
 Stated plainly, because an unverified claim in a limitations document defeats the point
 of the document.
 
-- **The Docker build has not been run.** Docker was not available on the development
-  machine. The `Dockerfile` and `docker-compose.yml` are written and reviewed, and the
-  application they wrap is verified working (uvicorn + the built React bundle, driven end
-  to end), but `docker compose up` itself is untested. Run it before demoing.
+- ~~The Docker build has not been run.~~ **Resolved.** The image now builds and has
+  been driven end to end inside the container: the React bundle is served, files upload,
+  analysis runs, the text preview is returned, and a PDF is generated (so `fpdf2`
+  installs correctly from `requirements.txt`). `chats.db` is written inside
+  `/app/storage_data`, which `docker-compose.yml` already bind-mounts, so chats survive
+  a restart with no compose change.
+
+  The image also runs as a **non-root** user (`pmi`, uid 10001) and no longer ships the
+  test runner — `requirements-dev.txt` carries `pytest`/`pytest-cov`/`httpx`. Verified in
+  the container: correct uid, `pytest` absent, `/app/storage_data` writable, the full
+  upload → analyse → preview → PDF flow working, and chats surviving a `docker restart`.
 - **The live vision path has not been run against a real model.** See "Testing" below.
 
 ## Testing
 
-136 tests, all passing, running with **no API key**. Coverage: 88%.
+288 tests, all passing, running with **no API key** — enforced rather than assumed:
+`conftest.py::_no_live_provider` forces `LLM_PROVIDER=none` and strips the provider env
+vars, so the result does not depend on a developer's `.env` or shell. Before that fixture
+existed the suite silently made real, paid API calls whenever `.env` named a working key.
 
 The two provider clients (`app/llm/anthropic_client.py`, `app/llm/openai_client.py`) show
 0% coverage. They only execute when a real key is present, and mocking the SDK to hit

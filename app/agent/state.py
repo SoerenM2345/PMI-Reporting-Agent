@@ -6,6 +6,7 @@ from typing import Optional, TypedDict
 from typing import Any
 
 from app.models.pmi import Audience, DataQualityReport, PMIDataModel, PMIProject
+from app.report.content import ReportContent
 
 
 class AgentState(TypedDict, total=False):
@@ -31,6 +32,10 @@ class AgentState(TypedDict, total=False):
     # steps 5-6
     quality_report: Optional[DataQualityReport]
     # step 7
+    #: What the report says, before anything draws it. Set by `plan_content`;
+    #: when the API passes one in, it is a version the user has already read and
+    #: approved, so the planner is skipped rather than second-guessing them.
+    report_content: Optional[ReportContent]
     summary_bullets: list[str]
     output_files: list[str]
     #: Hard failures — a file that could not be read at all.

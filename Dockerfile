@@ -32,7 +32,15 @@ ENV PYTHONUNBUFFERED=1 \
     OUTPUT_DIR=/app/output \
     FRONTEND_DIST=/app/frontend/dist
 
-RUN mkdir -p /app/storage_data /app/output
+# Run as a normal user. This process parses files it was handed by someone else
+# — spreadsheets, PDFs, images — through half a dozen third-party parsers, which
+# is precisely the surface where a malformed input turns into code execution.
+# Root inside the container is root on a bind-mounted host directory.
+RUN useradd --create-home --uid 10001 pmi \
+    && mkdir -p /app/storage_data /app/output \
+    && chown -R pmi:pmi /app
+
+USER pmi
 
 EXPOSE 8000
 
