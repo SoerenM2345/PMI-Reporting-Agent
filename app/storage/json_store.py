@@ -1,35 +1,127 @@
-"""Local JSON session storage (PDF spec: 'Storage (Prototype): Local JSON')."""
+"""Local JSON session storage (spec §15: "Storage (Prototype): Local project
+directories, JSON").
+
+Holds the analysis result between the analyze and generate calls. That persistence is
+the whole reason the human-in-the-loop round trip is affordable: without it, every
+conflict the user resolves would re-run extraction — and since §5.6 landed, that means
+re-paying for a vision call and re-rolling the dice on what the model saw.
+"""
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
+from typing import Optional
 
-BASE = Path(__file__).resolve().parents[2] / "storage_data"
+from pydantic import BaseModel, Field
+
+from app.config import get_settings
+from app.models.pmi import (
+    Audience,
+    Conflict,
+    DataQualityReport,
+    PMIDataModel,
+    PMIProject,
+)
+
+log = logging.getLogger("pmi.storage")
 
 
+class SessionAnalysis(BaseModel):
+    """Everything analysis produced. Written once, read by every later call."""
+
+    session_id: str
+    request_text: str = ""
+    output_type: str = "powerpoint"
+    topic: str = "status"
+    audience: Optional[Audience] = None
+    needs_audience: bool = False
+
+    data_model: PMIDataModel = Field(default_factory=PMIDataModel)
+    quality_report: Optional[DataQualityReport] = None
+
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def conflicts(self) -> list[Conflict]:
+        return self.data_model.conflicts
+
+
+def _base() -> Path:
+    return get_settings().storage_dir
+
+
+# ------------------------------------------------------------------- sessions
 def new_session() -> str:
-    sid = uuid.uuid4().hex[:12]
-    (BASE / sid / "uploads").mkdir(parents=True, exist_ok=True)
-    save_meta(sid, {"session_id": sid, "files": [], "runs": []})
-    return sid
+    session_id = uuid.uuid4().hex[:12]
+    uploads_dir(session_id).mkdir(parents=True, exist_ok=True)
+    save_meta(session_id, {"session_id": session_id, "files": [], "runs": []})
+    return session_id
 
 
-def session_dir(sid: str) -> Path:
-    return BASE / sid
+def session_dir(session_id: str) -> Path:
+    return _base() / session_id
 
 
-def uploads_dir(sid: str) -> Path:
-    return BASE / sid / "uploads"
+def uploads_dir(session_id: str) -> Path:
+    return session_dir(session_id) / "uploads"
 
 
-def save_meta(sid: str, meta: dict) -> None:
-    (BASE / sid).mkdir(parents=True, exist_ok=True)
-    (BASE / sid / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
+def exists(session_id: str) -> bool:
+    return session_dir(session_id).is_dir()
 
 
-def load_meta(sid: str) -> dict | None:
-    p = BASE / sid / "meta.json"
-    if not p.exists():
+# ----------------------------------------------------------------- metadata
+def save_meta(session_id: str, meta: dict) -> None:
+    directory = session_dir(session_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "meta.json").write_text(
+        json.dumps(meta, indent=2, default=str), encoding="utf-8"
+    )
+
+
+def load_meta(session_id: str) -> Optional[dict]:
+    path = session_dir(session_id) / "meta.json"
+    if not path.is_file():
         return None
-    return json.loads(p.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ------------------------------------------------------------------- project
+def save_project(session_id: str, project: PMIProject) -> None:
+    (session_dir(session_id) / "project.json").write_text(
+        project.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+
+def load_project(session_id: str) -> Optional[PMIProject]:
+    path = session_dir(session_id) / "project.json"
+    if not path.is_file():
+        return None
+    return PMIProject.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+# ------------------------------------------------------------------ analysis
+def save_analysis(analysis: SessionAnalysis) -> None:
+    path = session_dir(analysis.session_id) / "analysis.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(analysis.model_dump_json(indent=2), encoding="utf-8")
+    log.info("saved analysis for %s (%d entities, %d conflicts)",
+             analysis.session_id, analysis.data_model.entity_count(),
+             len(analysis.conflicts))
+
+
+def load_analysis(session_id: str) -> Optional[SessionAnalysis]:
+    path = session_dir(session_id) / "analysis.json"
+    if not path.is_file():
+        return None
+    try:
+        return SessionAnalysis.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        # A schema change between runs should not 500 the app — it should ask the user
+        # to re-analyze, which costs them a click rather than an incident.
+        log.warning("stored analysis for %s is unreadable (%s); re-analysis needed",
+                    session_id, exc)
+        return None

@@ -1,0 +1,78 @@
+{
+  "_comment": [
+    "Stored reading of data/samples/risk_dashboard.png (§20 step 2/6/8).",
+    "HAND-AUTHORED against the ImageExtraction schema — not yet captured from a live",
+    "model. Re-record with: ANTHROPIC_API_KEY=... python scripts/record_vision_fixture.py",
+    "The key fact for the acceptance scenario is R-NEW: a critical risk that exists in",
+    "NO other uploaded file, so it can only reach the deck via the image pipeline."
+  ],
+  "content_types": ["dashboard", "chart", "table"],
+  "legibility": "good",
+  "is_handwritten": false,
+  "is_cropped": false,
+  "items": [
+    {
+      "type": "risk",
+      "title": "Customer data migration may breach GDPR retention limits",
+      "fields": {
+        "owner": "Lisa Chen",
+        "probability": "4",
+        "impact": "5",
+        "workstream": "Data",
+        "status": "open",
+        "mitigation": "Legal review of retention policy scheduled",
+        "category": "Compliance"
+      },
+      "original_value": "GDPR retention breach risk on customer data migration — P4 / I5",
+      "region": {
+        "description": "red cell in the top-right of the risk matrix (Probability=High, Impact=Critical)",
+        "x": 612,
+        "y": 148,
+        "width": 96,
+        "height": 72
+      },
+      "model_confidence": 0.88
+    },
+    {
+      "type": "risk",
+      "title": "ERP cutover window conflicts with year-end close",
+      "fields": {
+        "owner": "Jonas Weber",
+        "probability": "3",
+        "impact": "4",
+        "workstream": "IT",
+        "status": "open"
+      },
+      "original_value": "ERP cutover vs year-end close — P3 / I4",
+      "region": {
+        "description": "amber cell, middle-right of the risk matrix",
+        "x": 520,
+        "y": 232,
+        "width": 96,
+        "height": 72
+      },
+      "model_confidence": 0.82
+    },
+    {
+      "type": "kpi",
+      "title": "Open Critical Risks",
+      "fields": {
+        "value": "2",
+        "unit": "count"
+      },
+      "original_value": "Open critical risks: 2",
+      "region": {
+        "description": "KPI tile, top-left of the dashboard",
+        "x": 48,
+        "y": 40,
+        "width": 180,
+        "height": 90
+      },
+      "model_confidence": 0.91
+    }
+  ],
+  "notes": [
+    "The legend distinguishes amber and red by shade only; two mid-matrix cells were ambiguous and were not reported.",
+    "A fourth row at the bottom of the matrix is partially obscured by a cursor and was not read."
+  ]
+}

@@ -1,200 +1,189 @@
-"""PowerPoint status report generator (python-pptx).
+"""PowerPoint generation (spec §12). python-pptx; the output is an editable .pptx.
 
-Styling follows the project's Deloitte deck conventions: white background,
-dark-green section headers, black title text, footer line.
-Slides: title, executive summary, task assignments per owner, milestones,
-risks, budget/KPIs (Finance), open conflicts.
+Four audience templates, because §12.1-12.4 are genuinely different documents:
+
+* **Steering Committee** (§12.1) — decision-oriented. Is it on track, what changed,
+  what needs you, what could hurt value. Concise.
+* **IMO / PMO** (§12.2) — operational. Scorecard, overdue work, dependencies, and
+  crucially "missing updates and data-quality gaps": who has not reported.
+* **Finance** (§12.3) — budget vs actual vs forecast, synergy target vs realized.
+* **Workstream** (§12.4) — one stream's objectives, blockers, and what it needs from
+  the others.
+
+§12.5's design rules are applied throughout, and two of them do real work:
+
+**"Use clear management-message titles."** A slide titled "Risks" tells a reader
+nothing. A slide titled "Two critical risks are unmitigated; both need an owner today"
+tells them what to do. Titles are written from the data, not from the section name.
+
+**"Mark data-quality limitations."** Every deck ends with a slide saying what this
+report could not do — files that failed, figures read off a screenshot, conflicts
+nobody resolved. That slide exists because the alternative is a deck that looks
+equally confident whether or not it is.
 """
 from __future__ import annotations
 
-from datetime import date
+import logging
 from pathlib import Path
+from typing import Optional
 
-from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.util import Emu, Inches, Pt
+from pptx.util import Inches, Pt
 
-from app.models.pmi import Audience, PMIDataModel
+from app.models.pmi import (
+    Audience,
+    DataQualityReport,
+    PMIDataModel,
+    Severity,
+    Status,
+)
+
+log = logging.getLogger("pmi.pptx")
 
 GREEN = RGBColor(0x2E, 0x7D, 0x32)
 DARK = RGBColor(0x1A, 0x1A, 0x1A)
 GREY = RGBColor(0x75, 0x75, 0x75)
 RED = RGBColor(0xC6, 0x28, 0x28)
 AMBER = RGBColor(0xF9, 0xA8, 0x25)
-FOOTER = "TUM Project Study x Deloitte 2026"
+WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+
+RAG = {
+    Severity.LOW: GREEN, Severity.MEDIUM: AMBER,
+    Severity.HIGH: RGBColor(0xEF, 0x6C, 0x00), Severity.CRITICAL: RED,
+}
+
+FOOTER = ("Prototype output — requires Senior Manager review before distribution "
+          "to stakeholders.")
 
 SLIDE_W = Inches(13.333)
 SLIDE_H = Inches(7.5)
+MARGIN = Inches(0.6)
 
 
-def generate(model: PMIDataModel, audience: Audience, bullets: list[str],
-             out_dir: Path) -> Path:
-    prs = Presentation()
-    prs.slide_width, prs.slide_height = SLIDE_W, SLIDE_H
+def generate(
+    model: PMIDataModel,
+    audience: Audience,
+    bullets: list[str],
+    out_dir: Path,
+    quality: Optional[DataQualityReport] = None,
+) -> Path:
+    """Plan the content, then render it.
 
-    _title_slide(prs, model, audience)
-    _summary_slide(prs, bullets)
-    _tasks_slides(prs, model)
-    if model.milestones:
-        _table_slide(prs, "Milestones",
-                     ["ID", "Milestone", "Due", "Status", "Owner"],
-                     [[m.id, m.title, str(m.due_date or "—"), m.status.value.replace("_", " "),
-                       m.owner or "—"] for m in model.milestones])
-    if model.risks:
-        _table_slide(prs, "Risks & Mitigations",
-                     ["ID", "Risk", "Severity", "Owner", "Mitigation"],
-                     [[r.id, r.title, r.severity.value, r.owner or "—",
-                       (r.mitigation or "—")[:80]] for r in model.risks])
-    if audience == Audience.FINANCE and model.budget:
-        _table_slide(prs, "Budget Overview",
-                     ["Category", "Planned (EUR)", "Actual (EUR)", "Δ"],
-                     [[b.category, _n(b.planned), _n(b.actual),
-                       _n((b.actual or 0) - (b.planned or 0))] for b in model.budget])
-    if model.kpis:
-        _table_slide(prs, "KPIs",
-                     ["KPI", "Value", "Unit", "Target", "Source"],
-                     [[k.name, _n(k.value), k.unit or "", _n(k.target),
-                       k.source.file_name] for k in model.kpis])
-    if model.conflicts:
-        _conflicts_slide(prs, model)
+    The signature is unchanged so every existing caller and test keeps working,
+    but the deck is no longer built by walking `PMIDataModel` — it is built from
+    a `ReportContent`, the same structure the text preview and the Word, PDF and
+    HTML renderers read. That is what lets a user see what a deck will say
+    before paying to generate it, and revise it without re-extracting anything.
+    """
+    from app.report.planner import plan
+    from app.report.render import pptx as renderer
 
-    out = out_dir / f"PMI_Status_Report_{audience.value}_{date.today().isoformat()}.pptx"
-    prs.save(str(out))
-    return out
+    content = plan(model, audience, bullets=bullets, quality=quality)
+    return renderer.render(content, out_dir, model)
 
 
-# ------------------------------------------------------------------ slide builders
-def _blank(prs: Presentation):
+def generate_from_content(content, out_dir: Path, model=None) -> Path:
+    """Render an already-planned (and possibly user-revised) report."""
+    from app.report.render import pptx as renderer
+
+    return renderer.render(content, out_dir, model)
+
+
+# ============================================================ slide primitives
+# Geometry, the RAG palette and the §12.5 footer. These are the only things left
+# here: what a slide *says* is decided in `app/report/planner.py` and assembled
+# by `app/report/render/pptx.py`, so that the deck, the document, the PDF and the
+# text preview cannot drift apart. Management-message titles moved to
+# `app/report/messages.py` for the same reason.
+
+
+def _table(prs, title: str, subtitle: str, headers: list[str],
+           rows: list[list[str]], note: str = "") -> None:
+    if not rows:
+        return
+
+    slide = _blank(prs)
+    _header(slide, title, subtitle)
+
+    shape = slide.shapes.add_table(
+        len(rows) + 1, len(headers),
+        MARGIN, Inches(1.85),
+        SLIDE_W - Inches(1.2), Inches(0.32) * (len(rows) + 1),
+    )
+    table = shape.table
+
+    for column, heading in enumerate(headers):
+        cell = table.cell(0, column)
+        cell.text = heading
+        for paragraph in cell.text_frame.paragraphs:
+            for run in paragraph.runs:
+                run.font.size = Pt(11)
+                run.font.bold = True
+                run.font.color.rgb = WHITE
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = GREEN
+
+    for r, row in enumerate(rows, start=1):
+        for c, value in enumerate(row):
+            cell = table.cell(r, c)
+            cell.text = str(value)
+            warn = str(value).startswith("⚠")
+            for paragraph in cell.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(10)
+                    run.font.color.rgb = RED if warn else DARK
+                    run.font.bold = warn
+
+    if note:
+        _text(slide, note, MARGIN, SLIDE_H - Inches(0.95), size=10, colour=GREY)
+
+    _footer(slide)
+
+
+def _tile(slide, label: str, value: str, colour, left, top) -> None:
+    box = slide.shapes.add_textbox(left, top, Inches(1.95), Inches(1.6))
+    frame = box.text_frame
+    frame.word_wrap = True
+
+    run = frame.paragraphs[0].add_run()
+    run.text = label
+    run.font.size = Pt(11)
+    run.font.color.rgb = GREY
+
+    paragraph = frame.add_paragraph()
+    run = paragraph.add_run()
+    run.text = value
+    run.font.size = Pt(28)
+    run.font.bold = True
+    run.font.color.rgb = colour
+
+
+def _blank(prs):
     return prs.slides.add_slide(prs.slide_layouts[6])
 
 
-def _header(slide, title: str, subtitle: str = ""):
-    box = slide.shapes.add_textbox(Inches(0.4), Inches(0.25), SLIDE_W - Inches(0.8), Inches(0.9))
-    tf = box.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    r = p.add_run(); r.text = title
-    r.font.size, r.font.bold, r.font.color.rgb = Pt(28), True, DARK
+def _header(slide, title: str, subtitle: str) -> None:
+    _text(slide, title, MARGIN, Inches(0.45), size=22, bold=True, colour=DARK,
+          width=SLIDE_W - Inches(1.2))
     if subtitle:
-        p2 = tf.add_paragraph()
-        r2 = p2.add_run(); r2.text = subtitle
-        r2.font.size, r2.font.color.rgb = Pt(14), GREY
-    _footer(slide)
+        _text(slide, subtitle, MARGIN, Inches(1.15), size=13, colour=GREEN)
 
 
-def _footer(slide):
-    box = slide.shapes.add_textbox(Inches(0.4), SLIDE_H - Inches(0.4),
-                                   Inches(6), Inches(0.3))
-    r = box.text_frame.paragraphs[0].add_run()
-    r.text = f"{FOOTER} · {date.today().strftime('%d.%m.%Y')}"
-    r.font.size, r.font.color.rgb = Pt(9), GREY
+def _footer(slide) -> None:
+    _text(slide, FOOTER, MARGIN, SLIDE_H - Inches(0.5), size=9, colour=GREY,
+          width=SLIDE_W - Inches(1.2))
 
 
-def _title_slide(prs, model: PMIDataModel, audience: Audience):
-    slide = _blank(prs)
-    box = slide.shapes.add_textbox(Inches(0.8), Inches(2.4), SLIDE_W - Inches(1.6), Inches(2.2))
-    tf = box.text_frame
-    r = tf.paragraphs[0].add_run()
-    r.text = "PMI Status Report"
-    r.font.size, r.font.bold, r.font.color.rgb = Pt(40), True, DARK
-    p2 = tf.add_paragraph()
-    r2 = p2.add_run()
-    r2.text = (f"{audience.value} view · {date.today().strftime('%d %B %Y')} · "
-               f"sources: {', '.join(model.source_files)}")
-    r2.font.size, r2.font.color.rgb = Pt(16), GREY
-    bar = slide.shapes.add_textbox(Inches(0.8), Inches(2.2), Inches(2.5), Inches(0.12))
-    bar.fill.solid(); bar.fill.fore_color.rgb = GREEN; bar.line.fill.background()
-    _footer(slide)
-
-
-def _summary_slide(prs, bullets: list[str]):
-    slide = _blank(prs)
-    _header(slide, "Executive Summary")
-    box = slide.shapes.add_textbox(Inches(0.6), Inches(1.4), SLIDE_W - Inches(1.2), Inches(5.4))
-    tf = box.text_frame; tf.word_wrap = True
-    for i, b in enumerate(bullets):
-        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-        r = p.add_run(); r.text = f"•  {b}"
-        r.font.size, r.font.color.rgb = Pt(18), DARK
-        p.space_after = Pt(14)
-
-
-def _tasks_slides(prs, model: PMIDataModel):
-    """One section: task assignments grouped per owner — 'specific tasks to
-    different people' is the core ask of this use case."""
-    by_owner = model.tasks_by_owner()
-    if not by_owner:
-        return
-    owners = sorted(by_owner, key=lambda o: (o == "Unassigned", o))
-    per_slide = 3
-    for chunk_start in range(0, len(owners), per_slide):
-        chunk = owners[chunk_start:chunk_start + per_slide]
-        slide = _blank(prs)
-        _header(slide, "Task Assignments by Owner",
-                "Open items and status per responsible person")
-        top = Inches(1.5)
-        for owner in chunk:
-            tasks = by_owner[owner]
-            open_n = sum(1 for t in tasks if t.status.value != "done")
-            hdr = slide.shapes.add_textbox(Inches(0.6), top, SLIDE_W - Inches(1.2), Inches(0.35))
-            r = hdr.text_frame.paragraphs[0].add_run()
-            r.text = f"{owner} — {len(tasks)} task(s), {open_n} open"
-            r.font.size, r.font.bold, r.font.color.rgb = Pt(15), True, GREEN
-            top += Inches(0.42)
-            for t in tasks[:4]:
-                line = slide.shapes.add_textbox(Inches(0.9), top, SLIDE_W - Inches(1.8), Inches(0.32))
-                r = line.text_frame.paragraphs[0].add_run()
-                due = f", due {t.due_date}" if t.due_date else ""
-                pct = f" ({t.progress_pct:.0f}%)" if t.progress_pct is not None else ""
-                r.text = f"•  {t.title} — {t.status.value.replace('_', ' ')}{pct}{due}"
-                r.font.size = Pt(12)
-                r.font.color.rgb = RED if t.status.value in ("overdue", "blocked") else DARK
-                top += Inches(0.34)
-            if len(tasks) > 4:
-                more = slide.shapes.add_textbox(Inches(0.9), top, Inches(6), Inches(0.3))
-                r = more.text_frame.paragraphs[0].add_run()
-                r.text = f"… and {len(tasks) - 4} more (see Excel dashboard)"
-                r.font.size, r.font.color.rgb = Pt(11), GREY
-                top += Inches(0.34)
-            top += Inches(0.15)
-
-
-def _table_slide(prs, title: str, headers: list[str], rows: list[list[str]]):
-    slide = _blank(prs)
-    _header(slide, title)
-    rows = rows[:12]
-    n_rows, n_cols = len(rows) + 1, len(headers)
-    tbl_shape = slide.shapes.add_table(
-        n_rows, n_cols, Inches(0.5), Inches(1.5), SLIDE_W - Inches(1.0),
-        Emu(int(Inches(0.4)) * n_rows))
-    tbl = tbl_shape.table
-    for j, h in enumerate(headers):
-        cell = tbl.cell(0, j)
-        cell.text = h
-        cell.fill.solid(); cell.fill.fore_color.rgb = GREEN
-        r = cell.text_frame.paragraphs[0].runs[0]
-        r.font.size, r.font.bold, r.font.color.rgb = Pt(12), True, RGBColor(255, 255, 255)
-    for i, row in enumerate(rows, start=1):
-        for j, val in enumerate(row):
-            cell = tbl.cell(i, j)
-            cell.text = str(val)
-            for p in cell.text_frame.paragraphs:
-                for r in p.runs:
-                    r.font.size = Pt(11)
-
-
-def _conflicts_slide(prs, model: PMIDataModel):
-    rows = []
-    for c in model.conflicts:
-        vals = "; ".join(f"{f}: {v}" for f, v in c.values.items())
-        res = (f"{c.resolved_value} (from {c.resolved_from}, {c.resolution})"
-               if c.resolved_value else "UNRESOLVED — needs decision")
-        rows.append([c.entity_key, c.field, vals[:70], res[:70]])
-    _table_slide(prs, "Data Consistency — Detected Conflicts",
-                 ["Item", "Field", "Reported values", "Resolution"], rows)
-
-
-def _n(v) -> str:
-    if v is None:
-        return "—"
-    return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:g}"
+def _text(slide, text: str, left, top, *, size: int, bold: bool = False,
+          colour=DARK, width=None):
+    box = slide.shapes.add_textbox(
+        left, top, width or (SLIDE_W - Inches(1.2)), Inches(0.5)
+    )
+    frame = box.text_frame
+    frame.word_wrap = True
+    run = frame.paragraphs[0].add_run()
+    run.text = text
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    run.font.color.rgb = colour
+    return box
