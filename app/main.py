@@ -11,8 +11,6 @@ The flow the spec's §4 core user journey describes:
     GET  /api/quality/{sid}            what this run could and could not do
     GET  /api/download/{sid}/{file}    fetch it
 
-`POST /api/report` remains as the one-shot path.
-
 Analysis and generation are separate endpoints for a concrete reason: resolving a
 conflict must not re-run extraction. Re-extracting would re-pay for the vision calls
 in §5.6 and re-roll the dice on what the model read out of each screenshot, so the
@@ -30,7 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.agent.graph import run_agent, run_analysis, run_generation
+from app.agent.graph import run_generation
 from app.agent.state import AgentState
 from app.config import get_settings
 from app.extractors import SUPPORTED_EXTENSIONS
@@ -41,8 +39,7 @@ from app.models.pmi import (
     PMIProject,
 )
 from app.report import store as report_store
-from app.report.planner import plan as plan_report
-from app.report.render.markdown import render_markdown
+from app.report.render.markdown import render_blocks, render_markdown
 from app.storage import chat_store, json_store
 from app.storage.json_store import SessionAnalysis
 
@@ -99,14 +96,6 @@ class GenerateRequest(BaseModel):
     #: request asked for. Re-rendering is cheap: the content is already planned,
     #: so no LLM call and no extraction happens, and the wording cannot change.
     format: Optional[str] = None
-
-
-class ReportRequest(BaseModel):
-    session_id: str
-    request_text: str
-    audience: Optional[str] = None
-    conflict_strategy: str = "priority"
-    user_conflict_choices: dict[str, Any] = Field(default_factory=dict)
 
 
 # ================================================================== sessions
@@ -202,40 +191,31 @@ async def upload(session_id: str, files: list[UploadFile] = File(...)) -> dict:
 @app.post("/api/analyze")
 def analyze(req: AnalyzeRequest) -> dict:
     """Extract, standardize, check, auto-resolve. Stops before generating anything."""
-    meta = _meta_or_404(req.session_id)
-    file_paths = _file_paths(req.session_id, meta)
+    from app.agent.analysis import ensure_analysis
 
-    state: AgentState = {
-        "session_id": req.session_id,
-        "file_paths": file_paths,
-        "request_text": req.request_text,
-        "audience": _audience(req.audience),
-        "project": json_store.load_project(req.session_id),
-        "conflict_strategy": req.conflict_strategy,
-    }
-    result = run_analysis(state)
+    meta = _meta_or_404(req.session_id)
+    _file_paths(req.session_id, meta)          # 400s when nothing was uploaded
+
+    # One analysis constructor, shared with the chat path. Two of them meant two
+    # answers to "what did we read", and which one you got depended on the
+    # endpoint you came in through.
+    analysis, needs_audience = ensure_analysis(
+        req.session_id,
+        request_text=req.request_text,
+        audience=_audience(req.audience),
+        conflict_strategy=req.conflict_strategy,
+        # An explicit POST to /analyze is a request to re-read, even when the
+        # file set has not moved — that is what the endpoint is for.
+        force=True,
+    )
 
     # §4: the audience could not be inferred, so ask rather than guess.
-    if result.get("needs_audience"):
+    if needs_audience:
         return {
             "needs_audience": True,
             "options": [a.value for a in Audience],
-            "detected_output_type": result.get("output_type"),
+            "detected_output_type": None,
         }
-
-    analysis = SessionAnalysis(
-        session_id=req.session_id,
-        request_text=req.request_text,
-        output_type=result.get("output_type", "powerpoint"),
-        topic=result.get("topic", "status"),
-        audience=result.get("audience"),
-        needs_audience=False,
-        data_model=result["data_model"],
-        quality_report=result.get("quality_report"),
-        errors=result.get("errors", []),
-        warnings=result.get("warnings", []),
-    )
-    json_store.save_analysis(analysis)
 
     return _analysis_payload(analysis)
 
@@ -374,6 +354,10 @@ def _content_payload(content, analysis, *, stale: bool = False) -> dict:
             }
             for s in content.narrative()
         ],
+        # Structured blocks, carrying each cell's identity so the preview can
+        # offer to edit it. Kept separate from `sections` above, which several
+        # callers already read for its headline/label shape.
+        "blocks": render_blocks(content),
         "warnings": content.warnings,
     }
 
@@ -381,26 +365,10 @@ def _content_payload(content, analysis, *, stale: bool = False) -> dict:
 @app.post("/api/content/{session_id}")
 def plan_content_route(session_id: str) -> dict:
     """Plan (or re-plan) the report and store it as a new version."""
+    from app.report.pipeline import plan_for_session
+
     analysis = _analysis_or_404(session_id)
-    model, quality = analysis.data_model, analysis.quality_report
-
-    bullets: list[str] = []
-    existing = report_store.load(session_id)
-    if existing is not None:
-        # Keep the prose we already paid for; only the structure is re-derived.
-        section = existing.section("summary.executive")
-        if section and section.blocks:
-            bullets = [item.text for item in section.blocks[0].items]
-
-    content = plan_report(
-        model, analysis.audience or Audience.PMO,
-        session_id=session_id,
-        topic=analysis.topic,
-        bullets=bullets,
-        quality=quality,
-        fingerprint=report_store.fingerprint(model, quality),
-    )
-    stored = report_store.save(content)
+    stored = plan_for_session(session_id, analysis)
     return _content_payload(stored, analysis)
 
 
@@ -482,6 +450,20 @@ class NewChatRequest(BaseModel):
     title: str = "New chat"
     provider: Optional[str] = None
     model: Optional[str] = None
+    #: Optional home for the chat. Omitted / null starts it outside any project.
+    project_id: Optional[str] = None
+
+
+class NewProjectRequest(BaseModel):
+    name: str = "New project"
+    icon: str = "📁"
+    knowledge: str = ""
+
+
+class PatchProjectRequest(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    knowledge: Optional[str] = None
 
 
 class PatchChatRequest(BaseModel):
@@ -508,8 +490,53 @@ def create_chat(req: NewChatRequest) -> dict:
     working set of files."""
     session_id = json_store.new_session()
     chat = chat_store.create_chat(session_id, req.title,
-                                  provider=req.provider, model=req.model)
+                                  provider=req.provider, model=req.model,
+                                  project_id=req.project_id)
     return {"chat": chat.model_dump(), "session_id": session_id}
+
+
+# ================================================================= projects
+# A project is a folder over chats plus a scratchpad of standing knowledge.
+# It owns no session and no files of its own — deleting one only unfiles its
+# chats (see chat_store.delete_project), never destroys them.
+def _project_or_404(project_id: str):
+    project = chat_store.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail={"error": "no_such_project"})
+    return project
+
+
+@app.post("/api/projects")
+def create_project(req: NewProjectRequest) -> dict:
+    project = chat_store.create_project(req.name, icon=req.icon,
+                                        knowledge=req.knowledge)
+    return {"project": project.model_dump()}
+
+
+@app.get("/api/projects")
+def list_projects() -> dict:
+    return {"projects": [p.model_dump() for p in chat_store.list_projects()]}
+
+
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: str) -> dict:
+    return {"project": _project_or_404(project_id).model_dump()}
+
+
+@app.patch("/api/projects/{project_id}")
+def patch_project(project_id: str, req: PatchProjectRequest) -> dict:
+    _project_or_404(project_id)
+    project = chat_store.update_project(
+        project_id, name=req.name, icon=req.icon, knowledge=req.knowledge,
+    )
+    return {"project": project.model_dump()}
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str) -> dict:
+    """Deletes the project only; its chats are pushed back to the top level."""
+    _project_or_404(project_id)
+    return {"deleted": chat_store.delete_project(project_id)}
 
 
 @app.get("/api/chats")
@@ -560,11 +587,23 @@ def delete_chat(chat_id: str) -> dict:
 @app.post("/api/chats/{chat_id}/messages")
 def post_chat_message(chat_id: str, req: ChatMessageRequest) -> dict:
     """One conversational turn: record what the user said, act, reply."""
-    from app.agent.conversation import respond
+    from app.agent.conversation import Reply, respond
 
     chat = _chat_or_404(chat_id)
     user_message = chat_store.add_message(chat_id, "user", {"text": req.text})
-    replies = respond(chat, req.text)
+
+    # A chat turn must never surface as a bare 500. The frontend has no way to
+    # render one except as "something went wrong", which tells the user nothing
+    # and loses the turn; a notice carrying the reason at least says what broke
+    # and leaves the conversation usable.
+    try:
+        replies = respond(chat, req.text)
+    except Exception as exc:                                  # noqa: BLE001
+        log.exception("chat turn failed for %s", chat_id)
+        replies = [Reply(kind="notice", content={
+            "text": "I hit an error working on that, so nothing was changed.",
+            "reasons": [f"{type(exc).__name__}: {exc}"],
+        })]
 
     stored = [
         chat_store.add_message(chat_id, "agent", reply.content, kind=reply.kind)
@@ -588,6 +627,309 @@ def post_chat_message(chat_id: str, req: ChatMessageRequest) -> dict:
         "chat": chat_store.get_chat(chat_id).model_dump(),
         "usage": budget.usage(chat_store.get_chat(chat_id)),
     }
+
+
+class CellEditRequest(BaseModel):
+    """One cell of the preview, edited in place."""
+
+    block_id: str
+    row: int
+    column: int
+    value: str
+
+
+@app.post("/api/content/{session_id}/cell")
+def edit_cell(session_id: str, req: CellEditRequest) -> dict:
+    """Write a preview edit **through to the data model**, then re-plan.
+
+    The tempting shortcut is to patch the stored `ReportContent` and return it —
+    it is one line and the preview updates immediately. It is also wrong: the
+    deck, the workbook and the document are all planned from `PMIDataModel`, so
+    the edited number would appear in the preview and nowhere else, and the
+    formats would disagree about a figure the user had personally corrected.
+
+    So the cell's `ref` is resolved back to an entity field, the value goes
+    through the same `apply_and_persist` engine as every other correction (with
+    the same provenance discipline — it is recorded as the user's), and the
+    report is re-planned from the updated model. Every format then agrees,
+    because there is still only one place any of them reads from.
+    """
+    from app.agent.corrections import apply_and_persist
+    from app.models.quality import ValidationIssue
+
+    analysis = _analysis_or_404(session_id)
+    content = report_store.load(session_id)
+    if content is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "no_content",
+                    "message": "Plan the report before editing it."},
+        )
+
+    cell = _find_cell(content, req.block_id, req.row, req.column)
+    if cell is None:
+        # A rejection is a normal outcome and comes back as a message, not a
+        # 4xx the UI has to translate — the same discipline as `/issues/fill`.
+        return {"applied": False,
+                "message": "That cell is no longer in the report — it may have "
+                           "been re-planned since you opened it."}
+
+    if cell.ref is None or not cell.ref.field:
+        return {"applied": False,
+                "message": "This value is computed from other fields, so there "
+                           "is nothing to write it back to. Correct the figures "
+                           "it is derived from instead."}
+
+    result = apply_and_persist(analysis, ValidationIssue(
+        check_id="PREVIEW-EDIT",
+        family="completeness",
+        entity_type=cell.ref.entity_type,
+        entity_id=cell.ref.entity_id,
+        entity_label=cell.text,
+        field=cell.ref.field,
+        message="value corrected by the user in the preview",
+    ), req.value)
+
+    if not result.applied:
+        return {"applied": False, "message": result.message}
+
+    _record_user_value(session_id, cell, req.value, result)
+    replanned = plan_content_route(session_id)
+    return {"applied": True, "message": result.message, **replanned}
+
+
+def _find_cell(content, block_id: str, row: int, column: int):
+    for section in content.sections:
+        for block in section.blocks:
+            if block.block_id != block_id or block.kind != "table":
+                continue
+            if 0 <= row < len(block.rows) and 0 <= column < len(block.rows[row]):
+                return block.rows[row][column]
+    return None
+
+
+def _record_user_value(session_id: str, cell, raw: str, result) -> None:
+    """The KB half — so the value is known to be the user's next turn too, and
+    so the fingerprint moves and any other draft is re-planned."""
+    from app.agent import knowledge
+
+    kb = knowledge.load(session_id)
+    kb.record_value(knowledge.UserValue(
+        entity_type=cell.ref.entity_type, entity_id=cell.ref.entity_id,
+        label=cell.text, field=cell.ref.field or "",
+        value=result.value, raw=raw,
+    ))
+    knowledge.save(kb)
+
+
+class ProseEditRequest(BaseModel):
+    """A card's narrative text, rewritten in the preview."""
+
+    block_id: str
+    text: str
+
+
+@app.post("/api/content/{session_id}/prose")
+def edit_prose(session_id: str, req: ProseEditRequest) -> dict:
+    """Save the user's rewritten prose for one block, then re-plan.
+
+    The split this enforces is the whole reason a card's text and its table are
+    edited by different routes: **prose is the user's to write, data is not.**
+    So the new text is checked against the figures the report already holds
+    (`guard.check_text`, the §11 backstop) — a *number* the report does not state
+    is refused with a pointer to the data edit that would make it true, which
+    then reaches every format. Text that only rephrases is stored as an override
+    in the knowledge base and survives the next re-plan, exactly like a supplied
+    value does.
+    """
+    from app.agent import knowledge
+    from app.report import guard
+
+    analysis = _analysis_or_404(session_id)
+    content = report_store.load(session_id)
+    if content is None:
+        return {"applied": False,
+                "message": "Plan the report before editing it."}
+
+    block = _find_prose_block(content, req.block_id)
+    if block is None:
+        return {"applied": False,
+                "message": "That text is no longer in the report — it may have "
+                           "been re-planned since you opened it."}
+
+    # The user is rewriting text the report already shows, so a figure already in
+    # this block is one the report already states — it must not be rejected as if
+    # the user had just invented it. This matters most for the executive summary,
+    # whose figures (the conflict percentages, milestone dates) drop out of the
+    # fact corpus once the block has been LLM-revised or previously edited, which
+    # would otherwise make the block impossible to edit against its own numbers. A
+    # genuinely new number, absent from both the corpus and this block, is still
+    # refused.
+    allowed = content.numeric_corpus_cached() | guard.numbers_in(_block_text(block))
+    offending = guard.check_text(req.text, allowed)
+    if offending:
+        return {"applied": False,
+                "message": guard.describe(offending, req.text)
+                + " Set it as data first — e.g. “the due date for the ERP "
+                  "cutover is 12-08-2026” — and it will appear in every format."}
+
+    kb = knowledge.load(session_id)
+    kb.set_prose_override(req.block_id, req.text)
+    knowledge.save(kb)
+
+    replanned = plan_content_route(session_id)
+    return {"applied": True,
+            "message": "Saved your text — it will appear in every format.",
+            **replanned}
+
+
+def _find_prose_block(content, block_id: str):
+    """The prose or bullets block with this id, or `None`. Tables and tiles are
+    data, edited through the cell route, not here."""
+    for section in content.sections:
+        for block in section.blocks:
+            if block.block_id == block_id and block.kind in ("prose", "bullets"):
+                return block
+    return None
+
+
+def _block_text(block) -> str:
+    """The block's current text as one string — bullets joined the way the
+    preview edits them, prose as-is. Used to grant a prose edit the figures the
+    block already shows."""
+    if block.kind == "bullets":
+        return "\n".join(item.text for item in block.items)
+    return getattr(block, "text", "") or ""
+
+
+@app.post("/api/chats/{chat_id}/files")
+async def add_chat_files(chat_id: str, files: list[UploadFile] = File(...)) -> dict:
+    """Uploading files mid-chat is a turn, with an answer.
+
+    It used to be a silent side effect: `POST /api/upload` wrote the bytes, and
+    the "3 files ready" line the user saw was invented client-side and vanished
+    when the chat was reopened. Nothing server-side had happened, so the report
+    stayed built from the original files while looking current — and the user had
+    no way to tell.
+
+    Now the turn is stored, every file is re-read (not just the new ones — a new
+    tracker can contradict an old one, and a conflict only exists between two
+    sources considered together), and the reply says what actually changed.
+    """
+    chat = _chat_or_404(chat_id)
+    session_id = chat.session_id
+    before = _session_snapshot(session_id)
+
+    saved = await upload(session_id, files)
+    names = saved["saved"]
+
+    chat_store.add_message(chat_id, "user",
+                           {"files": [{"name": n} for n in names],
+                            "text": ""},
+                           kind="files")
+
+    replies = _merge_uploaded(chat, before, names, saved.get("rejected", []))
+    stored = [chat_store.add_message(chat_id, "agent", reply.content,
+                                     kind=reply.kind)
+              for reply in replies]
+
+    return {
+        "saved": names,
+        "rejected": saved.get("rejected", []),
+        "files": saved["files"],
+        "messages": [m.model_dump() for m in stored],
+        "chat": chat_store.get_chat(chat_id).model_dump(),
+    }
+
+
+def _session_snapshot(session_id: str) -> dict:
+    """What the session knew before the upload, for the "what changed" reply."""
+    analysis = json_store.load_analysis(session_id)
+    if analysis is None:
+        return {}
+    return {
+        "entities": analysis.data_model.entity_count(),
+        "conflicts": len(analysis.data_model.unresolved_conflicts()),
+        "score": getattr(analysis.quality_report, "score", None),
+        "files": list(analysis.data_model.source_files),
+    }
+
+
+def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
+    """Re-read everything and say what moved."""
+    from app.agent import knowledge
+    from app.agent.conversation import Reply, _analyse, _found
+    from app.report import chat_format as chat_fmt
+
+    replies = []
+    if rejected:
+        replies.append(Reply(kind="notice", content={
+            "text": f"I couldn't read {len(rejected)} of those.",
+            "reasons": [f"{r['file']}: {r['reason']}" for r in rejected],
+        }))
+
+    if not added:
+        return replies or [Reply(kind="text", content={
+            "text": "Nothing was added, so nothing changed."})]
+
+    if not before:
+        # Nothing had been read yet: this is the first upload, and the useful
+        # answer is "what do you need?", not a diff against nothing.
+        return replies + [Reply(kind="text", content={"text": chat_fmt.reply(
+            f"{chat_fmt.count(len(added), 'file')} ready",
+            body=chat_fmt.bullets(added),
+            action="What do you need — a SteerCo deck, an IMO status report, a "
+                   "Finance dashboard?",
+        )})]
+
+    kb = knowledge.load(chat.session_id)
+    prior = json_store.load_analysis(chat.session_id)
+    analysis, needs_audience = _analyse(
+        chat, prior.request_text if prior else "",
+        kb.audience or (prior.audience if prior else None),
+        kb.audience_label or (prior.audience_label if prior else ""),
+    )
+    if analysis is None:
+        return replies + [Reply(kind="notice", content={
+            "text": "I re-read the files but could not build a model from them.",
+            "reasons": ["the audience is still unknown"] if needs_audience else [],
+        })]
+
+    after = _session_snapshot(chat.session_id)
+    body = [
+        f"**{len(after['files'])} file(s)** read, including "
+        f"{len(added)} new: {', '.join(added)}.",
+        _delta("items", before.get("entities"), after.get("entities")),
+        _delta("open conflict(s)", before.get("conflicts"), after.get("conflicts")),
+        _delta("data quality", before.get("score"), after.get("score"),
+               fmt="{:.1f}"),
+    ]
+
+    action = "Ask me to re-plan so the report reflects the new files."
+    if kb.outputs:
+        formats = ", ".join(dict.fromkeys(o.format for o in kb.outputs))
+        action = (f"You've already generated {formats} — say “regenerate” and "
+                  f"I'll rebuild {'it' if len(kb.outputs) == 1 else 'them'} "
+                  f"from the merged data.")
+
+    replies.append(Reply(kind="text", content={"text": chat_fmt.reply(
+        "Re-read everything", body=[line for line in body if line], action=action,
+    )}))
+    replies.extend(_found(chat, analysis))
+    return replies
+
+
+def _delta(label: str, before, after, *, fmt: str = "{:g}") -> str:
+    """`14 → 18 items (+4)`, or nothing at all when it did not move.
+
+    Reporting an unchanged figure as though it were news is the kind of noise
+    that trains a reader to skip the whole message.
+    """
+    if before is None or after is None or before == after:
+        return ""
+    arrow = f"{fmt.format(before)} → {fmt.format(after)}"
+    change = after - before
+    return f"• **{label}**: {arrow} ({'+' if change > 0 else ''}{fmt.format(change)})"
 
 
 class ReviseRequest(BaseModel):
@@ -680,9 +1022,7 @@ def fill_issue(session_id: str, req: FillIssueRequest) -> dict:
     worse than no score. Any drafted report is left stale by the fingerprint
     change and gets re-planned before it is rendered.
     """
-    from app.agent.consistency import run_checks
-    from app.agent.corrections import apply_correction
-    from app.agent.data_quality import build_report
+    from app.agent.corrections import apply_and_persist
 
     analysis = _analysis_or_404(session_id)
     model = analysis.data_model
@@ -694,22 +1034,12 @@ def fill_issue(session_id: str, req: FillIssueRequest) -> dict:
         raise HTTPException(status_code=404,
                             detail={"error": "no_such_issue"})
 
-    result = apply_correction(model, issue, req.value)
+    result = apply_and_persist(analysis, issue, req.value)
     if not result.applied:
         # A rejected value is a normal outcome, not an error: the user typed
         # something the field cannot hold and needs to be told what to type.
         return {"applied": False, "message": result.message,
                 "issue_id": req.issue_id}
-
-    results = run_checks(model)
-    model.conflicts = results.conflicts
-    model.validation_issues = results.issues
-    analysis.quality_report = build_report(
-        model,
-        failed_files=_failed(analysis.errors),
-        warnings=analysis.warnings,
-    )
-    json_store.save_analysis(analysis)
 
     return {
         "applied": True,
@@ -739,59 +1069,6 @@ def get_quality(session_id: str) -> dict:
         "validation_issues": [
             i.model_dump(mode="json") for i in analysis.data_model.validation_issues
         ],
-    }
-
-
-# =============================================================== one-shot path
-@app.post("/api/report")
-def report(req: ReportRequest) -> dict:
-    """Analysis + generation in one call."""
-    meta = _meta_or_404(req.session_id)
-    file_paths = _file_paths(req.session_id, meta)
-    audience = _audience(req.audience)
-
-    state: AgentState = {
-        "session_id": req.session_id,
-        "file_paths": file_paths,
-        "request_text": req.request_text,
-        "audience": audience,
-        "project": json_store.load_project(req.session_id),
-        "conflict_strategy": req.conflict_strategy,
-        "user_conflict_choices": req.user_conflict_choices,
-    }
-    result = run_agent(state)
-
-    if result.get("needs_audience") and not audience:
-        return {
-            "needs_audience": True,
-            "options": [a.value for a in Audience],
-            "detected_output_type": result.get("output_type"),
-        }
-
-    model = result.get("data_model")
-    conflicts = [c.model_dump(mode="json") for c in model.conflicts] if model else []
-    outputs = [Path(p).name for p in result.get("output_files", [])]
-    quality = result.get("quality_report")
-
-    meta.setdefault("runs", []).append({
-        "request": req.request_text,
-        "audience": _audience_str(result.get("audience") or audience),
-        "outputs": outputs,
-    })
-    json_store.save_meta(req.session_id, meta)
-
-    return {
-        "needs_audience": False,
-        "audience": _audience_str(result.get("audience") or audience),
-        "output_type": result.get("output_type"),
-        "summary": result.get("summary_bullets", []),
-        "outputs": outputs,
-        "conflicts": conflicts,
-        "unresolved_conflicts": [c for c in conflicts if not c.get("resolved_value")],
-        "quality_score": quality.score if quality else None,
-        "stats": _stats(model),
-        "errors": result.get("errors", []),
-        "warnings": result.get("warnings", []),
     }
 
 

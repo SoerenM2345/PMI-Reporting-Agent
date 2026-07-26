@@ -18,8 +18,7 @@ from typing import Callable, Optional, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from app.config import get_settings
-from app.llm import fallbacks, get_client
+from app.llm import fallbacks, fast_model, get_client, reasoning_model
 from app.llm.base import LLMError
 from app.llm.prompts import load as load_prompt
 from app.llm.schemas import RequestParse, SummaryBullets
@@ -54,13 +53,12 @@ def _fallback(task: str, exc: Exception, fn: Callable[[], T]) -> T:
 # --------------------------------------------------------------------- tasks
 def parse_request(request_text: str) -> RequestParse:
     """§11: 'Understanding the reporting request' + 'Detecting target audience'."""
-    settings = get_settings()
     try:
         return get_client().structured(
             system=load_prompt("detect_pmi_request"),
             user=request_text,
             output_model=RequestParse,
-            model=settings.fast_model,
+            model=fast_model(),
         )
     except (LLMError, ValidationError) as exc:
         return _fallback(
@@ -82,6 +80,7 @@ def write_summary(
                 f"Standardized PMI data:\n{payload}"
             ),
             output_model=SummaryBullets,
+            model=reasoning_model(),
         )
         return result.bullets
     except (LLMError, ValidationError) as exc:

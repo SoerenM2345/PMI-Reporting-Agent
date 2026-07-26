@@ -40,20 +40,32 @@ from app.models.pmi import (
 
 log = logging.getLogger("pmi.pptx")
 
-GREEN = RGBColor(0x2E, 0x7D, 0x32)
-DARK = RGBColor(0x1A, 0x1A, 0x1A)
-GREY = RGBColor(0x75, 0x75, 0x75)
-RED = RGBColor(0xC6, 0x28, 0x28)
-AMBER = RGBColor(0xF9, 0xA8, 0x25)
+# The Deloitte brand palette (matches `Deloitte_Master.pptx`'s theme). Kept as
+# module constants because the drawn body content (tables, tiles, bullets) sets
+# colours explicitly; the master's own graphics, backgrounds and logos are
+# inherited by every slide automatically.
+# From `app/report/brand.py` — the one place these hexes live, so the deck, the
+# workbook, the charts and the HTML dashboard cannot disagree about what the
+# brand green is. `brand.rgb()` hands the same hex to python-pptx.
+from app.report import brand
+
+GREEN = brand.rgb(brand.GREEN)     # Deloitte dark green — readable on white
+BRIGHT = brand.rgb(brand.BRIGHT)   # Deloitte signature green (accent1)
+DARK = brand.rgb(brand.DARK)       # theme dk2
+GREY = brand.rgb(brand.GREY)       # theme grey
+RED = brand.rgb(brand.RED)
+AMBER = brand.rgb(brand.AMBER)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+
+#: Master layouts used when a Deloitte template is loaded. Falls back to the
+#: python-pptx blank layout (index 6) when the template is absent.
+COVER_LAYOUT = "Title slide - White"
+CONTENT_LAYOUT = "Title Only"
 
 RAG = {
     Severity.LOW: GREEN, Severity.MEDIUM: AMBER,
     Severity.HIGH: RGBColor(0xEF, 0x6C, 0x00), Severity.CRITICAL: RED,
 }
-
-FOOTER = ("Prototype output — requires Senior Manager review before distribution "
-          "to stakeholders.")
 
 SLIDE_W = Inches(13.333)
 SLIDE_H = Inches(7.5)
@@ -98,7 +110,7 @@ def generate_from_content(content, out_dir: Path, model=None) -> Path:
 
 
 def _table(prs, title: str, subtitle: str, headers: list[str],
-           rows: list[list[str]], note: str = "") -> None:
+           rows: list[list[str]], note: str = "", footer: str = "") -> None:
     if not rows:
         return
 
@@ -137,7 +149,7 @@ def _table(prs, title: str, subtitle: str, headers: list[str],
     if note:
         _text(slide, note, MARGIN, SLIDE_H - Inches(0.95), size=10, colour=GREY)
 
-    _footer(slide)
+    _footer(slide, footer)
 
 
 def _tile(slide, label: str, value: str, colour, left, top) -> None:
@@ -158,8 +170,30 @@ def _tile(slide, label: str, value: str, colour, left, top) -> None:
     run.font.color.rgb = colour
 
 
-def _blank(prs):
-    return prs.slides.add_slide(prs.slide_layouts[6])
+def _layout(prs, name: str):
+    """A master layout by name, or the blank fallback when no template is loaded."""
+    for layout in prs.slide_layouts:
+        if layout.name == name:
+            return layout
+    # python-pptx's default template: index 6 is the blank layout.
+    return prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[0]
+
+
+def _clear_placeholders(slide):
+    """Drop the layout's empty placeholders so no "Click to add…" prompt is left
+    behind. The master's background graphics, logo and theme are on the *master*,
+    not these placeholders, so the brand design survives their removal."""
+    for placeholder in list(slide.placeholders):
+        placeholder._element.getparent().remove(placeholder._element)
+
+
+def _blank(prs, layout_name: str = CONTENT_LAYOUT):
+    """A branded content slide: the master's background and logo, nothing else —
+    titles and body are drawn on top so the deck's structure is decided by the
+    planner, not by which placeholders a layout happens to carry."""
+    slide = prs.slides.add_slide(_layout(prs, layout_name))
+    _clear_placeholders(slide)
+    return slide
 
 
 def _header(slide, title: str, subtitle: str) -> None:
@@ -169,8 +203,17 @@ def _header(slide, title: str, subtitle: str) -> None:
         _text(slide, subtitle, MARGIN, Inches(1.15), size=13, colour=GREEN)
 
 
-def _footer(slide) -> None:
-    _text(slide, FOOTER, MARGIN, SLIDE_H - Inches(0.5), size=9, colour=GREY,
+def _footer(slide, text: str = "") -> None:
+    """The footer the *plan* asked for, or nothing at all.
+
+    This used to stamp a hard-coded prototype disclaimer on every slide,
+    independently of `ReportContent.footer` — so what the deck said about its own
+    status was not something the planner or the user could decide. Renderers draw;
+    they never decide.
+    """
+    if not text:
+        return
+    _text(slide, text, MARGIN, SLIDE_H - Inches(0.5), size=9, colour=GREY,
           width=SLIDE_W - Inches(1.2))
 
 

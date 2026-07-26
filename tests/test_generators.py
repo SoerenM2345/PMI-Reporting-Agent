@@ -258,6 +258,39 @@ def test_an_unscored_risk_is_reported_not_dropped_from_the_heatmap(tmp_path):
     assert path and path.exists()   # rendered, with a "could not be plotted" note
 
 
+def test_an_image_request_maps_to_the_topic_it_names(tmp_path):
+    """"Generate an image describing the current milestones and project plan"
+    must produce milestone charts, not the status default — the picture cannot
+    ignore the words the user chose."""
+    from app.llm import tasks
+
+    parsed = tasks.parse_request(
+        "Generate an image describing the current milestones and project plan"
+    )
+    assert parsed.output_type == "chart"
+    assert parsed.topic == "milestone"
+
+
+def test_generating_a_chart_renders_the_approved_content_first(model, tmp_path):
+    """§18.18. A picture must not show something the preview did not.
+
+    The content's own `ChartBlock`s render before the topic-driven extras, so a
+    chart the user read about in the preview is the first thing in the image
+    set.
+    """
+    from app.agent.graph import _render_charts
+    from app.report.planner import plan
+
+    content = plan(model, Audience.EXECUTIVE)   # EXECUTIVE carries a chart block
+    chart_ids = [b.builder for s in content.sections for b in s.blocks
+                 if getattr(b, "kind", None) == "chart"]
+    assert chart_ids, "the executive deck should plan at least one chart"
+
+    paths = _render_charts(content, model, "status", tmp_path)
+    assert paths, "no charts were produced"
+    assert all(p.exists() for p in paths)
+
+
 def test_charts_are_chosen_by_topic(model, tmp_path):
     risk_charts = charts.generate(model, "risks", tmp_path)
     budget_charts = charts.generate(model, "budget", tmp_path)

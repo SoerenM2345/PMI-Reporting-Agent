@@ -56,6 +56,7 @@ from app.models.quality import (
     Conflict,
     ConflictEvidence,
     DataQualityReport,
+    ScoreComponent,
     ValidationIssue,
 )
 from app.models.source import ImageRegion, SourceReference
@@ -178,6 +179,7 @@ __all__ = [
     "SourceReference", "ImageRegion",
     # quality (§8, §9)
     "Conflict", "ConflictEvidence", "ValidationIssue", "DataQualityReport",
+    "ScoreComponent",
     # enums (§7)
     "SourceFormat", "Status", "Severity", "Audience", "Trend", "RiskCategory",
     "SynergyType", "BudgetCategory", "DecisionBody", "MeetingType",

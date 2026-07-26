@@ -119,6 +119,41 @@ def test_generation_refuses_a_stale_plan_and_uses_a_fresh_one(client, analyzed):
     assert runs and runs[-1].get("content_version") is None
 
 
+def _summary_text(content: dict) -> str:
+    """The executive-summary bullets from a `/api/content` payload, as one string."""
+    for section in content.get("blocks", []):
+        if section["section_id"] != "summary.executive":
+            continue
+        return "\n".join(
+            item["text"]
+            for block in section["blocks"]
+            for item in block.get("items", [])
+        )
+    return ""
+
+
+def test_resolving_a_conflict_reaches_the_summary_narrative(client, analyzed):
+    """The executive summary is authored free text — the one place a figure the
+    report states is *asserted* rather than derived. It used to be reused verbatim
+    across every re-plan with no staleness check, so after the user settled the
+    82-vs-75 conflict the deterministic sections self-corrected while the summary
+    kept calling it unresolved. Re-planning must re-roll it: the losing narrative
+    goes, and the value the user chose appears."""
+    before = _summary_text(client.post(f"/api/content/{analyzed}").json())
+    if "UNRESOLVED" not in before.upper():
+        pytest.skip("this run's summary did not flag an unresolved conflict")
+
+    conflicts = client.get(f"/api/conflicts/{analyzed}").json()["unresolved"]
+    for conflict in conflicts:
+        client.post(f"/api/conflicts/{analyzed}/resolve",
+                    json={"choices": {conflict["conflict_id"]: {"value": "80"}}})
+
+    after = _summary_text(client.post(f"/api/content/{analyzed}").json())
+    assert "UNRESOLVED" not in after.upper(), \
+        "the re-planned summary still calls a resolved conflict unresolved"
+    assert "80" in after, "the value the user chose never reached the summary"
+
+
 # ============================================== the preview matches the deck
 def test_what_the_preview_says_is_what_the_deck_says(client, analyzed):
     """The whole promise of the preview. If these can disagree, approving the
@@ -147,6 +182,145 @@ def test_what_the_preview_says_is_what_the_deck_says(client, analyzed):
             continue
         assert section["headline"] in deck, \
             f"preview promised {section['headline']!r}, deck does not say it"
+
+
+# ================================================ editing the preview (item 3b)
+def _first_editable_cell(content):
+    """A `(block_id, row, column, cell)` the preview would let a user edit."""
+    for section in content.sections:
+        for block in section.blocks:
+            if block.kind != "table":
+                continue
+            for r, row in enumerate(block.rows):
+                for c, cell in enumerate(row):
+                    if cell.ref is not None and cell.ref.field:
+                        return block.block_id, r, c, cell
+    return None
+
+
+def test_a_preview_edit_is_written_into_the_data_model(client, analyzed):
+    """A preview edit must change the *data*, not just the stored content.
+
+    Patching `ReportContent` alone is one line and updates the preview
+    immediately — and produces a deck, a workbook and a document that disagree
+    with the preview about a figure the user personally corrected. Everything is
+    planned from `PMIDataModel`, so that is where the value has to land.
+    """
+    from app.report import store as report_store
+    from app.storage import json_store
+
+    client.post(f"/api/content/{analyzed}")
+    found = _first_editable_cell(report_store.load(analyzed))
+    if found is None:
+        pytest.skip("no editable cell in this plan")
+    block_id, row, column, cell = found
+
+    body = client.post(f"/api/content/{analyzed}/cell", json={
+        "block_id": block_id, "row": row, "column": column,
+        "value": "Anna Schmidt" if cell.ref.field.endswith(("owner", "lead"))
+                 else "12-08-2026",
+    }).json()
+
+    if not body["applied"]:
+        pytest.skip(f"this cell rejected the value: {body['message']}")
+
+    model = json_store.load_analysis(analyzed).data_model
+    collection, id_attr = _collection(cell.ref.entity_type)
+    entity = next(e for e in getattr(model, collection)
+                  if getattr(e, id_attr) == cell.ref.entity_id)
+    assert getattr(entity, cell.ref.field) is not None
+
+    # And the report was re-planned, so the preview reflects it too.
+    assert body["version"] > 1
+
+
+def test_a_preview_edit_reaches_the_excel_output_too(client, analyzed):
+    """The formats must not be able to disagree about a corrected figure.
+
+    The workbook used to re-walk `PMIDataModel` instead of rendering the
+    approved content, so it was the one format that could contradict the preview
+    — and nothing in the system compared them, so nobody would have found out
+    until the meeting.
+    """
+    from openpyxl import load_workbook
+
+    from app.config import get_settings
+    from app.report import store as report_store
+
+    client.post(f"/api/content/{analyzed}")
+    found = _first_editable_cell(report_store.load(analyzed))
+    if found is None:
+        pytest.skip("no editable cell in this plan")
+    block_id, row, column, cell = found
+
+    marker = "Wilhelmina Ravensworth"      # unmistakably not from any file
+    if not cell.ref.field.endswith(("owner", "lead", "title", "name")):
+        pytest.skip("the first editable cell does not hold free text")
+
+    body = client.post(f"/api/content/{analyzed}/cell", json={
+        "block_id": block_id, "row": row, "column": column, "value": marker,
+    }).json()
+    assert body["applied"], body["message"]
+    assert marker in body["markdown"], "the preview does not show the edit"
+
+    generated = client.post("/api/generate", json={
+        "session_id": analyzed, "format": "excel", "force": True,
+    }).json()
+    name = next(n for n in generated["outputs"] if n.endswith(".xlsx"))
+    workbook = load_workbook(str(get_settings().output_dir / analyzed / name))
+
+    text = "\n".join(
+        str(c.value)
+        for sheet in workbook.worksheets
+        for r in sheet.iter_rows() for c in r if c.value
+    )
+    assert marker in text, "the workbook does not carry the corrected value"
+
+
+def test_a_computed_cell_says_why_it_cannot_be_edited(client, analyzed):
+    """A risk score and a budget variance are ours, computed in Python (§11).
+
+    Accepting an edit to one would silently overwrite arithmetic the system
+    guarantees it does itself — so the cell carries no `ref` and the endpoint
+    says what to correct instead.
+    """
+    from app.report import store as report_store
+
+    client.post(f"/api/content/{analyzed}")
+    content = report_store.load(analyzed)
+
+    target = None
+    for section in content.sections:
+        for block in section.blocks:
+            if block.kind != "table":
+                continue
+            for r, row in enumerate(block.rows):
+                for c, cell in enumerate(row):
+                    if cell.ref is None:
+                        target = (block.block_id, r, c)
+                        break
+                if target:
+                    break
+            if target:
+                break
+        if target:
+            break
+    if target is None:
+        pytest.skip("every cell in this plan is editable")
+
+    body = client.post(f"/api/content/{analyzed}/cell", json={
+        "block_id": target[0], "row": target[1], "column": target[2],
+        "value": "99",
+    }).json()
+
+    assert body["applied"] is False
+    assert "computed" in body["message"]
+
+
+def _collection(entity_type: str):
+    from app.agent.corrections import _COLLECTIONS
+
+    return _COLLECTIONS[entity_type]
 
 
 def test_generation_still_works_for_a_caller_that_never_opens_the_preview(client, analyzed):

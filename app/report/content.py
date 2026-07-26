@@ -140,16 +140,38 @@ class Column(BaseModel):
     """
 
     header: str
+    #: `flag` is a YES/blank column — the workbook colours it red when set,
+    #: because "this is overdue" is a finding and not a value.
     kind: Literal["text", "number", "percent", "currency", "date", "flag"] = "text"
     rag: bool = False                 # colour by Red/Amber/Green status
     negative_is_bad: bool = False     # a negative variance is not merely a minus sign
     width: Optional[int] = None
 
 
+class EntityFieldRef(BaseModel):
+    """Which model field a cell was drawn from.
+
+    Without it a preview edit has nowhere to go: the cell knows its text and
+    nothing about where the text came from, so "change this to 12-08-2026" could
+    only be written into the *stored content* — leaving the data model, and
+    therefore every other format, still stating the old value. Editing one
+    number and having the deck and the workbook disagree about it is the exact
+    failure `ReportContent` exists to prevent.
+    """
+
+    entity_type: str
+    entity_id: Optional[str] = None
+    field: Optional[str] = None
+
+
 class Cell(BaseModel):
     text: str                         # always present — this is what a slide shows
     value: Optional[Union[float, int, str]] = None   # raw, for a sortable cell
     emphasis: Emphasis = "none"
+    #: Where this cell came from, when it came from one editable field. `None`
+    #: for computed and composite cells ("+15d", a citation), which have no
+    #: single field to write back to and are therefore not editable.
+    ref: Optional[EntityFieldRef] = None
 
 
 class EntityQuery(BaseModel):
@@ -299,6 +321,12 @@ class ReportContent(BaseModel):
     analysis_fingerprint: str = ""
 
     audience: Audience
+    #: The words the user actually used — "Integration Director", "SteerCo",
+    #: "Workstream leads". `audience` stays the internal planning key (there are
+    #: only four report shapes), but a document titled with a label its reader
+    #: does not recognise reads as written for somebody else. Empty falls back to
+    #: the canonical label for `audience`.
+    audience_label: str = ""
     topic: str = "status"
     title: str
     subtitle: str = ""
@@ -337,9 +365,16 @@ class ReportContent(BaseModel):
         computed sentences ("2 milestone(s) have slipped") and table cells
         ("+15d") whose numbers are just as real as a fact's, and rejecting a
         rephrase for reusing one of them would be nonsense.
+
+        Narrative sections **only**. The §13 workbook sheets are a full data
+        dump — every risk probability, every budget line, every id — and folding
+        them in would admit almost any two-digit number to the corpus. A
+        headline claiming "4 critical risks" would then pass the guard because
+        some unrelated row happens to hold a 4, which is precisely the claim §11
+        exists to stop.
         """
         corpus = self.facts.numeric_corpus()
-        for section in self.sections:
+        for section in self.narrative():
             corpus |= _numbers_in(section.headline)
             corpus |= _numbers_in(section.label)
             for block in section.blocks:

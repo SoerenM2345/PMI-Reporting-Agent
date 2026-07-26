@@ -26,6 +26,17 @@ def client():
     return TestClient(app)
 
 
+def _chat_with_samples(client, sample_files, *names: str) -> str:
+    """A chat whose session already holds the §19 sample files. Returns its id."""
+    body = client.post("/api/chats", json={}).json()
+    chat_id, session_id = body["chat"]["chat_id"], body["session_id"]
+    for name in (names or ("integration_tracker.xlsx", "weekly_update.pptx")):
+        with open(sample_files / name, "rb") as handle:
+            client.post(f"/api/upload?session_id={session_id}",
+                        files={"files": (name, handle, "application/octet-stream")})
+    return chat_id
+
+
 # =================================================================== storage
 def test_a_chat_owns_a_session(client):
     body = client.post("/api/chats", json={"title": "Week 12"}).json()
@@ -62,6 +73,434 @@ def test_a_chat_can_be_renamed_and_closed_and_reopened(client):
 
     client.patch(f"/api/chats/{chat_id}", json={"archived": False})
     assert chat_id in [c["chat_id"] for c in client.get("/api/chats").json()["chats"]]
+
+
+def test_renaming_a_chat_keeps_its_position_in_the_list(client):
+    """A rename changes a chat's label, not its recency — it must not jump to the
+    top of the sidebar, which is ordered by last activity."""
+    ids = [client.post("/api/chats", json={}).json()["chat"]["chat_id"]
+           for _ in range(3)]
+    # Newest first: the last created sits at the top.
+    before = [c["chat_id"] for c in client.get("/api/chats").json()["chats"]]
+
+    # Rename the middle one (created second, so index 1 from the top).
+    middle = before[1]
+    client.patch(f"/api/chats/{middle}", json={"title": "Renamed in place"})
+
+    after = [c["chat_id"] for c in client.get("/api/chats").json()["chats"]]
+    assert after == before, "renaming reordered the sidebar"
+
+
+def test_capabilities_are_explained_without_needing_files(client):
+    """§9. "What can you do?" is a real question with a real answer, even before
+    anything is uploaded."""
+    chat_id = client.post("/api/chats", json={}).json()["chat"]["chat_id"]
+
+    reply = client.post(f"/api/chats/{chat_id}/messages",
+                        json={"text": "what can you do?"}).json()["messages"][-1]
+    assert reply["kind"] == "text"
+    text = reply["content"]["text"].lower()
+    assert "consolidate" in text and "generate" in text
+
+
+def test_the_agent_can_list_the_conflicts_it_detected(client, sample_files):
+    """§4. "2 conflicts detected" must be expandable into *which* — the findings
+    live in the analysis, and the chat can recall and explain them."""
+    chat_id = _chat_with_samples(client, sample_files)
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    reply = client.post(f"/api/chats/{chat_id}/messages",
+                        json={"text": "which conflicts do you see?"}).json()["messages"][-1]
+    text = reply["content"]["text"].lower()
+    # The 82-vs-75 conflict is named, not just counted.
+    assert "conflict" in text
+    assert "82" in text or "75" in text
+
+
+def test_each_question_is_answered_from_its_own_source(client, sample_files):
+    """"Gaps" is not a synonym for "data-quality issues".
+
+    One handler used to answer every finding word with the validation-issue list,
+    so a user asking what was *missing* got told what was *wrong* — and acted on
+    the wrong finding. Each question now reads only the collection it names.
+    """
+    chat_id = _chat_with_samples(client, sample_files)
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    def ask(text: str) -> str:
+        return client.post(f"/api/chats/{chat_id}/messages",
+                           json={"text": text}).json()["messages"][-1]["content"]["text"]
+
+    gaps = ask("what are the gaps?")
+    assert "gap" in gaps.lower()
+    # It reports absences, never the §8 check findings.
+    assert "conflict" not in gaps.lower()
+
+    conflicts = ask("where do the files disagree?")
+    assert "conflict" in conflicts.lower()
+
+    quality = ask("what data-quality issues did you find?")
+    assert "data-quality issue" in quality.lower() or "no data-quality" in quality.lower()
+
+
+def test_the_score_explains_itself(client, sample_files):
+    """§5. A score nobody can account for is a number taken on faith.
+
+    The components are the score's own arithmetic — `build_report` stores what
+    `_score` computed — so the explanation cannot drift from the figure.
+    """
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    reply = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "why is the data-quality score what it is?"},
+    ).json()["messages"][-1]
+    text = reply["content"]["text"]
+
+    chat_body = client.get(f"/api/chats/{chat_id}").json()["chat"]
+    report = json_store.load_analysis(chat_body["session_id"]).quality_report
+
+    assert f"{report.score:.0f}/100" in text
+    for component in report.score_components:
+        assert component.label in text
+
+    # The components account for the score, not merely accompany it.
+    total = sum(c.weight * c.ratio for c in report.score_components)
+    expected = min(total, report.score_cap) if report.score_cap else total
+    assert round(expected, 1) == report.score
+
+
+def test_a_correction_in_chat_updates_the_model_and_offers_to_regenerate(
+        client, sample_files):
+    """§6/§7. A value typed in chat is written into the durable model, and the
+    agent offers to rebuild rather than making the user start over."""
+    from app.storage import json_store
+
+    body = client.post("/api/chats", json={}).json()
+    chat_id, session_id = body["chat"]["chat_id"], body["session_id"]
+    for name in ("integration_tracker.xlsx", "weekly_update.pptx"):
+        with open(sample_files / name, "rb") as handle:
+            client.post(f"/api/upload?session_id={session_id}",
+                        files={"files": (name, handle, "application/octet-stream")})
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    milestones = json_store.load_analysis(session_id).data_model.milestones
+    target = next((m for m in milestones if m.name), None)
+    if target is None:
+        pytest.skip("no milestone to correct in this sample")
+
+    replies = client.post(f"/api/chats/{chat_id}/messages",
+                          json={"text": f"{target.name} should be 02-06-2026"}
+                          ).json()["messages"]
+    joined = " ".join(m["content"].get("text", "") for m in replies).lower()
+    assert "regenerate" in joined, "no offer to rebuild the report"
+
+    from datetime import date
+    updated = next(m for m in json_store.load_analysis(session_id).data_model.milestones
+                   if m.milestone_id == target.milestone_id)
+    assert date(2026, 6, 2) in (updated.planned_date, updated.forecast_date,
+                                updated.actual_date), "the correction did not land"
+
+
+def test_a_plain_present_tense_sentence_is_a_data_update(client, sample_files):
+    """"Reporting date is 17-09-2026." used to be refused.
+
+    The correction patterns matched "should be" / "is now" / "is actually" and
+    nothing else, so the phrasing people actually type fell through to
+    `revise_content`, hit `guard.check_text` — which correctly refuses *prose*
+    stating a figure the report does not hold — and came back as "I didn't
+    change anything." The user had supplied a value and been told nothing
+    happened.
+
+    Routing the sentence to `nl_updates` *before* revision fixes it without
+    touching the guard: that guard is the §11 backstop for authored prose, and a
+    revision still cannot write a number.
+    """
+    from datetime import date
+
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    replies = client.post(f"/api/chats/{chat_id}/messages",
+                          json={"text": "Reporting date is 17-09-2026."}
+                          ).json()["messages"]
+    joined = " ".join(m["content"].get("text", "") for m in replies).lower()
+    assert "didn't change anything" not in joined
+    assert "17-09-2026" in joined
+
+    # It reached `PMIProject`, not an entity — and everything derived from the
+    # reporting date was recomputed rather than left pointing at the old one.
+    assert json_store.load_project(session_id).reporting_date == date(2026, 9, 17)
+    assert json_store.load_analysis(session_id).data_model.project.reporting_date \
+        == date(2026, 9, 17)
+
+
+def test_a_bare_follow_up_resolves_against_what_was_just_discussed(
+        client, sample_files):
+    """"The deadline is 12-08-2026." names no entity at all.
+
+    Right after the agent asked about one, it plainly refers to that one. With
+    no stored focus it resolved to nothing, and the turn dead-ended.
+    """
+    from app.agent import knowledge
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    focus = knowledge.load(session_id).focus
+    if focus is None:
+        pytest.skip("this sample left no gaps to ask about")
+
+    # A value of the kind the focused field holds — the field is chosen from the
+    # value's shape, so a date typed into an owner field would (correctly) land
+    # somewhere else and prove nothing about focus resolution.
+    is_date_field = focus.field.endswith("_date") or focus.field == "deadline"
+    supplied, expected = (("12-08-2026", "2026-08-12") if is_date_field
+                          else ("Anna Schmidt", "Anna Schmidt"))
+
+    reply = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": f"The {focus.field.replace('_', ' ')} is {supplied}."},
+    ).json()["messages"]
+    joined = " ".join(m["content"].get("text", "") for m in reply).lower()
+    assert "couldn't tell" not in joined
+
+    collection, id_attr, _label = _collection_for(focus.entity_type)
+    model = json_store.load_analysis(session_id).data_model
+    entity = next(e for e in getattr(model, collection)
+                  if getattr(e, id_attr) == focus.entity_id)
+    assert str(getattr(entity, focus.field)) == expected
+
+
+def _collection_for(entity_type: str):
+    from app.agent.nl_updates import LABELS
+
+    return LABELS[entity_type]
+
+
+def test_a_pasted_block_fills_many_due_dates_at_once(client, sample_files):
+    """The "which 8 tasks have no due date?" case, answered in one paste.
+
+    A user copies the agent's own "<title> — <owner> · due —" list, fills the
+    dashes and pastes it back. That is not a single "X is Y" sentence, so the
+    one-at-a-time parser never saw it and nothing was saved. `apply_bulk` routes
+    each line through the same engine, so every date lands in the model with the
+    same "supplied by the user" provenance.
+    """
+    from datetime import date
+
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    model = json_store.load_analysis(session_id).data_model
+    tasks = [t for t in model.tasks if t.title and t.owner][:3]
+    if len(tasks) < 2:
+        pytest.skip("this sample has too few owned tasks to paste")
+
+    paste = "\n".join(f"{t.title} — {t.owner} · due — 12-08-2026" for t in tasks)
+    replies = client.post(f"/api/chats/{chat_id}/messages",
+                          json={"text": paste}).json()["messages"]
+    joined = " ".join(m["content"].get("text", "") for m in replies).lower()
+    assert "saved" in joined and "regenerate" in joined
+
+    updated = json_store.load_analysis(session_id).data_model
+    for original in tasks:
+        now = next(t for t in updated.tasks if t.task_id == original.task_id)
+        assert now.due_date == date(2026, 8, 12), f"{original.title} did not land"
+
+
+def test_editing_a_card_saves_the_users_text_and_survives_a_replan(
+        client, sample_files):
+    """§ editable prose. A card's narrative is the user's to rewrite, and the
+    rewrite outlives the next re-plan — stored as an override in the KB, not only
+    in the content version a re-plan would rebuild from the model."""
+    from app.report import store as report_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    content = report_store.load(session_id)
+    block = next((b for s in content.sections for b in s.blocks
+                  if b.kind == "bullets" and b.items), None)
+    if block is None:
+        pytest.skip("this sample produced no bullet card to edit")
+
+    mine = "Integration is on track for Day 1.\nNo blockers this week."
+    body = client.post(f"/api/content/{session_id}/prose",
+                       json={"block_id": block.block_id, "text": mine}).json()
+    assert body["applied"] is True
+
+    after = report_store.load(session_id)
+    edited = next(b for s in after.sections for b in s.blocks
+                  if b.block_id == block.block_id)
+    assert [i.text for i in edited.items] == mine.splitlines()
+    assert all(i.authored_by == "user" for i in edited.items)
+
+    # A re-plan rebuilds every block from the model — the override must win.
+    client.post(f"/api/content/{session_id}")
+    replanned = next(b for s in report_store.load(session_id).sections
+                     for b in s.blocks if b.block_id == block.block_id)
+    assert [i.text for i in replanned.items] == mine.splitlines()
+
+
+def test_editing_a_card_refuses_an_invented_figure(client, sample_files):
+    """The split, enforced: prose is free, a *number* the report does not hold is
+    not. Refusing it here keeps the deck and the workbook from disagreeing with a
+    figure the user typed into one card's text — §11's whole point."""
+    from app.report import store as report_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    content = report_store.load(session_id)
+    block = next((b for s in content.sections for b in s.blocks
+                  if b.kind == "bullets" and b.items), None)
+    if block is None:
+        pytest.skip("this sample produced no bullet card to edit")
+
+    body = client.post(
+        f"/api/content/{session_id}/prose",
+        json={"block_id": block.block_id,
+              "text": "We now have 4173 critical risks open."},
+    ).json()
+    assert body["applied"] is False
+    assert "4173" in body["message"]
+    # Nothing was stored — the card still reads as it did.
+    unchanged = report_store.load(session_id)
+    still = next(b for s in unchanged.sections for b in s.blocks
+                 if b.block_id == block.block_id)
+    assert [i.text for i in still.items] == [i.text for i in block.items]
+
+
+def test_a_correction_leaves_a_drafted_report_stale(client, sample_files):
+    """A value the user supplies must not survive into an unchanged draft.
+
+    The KB's content revision is part of the report fingerprint, so anything the
+    user tells us forces a re-plan before the report renders — the same
+    discipline that already covers a resolved conflict. A report that looks
+    current while stating a figure the user has since corrected is the worst
+    output this system can produce.
+    """
+    from app.report import store as report_store
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    analysis = json_store.load_analysis(session_id)
+    drafted = report_store.load(session_id)
+    assert not report_store.is_stale(drafted, analysis.data_model,
+                                     analysis.quality_report)
+
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "Reporting date is 17-09-2026."})
+
+    fresh = json_store.load_analysis(session_id)
+    assert report_store.is_stale(drafted, fresh.data_model, fresh.quality_report)
+
+
+def test_a_skipped_gap_is_not_asked_about_again(client, sample_files):
+    """A skip used to live only in `pending.json` and die with the exchange, so
+    the same question came back the next time collection started."""
+    from app.agent import knowledge
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    first = knowledge.load(session_id).focus
+    if first is None:
+        pytest.skip("this sample left no gaps to ask about")
+
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "next"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "stop"})
+
+    kb = knowledge.load(session_id)
+    assert kb.declined_gaps, "the skip was not recorded durably"
+
+    # Restarting collection moves past it rather than re-asking.
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "fill the gaps"})
+    resumed = knowledge.load(session_id).focus
+    assert resumed is None or resumed.entity_id != first.entity_id \
+        or resumed.field != first.field
+
+
+def test_a_requested_structure_drives_the_order_in_every_format(client, sample_files):
+    """§17. A structure the user describes replaces the house deck — and because
+    every format plans from the same content, it applies to all of them, not
+    just the one they happened to ask for first."""
+    from app.report import store as report_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+
+    client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Create a status report for the steering committee with the "
+                "following sections: 1. Risks 2. Budget 3. Milestones",
+    })
+
+    order = [s.section_id for s in report_store.load(session_id).narrative()]
+    # The requested three, in order, between the always-present bookends.
+    assert order[0] == "summary.executive"
+    assert order[-1] == "quality.limitations"
+    middle = [s for s in order if s not in ("summary.executive",
+                                            "quality.limitations")]
+    assert middle == ["risks.critical", "finance.budget_detail", "milestones"]
+
+
+def test_uploading_files_mid_chat_is_a_turn_with_an_answer(client, sample_files):
+    """An upload used to be a silent side effect.
+
+    `POST /api/upload` wrote the bytes; the "3 files ready" line was invented
+    client-side and vanished when the chat was reopened. Nothing server-side had
+    re-read anything, so the report stayed built from the original files while
+    looking current — and the user had no way to tell.
+    """
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
+
+    before = json_store.load_analysis(session_id)
+
+    extra = "synergy_tracker.xlsx"
+    if not (sample_files / extra).exists():
+        pytest.skip(f"no {extra} in the sample set")
+
+    with open(sample_files / extra, "rb") as handle:
+        body = client.post(
+            f"/api/chats/{chat_id}/files",
+            files={"files": (extra, handle, "application/octet-stream")},
+        ).json()
+
+    # The upload is stored in the transcript, so it survives a reopen.
+    transcript = client.get(f"/api/chats/{chat_id}").json()["messages"]
+    assert any(m["kind"] == "files" and m["role"] == "user" for m in transcript)
+
+    # …and it was answered, with what actually changed.
+    joined = " ".join(m["content"].get("text", "") for m in body["messages"])
+    assert extra in joined
+
+    # Everything was re-read, not just the new file — a conflict only exists
+    # between two sources considered together.
+    after = json_store.load_analysis(session_id)
+    assert extra in after.data_model.source_files
+    assert set(before.data_model.source_files) <= set(after.data_model.source_files)
 
 
 def test_reopening_a_chat_returns_the_whole_transcript(client):
@@ -149,6 +588,70 @@ def test_a_render_request_names_the_format_the_user_asked_for():
     turn = _classify_by_keyword("generate it as word")
     assert turn.intent == "render"
     assert turn.output_format == "word"
+
+
+def test_a_picture_is_a_format_the_agent_recognises():
+    """"Generate an image…" had no format entry and no renderer branch, so it
+    fell through to a re-plan and handed back the data-quality report labelled
+    as the file the user asked for."""
+    from app.agent.conversation import _classify_by_keyword
+    from app.agent.graph import _canonical_format
+
+    turn = _classify_by_keyword(
+        "Generate an image describing the current milestones and project plan"
+    )
+    assert turn.intent == "render"
+    assert _canonical_format(turn.output_format) == "chart"
+
+
+def test_dashboard_in_excel_reaches_excel_not_the_html_dashboard():
+    """Both formats claim the word "dashboard"; the one the user named wins."""
+    from app.agent.conversation import _classify_by_keyword
+
+    assert _classify_by_keyword("generate a dashboard in excel").output_format \
+        == "excel"
+
+
+def test_an_obvious_audience_is_never_asked_about():
+    """§4 says to ask when the audience *cannot be inferred*. A request that
+    names its reader in plain words has already answered the question."""
+    from app.agent.conversation import _match_audience
+    from app.models.pmi import Audience
+
+    assert _match_audience("a pack for the integration director") is Audience.EXECUTIVE
+    assert _match_audience("for the steering committee") is Audience.EXECUTIVE
+    assert _match_audience("the imo needs this") is Audience.PMO
+    # "workstream" used to be filed under PMO, so every workstream request
+    # produced an IMO document.
+    assert _match_audience("for the hr workstream leads") is Audience.WORKSTREAM
+
+
+def test_the_users_own_words_title_the_report(client, sample_files):
+    """A deck headed "IMO / PMO" for someone who answered "Integration Director"
+    tells them it was written for somebody else.
+
+    `Audience` stays the internal planning key — there are four report shapes and
+    no more — but the title page carries the label the user used.
+    """
+    from app.report import store as report_store
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+
+    # The agent asks who it is for, openly rather than as a closed list…
+    asked = client.post(f"/api/chats/{chat_id}/messages",
+                        json={"text": "build me a report"}).json()["messages"][-1]
+    assert asked["kind"] == "audience_choice"
+    assert asked["content"]["free_text"] is True
+
+    # …and the answer is not one of the four chips.
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "Integration Director"})
+
+    content = report_store.load(session_id)
+    assert content is not None
+    assert content.audience_label == "Integration Director"
+    assert "Integration Director" in content.subtitle
 
 
 def test_an_edit_instruction_is_read_as_a_revision_not_a_new_report():
@@ -549,25 +1052,53 @@ def test_a_chat_drafted_report_has_an_executive_summary(client, loaded):
 
 
 # ================================================ completeness gaps are usable
-def test_completeness_gaps_are_listed_and_fillable(client, loaded):
+def test_completeness_gaps_are_collected_one_at_a_time(client, loaded):
+    """§5. Gaps are no longer a batch form card — after a draft exists the agent
+    asks for each missing value in prose, one turn at a time."""
     chat_id, session_id = loaded
 
     replies = client.post(f"/api/chats/{chat_id}/messages",
                           json={"text": "give me a SteerCo deck"}).json()["messages"]
-    panels = [m for m in replies if m["kind"] == "issues"]
-    if not panels:
+    assert any(m["kind"] == "preview" for m in replies), "no draft was produced"
+
+    prompts = [m for m in replies
+               if m["kind"] == "text" and "type 'next' to skip" in m["content"]["text"]]
+    if not prompts:
         pytest.skip("this sample produced no fillable gaps")
 
-    issue = panels[0]["content"]["issues"][0]
-    assert issue["field"] and issue["entity_label"]
+    # 'next' skips the current field and moves on to the next question.
+    skipped = client.post(f"/api/chats/{chat_id}/messages",
+                          json={"text": "next"}).json()["messages"][-1]
+    assert skipped["kind"] == "text"
 
+    # A supplied value is saved straight into the durable model and re-scored.
+    before = client.get(f"/api/quality/{session_id}").json().get("score")
+    saved = client.post(f"/api/chats/{chat_id}/messages",
+                        json={"text": "Anna Schmidt"}).json()["messages"]
+    assert saved, "the value produced no reply"
+    after = client.get(f"/api/quality/{session_id}").json().get("score")
+    # Filling a gap can only hold or improve the score, never lose it.
+    if before is not None and after is not None:
+        assert after >= before
+
+
+def test_the_rest_endpoint_still_fills_a_gap(client, loaded):
+    """The chat path and `/api/issues/{sid}/fill` share one engine; the REST
+    route stays available for programmatic use."""
+    chat_id, session_id = loaded
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a SteerCo deck"})
+
+    issues = client.get(f"/api/issues/{session_id}").json()["issues"]
+    fillable = [i for i in issues if i["fillable"]]
+    if not fillable:
+        pytest.skip("this sample produced no fillable gaps")
+
+    issue = fillable[0]
     filled = client.post(f"/api/issues/{session_id}/fill",
                          json={"issue_id": issue["issue_id"],
                                "value": "Anna Schmidt"}).json()
-
     if filled["applied"]:
-        # Closing a gap must re-score; a quality score that ignores the fix is
-        # worse than no score.
         assert "quality_score" in filled
         assert client.post(f"/api/issues/{session_id}/fill",
                            json={"issue_id": issue["issue_id"], "value": "x"}

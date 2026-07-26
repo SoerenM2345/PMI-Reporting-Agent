@@ -26,9 +26,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from app.config import get_settings
 from app.extractors.base import make_source
-from app.llm import ImagePart, LLMError, get_client
+from app.llm import ImagePart, LLMError, get_client, vision_model
 from app.llm.prompts import load as load_prompt
 from app.llm.schemas import ExtractedImageItem, ImageExtraction
 from app.models.pmi import ExtractionMethod, ImageRegion, SourceFormat
@@ -99,7 +98,7 @@ def _interpret(prepared: PreparedImage) -> ImageExtraction:
             "actually see. Leave out anything you cannot read."
         ),
         output_model=ImageExtraction,
-        model=get_settings().vision_model,
+        model=vision_model(),
         images=[ImagePart(b64=prepared.b64, media_type=prepared.media_type)],
     )
 

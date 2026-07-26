@@ -4,6 +4,7 @@ import * as api from "./api";
 import Composer from "./components/chat/Composer";
 import MessageBubble from "./components/chat/MessageBubble";
 import ModelPicker from "./components/chat/ModelPicker";
+import ProjectPanel from "./components/chat/ProjectPanel";
 import Sidebar from "./components/chat/Sidebar";
 import Thinking from "./components/chat/Thinking";
 
@@ -27,11 +28,19 @@ export default function App() {
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
 
+  // Projects are a filing layer over chats. `activeProject` non-null means the
+  // main pane shows that project's knowledge editor instead of a conversation;
+  // opening or creating a chat clears it, so the two views never overlap.
+  const [projects, setProjects] = useState([]);
+  const [activeProject, setActiveProject] = useState(null);
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const bottom = useRef(null);
+  const messageCount = useRef(0);
 
   useEffect(() => {
+    refreshProjects();
     refreshChats().then((existing) => {
       if (existing.length) openChat(existing[0].chat_id);
       else newChat();
@@ -39,9 +48,16 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Only follow the conversation to the bottom when a *new* turn is added.
+  // Resolving a conflict (and editing a preview cell) updates a message in
+  // place; scrolling then would yank the user away from the card they just
+  // acted on. Guarding on the count keeps them where they were.
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, busy]);
+    if (messages.length > messageCount.current) {
+      bottom.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    messageCount.current = messages.length;
+  }, [messages]);
 
   const run = async (fn) => {
     setBusy(true);
@@ -62,9 +78,19 @@ export default function App() {
     return body.chats;
   };
 
-  const newChat = () =>
+  const refreshProjects = async () => {
+    const body = await api.listProjects();
+    setProjects(body.projects);
+    return body.projects;
+  };
+
+  // A chat is always created inside or outside a project — `projectId` null is
+  // "outside". Opening a chat leaves the project view, so the new conversation
+  // is what the user is looking at.
+  const newChat = (projectId = null) =>
     run(async () => {
-      const body = await api.createChat({ title: "New chat" });
+      const body = await api.createChat({ title: "New chat", project_id: projectId });
+      setActiveProject(null);
       setChatId(body.chat.chat_id);
       setChat(body.chat);
       setSessionId(body.session_id);
@@ -81,47 +107,126 @@ export default function App() {
   const openChat = (id) =>
     run(async () => {
       const body = await api.getChat(id);
+      setActiveProject(null);
       setChatId(id);
       setChat(body.chat);
       setSessionId(body.chat.session_id);
       setMessages(body.messages);
     });
 
-  const send = (text) =>
+  /* ------------------------------------------------------------ projects */
+
+  const openProject = (id) =>
     run(async () => {
-      // Show the user's turn immediately; the server assigns the real id.
-      setMessages((prior) => [...prior, userSays(text)]);
-      const body = await api.sendMessage(chatId, text);
-      setMessages((prior) => [...prior.slice(0, -1), ...body.messages]);
-      await refreshChats();
+      // Fetch the full record — the list carries name/icon/counts, but the
+      // knowledge text is only returned by the single-project read.
+      const body = await api.getProject(id);
+      setActiveProject(body.project);
     });
 
-  const upload = (files) =>
+  const createProject = ({ name, icon }) =>
     run(async () => {
-      const body = await api.uploadFiles(sessionId, files);
+      const body = await api.createProject({ name, icon });
+      await refreshProjects();
+      // Drop the user straight into the new project so they can add knowledge.
+      setActiveProject(body.project);
+    });
+
+  const renameProject = (id, name) =>
+    run(async () => {
+      const body = await api.patchProject(id, { name });
+      await refreshProjects();
+      if (activeProject?.project_id === id) setActiveProject(body.project);
+    });
+
+  const changeProjectIcon = (id, icon) =>
+    run(async () => {
+      const body = await api.patchProject(id, { icon });
+      await refreshProjects();
+      if (activeProject?.project_id === id) setActiveProject(body.project);
+    });
+
+  const saveProjectKnowledge = (id, knowledge) =>
+    run(async () => {
+      const body = await api.patchProject(id, { knowledge });
+      await refreshProjects();
+      setActiveProject(body.project);
+      return body.project;
+    });
+
+  const deleteProject = (id, name) =>
+    run(async () => {
+      // Deleting a project keeps its chats — they fall back to the top level.
+      // Worth confirming anyway: it is a container the user built on purpose.
+      if (!window.confirm(`Delete project “${name}”? Its chats are kept.`)) {
+        return;
+      }
+      await api.deleteProject(id);
+      await refreshProjects();
+      await refreshChats();
+      if (activeProject?.project_id === id) {
+        setActiveProject(null);
+        if (chatId) openChat(chatId);
+        else newChat();
+      }
+    });
+
+  // One turn = optional attachments + optional prompt. Files are uploaded first
+  // so `respond()` sees them on disk, then the prompt is sent as a single
+  // request — this is what lets a user drop the trackers and say what they want
+  // in the same message.
+  const send = (text, files = []) =>
+    run(async () => {
+      const trimmed = (text || "").trim();
+      if (!trimmed && files.length === 0) return null;
+
+      const filesBubbleId = `local-files-${Date.now()}`;
+      const userMsgId = `local-user-${Date.now()}`;
+
+      // Show the user's turn immediately; the server assigns the real ids.
       setMessages((prior) => [
         ...prior,
-        {
-          message_id: `local-files-${Date.now()}`,
-          role: "user",
-          kind: "files",
-          content: { files: body.files },
-        },
-        ...(body.rejected?.length
+        ...(files.length
           ? [
-              agentSays(
-                `I couldn't read: ${body.rejected
-                  .map((r) => r.name ?? r)
-                  .join(", ")}.`,
-                "notice",
-              ),
+              {
+                message_id: filesBubbleId,
+                role: "user",
+                kind: "files",
+                content: { files: files.map((f) => ({ name: f.name })) },
+              },
             ]
           : []),
-        agentSays(
-          `${body.files.length} file(s) ready. What do you need — a SteerCo ` +
-            "deck, an IMO status report, a Finance dashboard?",
-        ),
+        ...(trimmed
+          ? [{ message_id: userMsgId, role: "user", kind: "text", content: { text: trimmed } }]
+          : []),
       ]);
+
+      if (files.length) {
+        // Posted to the chat, not to the bare upload endpoint: the upload is a
+        // turn with an answer. It used to be a silent side effect, so the "N
+        // files ready" line was invented here and vanished on reopen, and
+        // nothing server-side re-read anything.
+        const body = await api.addChatFiles(chatId, files);
+        setMessages((prior) => [
+          ...prior.map((m) =>
+            m.message_id === filesBubbleId
+              ? { ...m, content: { files: (body.saved ?? []).map((n) => ({ name: n })) } }
+              : m,
+          ),
+          ...(body.messages ?? []),
+        ]);
+      }
+
+      if (trimmed) {
+        const body = await api.sendMessage(chatId, trimmed);
+        // Swap the optimistic prose bubble for the server's stored turn(s).
+        setMessages((prior) => [
+          ...prior.filter((m) => m.message_id !== userMsgId),
+          ...body.messages,
+        ]);
+      }
+
+      await refreshChats();
     });
 
   const handleAction = (action) =>
@@ -134,13 +239,29 @@ export default function App() {
         const analysis = await api.resolveConflicts(sessionId, {
           [action.conflictId]: action.choice,
         });
-        setMessages((prior) => [
-          ...prior,
-          agentSays(
-            `Recorded. ${analysis.unresolved_conflicts?.length ?? 0} conflict(s) ` +
-              "still open. Ask me to re-plan so the draft matches.",
+        // Update the conflict card in place with the backend's authoritative
+        // resolution, so the chosen option is highlighted and the card shows as
+        // resolved right where the user is. Appending a "Recorded" turn instead
+        // both lost the highlight and scrolled the user to the bottom of the
+        // chat — the bug this fixes.
+        const resolved = new Map(
+          (analysis.conflicts ?? []).map((c) => [c.conflict_id, c]),
+        );
+        setMessages((prior) =>
+          prior.map((m) =>
+            m.kind === "conflict"
+              ? {
+                  ...m,
+                  content: {
+                    ...m.content,
+                    conflicts: (m.content.conflicts ?? []).map(
+                      (c) => resolved.get(c.conflict_id) ?? c,
+                    ),
+                  },
+                }
+              : m,
           ),
-        ]);
+        );
         return null;
       }
 
@@ -149,6 +270,30 @@ export default function App() {
         // value ("that is not a date I can read") is feedback the user needs
         // next to the box they typed in, not as a new turn further down.
         return api.fillIssue(sessionId, action.issueId, action.value);
+      }
+
+      if (action.type === "edit_cell") {
+        // Returned to the table so a rejection lands next to the cell that
+        // caused it. On success the whole report has been re-planned from the
+        // updated model, so the preview is refreshed from the response rather
+        // than patched — the two must not be able to disagree.
+        const body = await api.editCell(sessionId, action);
+        if (body.applied) {
+          setMessages((prior) => withRefreshedPreview(prior, body));
+        }
+        return body;
+      }
+
+      if (action.type === "edit_prose") {
+        // A rewritten card. Like edit_cell, the whole report is re-planned from
+        // the override, so the preview is refreshed from the response rather
+        // than patched — the two must not be able to disagree. A rejected value
+        // (a figure the report doesn't hold) lands back next to the editor.
+        const body = await api.editProse(sessionId, action);
+        if (body.applied) {
+          setMessages((prior) => withRefreshedPreview(prior, body));
+        }
+        return body;
       }
 
       if (action.type === "generate") {
@@ -210,15 +355,38 @@ export default function App() {
     <div className="flex h-screen bg-slate-50">
       <Sidebar
         chats={chats}
-        activeChatId={chatId}
+        projects={projects}
+        activeChatId={activeProject ? null : chatId}
+        activeProjectId={activeProject?.project_id}
         onNew={newChat}
         onOpen={openChat}
         onRename={rename}
         onArchive={archive}
         onDelete={remove}
+        onOpenProject={openProject}
+        onCreateProject={createProject}
+        onRenameProject={renameProject}
+        onChangeProjectIcon={changeProjectIcon}
+        onDeleteProject={deleteProject}
         busy={busy}
       />
 
+      {activeProject ? (
+        <ProjectPanel
+          project={activeProject}
+          chats={chats.filter((c) => c.project_id === activeProject.project_id)}
+          busy={busy}
+          onSaveKnowledge={(text) =>
+            saveProjectKnowledge(activeProject.project_id, text)
+          }
+          onNewChat={() => newChat(activeProject.project_id)}
+          onOpenChat={openChat}
+          onChangeIcon={(icon) =>
+            changeProjectIcon(activeProject.project_id, icon)
+          }
+          onRename={(name) => renameProject(activeProject.project_id, name)}
+        />
+      ) : (
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b
                            border-slate-200 bg-white px-6 py-3">
@@ -267,11 +435,11 @@ export default function App() {
 
         <Composer
           onSend={send}
-          onUpload={upload}
           busy={busy}
           disabled={!chatId}
         />
       </main>
+      )}
     </div>
   );
 }
@@ -283,6 +451,34 @@ function agentSays(text, kind = "text") {
     kind,
     content: { text },
   };
+}
+
+// Overlay the re-planned content a cell/prose edit returned onto the preview the
+// user is looking at — the most recent one. Matching by an exact `version - 1`
+// offset used to drop the update whenever the stored content had advanced by
+// more than one version since that preview was shown (a re-plan in between), so
+// the table kept the old value and the edit read as "not saved". The whole
+// re-planned content comes back in the response, so refreshing the last preview
+// is both correct and can't disagree with the deck.
+function withRefreshedPreview(messages, body) {
+  let target = -1;
+  messages.forEach((message, index) => {
+    if (message.kind === "preview") target = index;
+  });
+  if (target === -1) return messages;
+  return messages.map((message, index) =>
+    index === target
+      ? {
+          ...message,
+          content: {
+            ...message.content,
+            version: body.version,
+            markdown: body.markdown,
+            sections: body.blocks,
+          },
+        }
+      : message,
+  );
 }
 
 function userSays(text) {

@@ -111,7 +111,32 @@ def test_the_screenshot_warning_survives_into_every_format(content, tmp_path):
         assert "low confidence" in "\n".join(p.get_text() for p in document)
 
 
-# ================================================================== escaping
+# ============================================= the dashboard is self-contained
+def test_the_dashboard_is_one_self_contained_file(content, tmp_path):
+    """Item 11's non-negotiable. The output is mailed and opened offline, so a
+    CDN script, a remote stylesheet or a remote font would break it."""
+    import re
+
+    html = render_html(content)
+
+    # No external resource of any kind — everything inlined or a data: URI.
+    for match in re.findall(r'(?:src|href)\s*=\s*"([^"]*)"', html):
+        assert match.startswith("data:") or match.startswith("#"), \
+            f"dashboard references an external resource: {match!r}"
+    # The script is inlined, not linked — no <script src=…> anywhere.
+    assert "<script>" in html
+    assert not re.search(r'<script[^>]*\ssrc=', html)
+    assert not re.search(r'<link[^>]*\shref="https?:', html)
+
+
+def test_the_dashboard_carries_kpi_cards_and_sortable_tables(content):
+    """It became the branded dashboard, not a plain document: KPI cards from the
+    tiles, and tables the reader can sort and filter client-side."""
+    html = render_html(content)
+    assert 'class="kpi' in html
+    assert 'class="sortable"' in html and 'class="filter"' in html
+
+
 def test_html_escapes_content_that_came_out_of_an_uploaded_file(content, tmp_path):
     """Task titles and file names are attacker-influenced by construction —
     this tool's whole job is reading other people's documents."""

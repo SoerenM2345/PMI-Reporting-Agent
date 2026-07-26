@@ -41,6 +41,80 @@ def render_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_blocks(content: ReportContent) -> list[dict]:
+    """The narrative as structured sections, for a UI that can edit it.
+
+    The markdown above is the same content flattened to text, and flattening is
+    lossy in exactly the way that matters here: a cell in a markdown table has no
+    identity, so a click on it cannot be turned into "write 12-08-2026 into
+    milestone M1's planned date". `Cell.ref` survives this projection, which is
+    what makes the preview editable and what keeps the edit going to the *data
+    model* rather than to the stored text.
+
+    Deliberately a projection of the same `ReportContent`, not a second plan —
+    the preview and the deck must not be able to disagree.
+    """
+    return [
+        {
+            "section_id": section.section_id,
+            "label": section.label,
+            "headline": section.headline,
+            "empty_explanation": section.empty_explanation,
+            "blocks": [_block_payload(block, content) for block in section.blocks],
+        }
+        for section in content.narrative()
+    ]
+
+
+def _block_payload(block, content: ReportContent) -> dict:
+    base = {"kind": block.kind, "block_id": block.block_id,
+            "title": getattr(block, "title", None)}
+
+    if block.kind == "bullets":
+        return {**base, "items": [{"text": i.text, "emphasis": i.emphasis}
+                                  for i in block.items]}
+    if block.kind == "prose":
+        return {**base, "text": block.text}
+    if block.kind == "tiles":
+        return {**base, "tiles": [
+            {"label": t.label, "emphasis": t.emphasis,
+             "value": (content.facts.display(t.fact_key) if t.fact_key
+                       else (t.value or "Not Reported")),
+             "fact_key": t.fact_key}
+            for t in block.tiles
+        ]}
+    if block.kind == "chart":
+        return {**base, "caption": block.caption
+                or block.builder.replace("_", " ").title()}
+    if block.kind == "table":
+        if block.is_derived:
+            return {**base, "derived": True,
+                    "entity": block.query.entity if block.query else "rows",
+                    "columns": [], "rows": []}
+        return {
+            **base,
+            "derived": False,
+            "note": block.note,
+            "row_limit": block.row_limit,
+            "columns": [{"header": c.header, "kind": c.kind} for c in block.columns],
+            "rows": [
+                [
+                    {
+                        "text": cell.text,
+                        # Only a cell that names one model field can be written
+                        # back. A computed variance or a citation carries no ref
+                        # and the UI must not offer to edit it.
+                        "editable": bool(cell.ref and cell.ref.field),
+                        "field": cell.ref.field if cell.ref else None,
+                    }
+                    for cell in row
+                ]
+                for row in block.rows[:(block.row_limit or len(block.rows))]
+            ],
+        }
+    return base
+
+
 def _section(
     section: Section, content: ReportContent, show_provenance: bool
 ) -> list[str]:

@@ -19,6 +19,7 @@ from app.extractors.base import make_source
 from app.models.pmi import (
     Audience,
     BudgetItem,
+    Dependency,
     Milestone,
     PMIDataModel,
     PMIProject,
@@ -86,7 +87,111 @@ def ids(content) -> list[str]:
     return [s.section_id for s in content.narrative()]
 
 
+# ======================================================= user-defined structure
+def test_a_requested_structure_replaces_the_house_deck(model):
+    """§17. `DECKS` is a good default and used to be the only possible answer.
+
+    Someone who wrote out the sections they wanted got the house template
+    anyway, which reads as the tool not having listened. And because every
+    format plans from this one object, the order applies to the deck, the
+    workbook, the document and the preview alike.
+    """
+    from app.report.structure import SectionSpec, StructureSpec
+
+    spec = StructureSpec(sections=[
+        SectionSpec(title="Budget"),
+        SectionSpec(title="Risks"),
+        SectionSpec(title="Milestones"),
+    ])
+    order = ids(plan(model, Audience.EXECUTIVE, structure=spec))
+
+    assert order[0] == "summary.executive"
+    assert order[1:4] == ["finance.budget_detail", "risks.critical", "milestones"]
+    # §12.5 is not a section the user chooses between — it is what the document
+    # says about its own reliability, and it is always last.
+    assert order[-1] == "quality.limitations"
+    # The house deck's sections that were not asked for are gone.
+    assert "decisions" not in order
+
+
+def test_a_requested_section_with_no_data_is_stated_not_dropped(model):
+    """§21.17. A reader who asked for "TSA exit" and sees no such section
+    concludes there is nothing to report. Saying nothing covers it is the
+    truth: nobody wrote it down."""
+    from app.report.structure import SectionSpec, StructureSpec
+
+    content = plan(model, Audience.PMO, structure=StructureSpec(sections=[
+        SectionSpec(title="Risks"),
+        SectionSpec(title="TSA exit readiness"),
+    ]))
+
+    requested = next(s for s in content.narrative()
+                     if s.label == "TSA exit readiness")
+    assert requested.blocks == []
+    assert "TSA exit readiness" in requested.empty_explanation
+    assert requested.origin == "user"
+
+
+def test_the_limitations_section_cannot_be_structured_away(model):
+    """Asking for it explicitly must not produce it twice, and not asking for
+    it must not remove it."""
+    from app.report.structure import SectionSpec, StructureSpec
+
+    order = ids(plan(model, Audience.PMO, structure=StructureSpec(sections=[
+        SectionSpec(title="Data quality"),
+        SectionSpec(title="Risks"),
+    ])))
+
+    assert order.count("quality.limitations") == 1
+    assert order[-1] == "quality.limitations"
+
+
 # ============================================================ §12.1-12.4 decks
+def test_a_pmo_plan_with_dependencies_renders(model):
+    """The dependencies section read `from_workstream` / `to_workstream`, which
+    `Dependency` has never declared — so any PMO or Workstream report whose files
+    contained a dependency raised `AttributeError` out of `plan()` and reached
+    the user as a bare 500 on the chat turn. No test covered the section because
+    no fixture carried a dependency.
+    """
+    model.dependencies = [
+        Dependency(dependency_id="D1",
+                   description="HR data feed needed before payroll cutover",
+                   providing_workstream="HR", receiving_workstream="Finance",
+                   owner="Anna Schmidt", required_date=date(2026, 6, 1),
+                   status=Status.IN_PROGRESS),
+    ]
+
+    for audience in (Audience.PMO, Audience.WORKSTREAM):
+        content = plan(model, audience)
+        section = content.section("dependencies")
+        assert section is not None, f"{audience} lost its dependencies section"
+        row = section.blocks[0].rows[0]
+        assert [c.text for c in row][1:3] == ["HR", "Finance"]
+        assert content.warnings == []
+
+
+def test_one_broken_section_does_not_cost_the_whole_report(model, monkeypatch):
+    """Fault isolation, the same discipline `charts.generate` already applies.
+
+    A builder that raises used to propagate out of `plan()` and lose every other
+    section with it. The gap is reported rather than swallowed — never return
+    empty on failure.
+    """
+    import app.report.planner as planner
+
+    def boom(_model):
+        raise RuntimeError("source column vanished")
+
+    monkeypatch.setattr(planner, "_critical_risks", boom)
+    content = plan(model, Audience.EXECUTIVE)
+
+    assert content.section("risks.critical") is None
+    assert content.section("decisions") is not None
+    assert any("risks.critical" in w and "source column vanished" in w
+               for w in content.warnings)
+
+
 def test_each_audience_gets_a_different_document(model):
     """§12.1-12.4 are not one report with a filter on it — a SteerCo wants
     decisions and an IMO wants overdue work."""
@@ -195,7 +300,19 @@ def test_the_preview_reads_as_a_report(model):
     assert "## Status at a glance" in text
     assert "One critical risk is unowned." in text
     assert "| Overall progress | **60%** |" in text
-    assert "Prototype output" in text
+
+
+def test_the_report_carries_no_prototype_disclaimer(model):
+    """A finished report must not describe itself as a prototype.
+
+    The stamp used to be applied twice — once as `ReportContent.footer` and once
+    unconditionally by the deck renderer on every slide — so it reached readers
+    of every format regardless of what was planned.
+    """
+    content = plan(model, Audience.EXECUTIVE)
+
+    assert content.footer == ""
+    assert "Prototype output" not in render_markdown(content)
 
 
 def test_a_chart_is_described_rather_than_silently_missing(model):

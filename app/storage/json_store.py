@@ -36,6 +36,9 @@ class SessionAnalysis(BaseModel):
     output_type: str = "powerpoint"
     topic: str = "status"
     audience: Optional[Audience] = None
+    #: The words the user used for their reader, when they gave any. `audience`
+    #: is the planning key; this is what goes on the title page.
+    audience_label: str = ""
     needs_audience: bool = False
 
     data_model: PMIDataModel = Field(default_factory=PMIDataModel)
@@ -125,3 +128,32 @@ def load_analysis(session_id: str) -> Optional[SessionAnalysis]:
         log.warning("stored analysis for %s is unreadable (%s); re-analysis needed",
                     session_id, exc)
         return None
+
+
+# ------------------------------------------------------------------- pending
+# A tiny, durable pointer for a multi-turn chat exchange — which missing value
+# the agent is currently asking for, or whether it is waiting for a "regenerate?"
+# yes/no. Deliberately *not* the transcript: the transcript is compacted
+# (`chat_store`) and is explicitly not the source of truth. Only the pointer
+# lives here; the list of gaps is always recomputed from `analysis.json`, so this
+# file can never disagree with the data it points into.
+def save_pending(session_id: str, state: dict) -> None:
+    directory = session_dir(session_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "pending.json").write_text(
+        json.dumps(state, indent=2, default=str), encoding="utf-8"
+    )
+
+
+def load_pending(session_id: str) -> Optional[dict]:
+    path = session_dir(session_id) / "pending.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (TypeError, ValueError):
+        return None
+
+
+def clear_pending(session_id: str) -> None:
+    (session_dir(session_id) / "pending.json").unlink(missing_ok=True)

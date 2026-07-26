@@ -10,8 +10,11 @@ swap providers (and inject a fake vision client) between cases.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator, Optional
 
-from app.config import get_settings
+from app.config import ModelRoles, get_settings
 from app.llm.base import (
     DocumentPart,
     ImagePart,
@@ -29,12 +32,60 @@ _override: LLMClient | None = None
 #: be opened silently decided which backend every other chat used.
 _clients: dict[str, LLMClient] = {}
 
+#: The provider + three model roles for the run in flight, set once per chat turn
+#: by `use_selection`. A `ContextVar` rather than a module global on purpose: a
+#: global is exactly the cross-session bleed CLAUDE.md warns about for the §9
+#: override — one chat's choice of backend would govern every concurrent request
+#: until the next one overwrote it. A context var is isolated per request/thread,
+#: so `get_client()` and the `*_model()` helpers below see only *this* turn's pick
+#: and fall back to `get_settings()` when nothing set it (the wizard API, tests).
+_selection: ContextVar[Optional[ModelRoles]] = ContextVar("llm_selection", default=None)
+
+
+@contextmanager
+def use_selection(selection: Optional[ModelRoles]) -> Iterator[None]:
+    """Scope every LLM call in the block to `selection`'s provider and models.
+
+    Wrapping a whole chat turn is enough: classification, extraction, summaries
+    and generation all resolve their client and model through the helpers here,
+    so the one context var reaches the whole pipeline without threading a
+    provider argument through every node and extractor signature."""
+    token = _selection.set(selection)
+    try:
+        yield
+    finally:
+        _selection.reset(token)
+
+
+def current_selection() -> Optional[ModelRoles]:
+    return _selection.get()
+
+
+def reasoning_model() -> str:
+    """Model for summaries / planning (§11), honouring the active selection."""
+    sel = _selection.get()
+    return sel.reasoning if sel else get_settings().llm_model
+
+
+def vision_model() -> str:
+    """Model for §5.6 image / scanned-PDF interpretation."""
+    sel = _selection.get()
+    return sel.vision if sel else get_settings().vision_model
+
+
+def fast_model() -> str:
+    """Model for cheap per-table / per-request classification."""
+    sel = _selection.get()
+    return sel.fast if sel else get_settings().fast_model
+
 
 def get_client(provider: str | None = None) -> LLMClient:
     if _override is not None:
         return _override
 
-    provider = provider or get_settings().llm_provider
+    if provider is None:
+        sel = _selection.get()
+        provider = sel.provider if sel else get_settings().llm_provider
     if provider not in _clients:
         _clients[provider] = _build_client(provider)
     return _clients[provider]
@@ -93,8 +144,13 @@ __all__ = [
     "LLMClient",
     "LLMError",
     "NotConfigured",
+    "current_selection",
+    "fast_model",
     "get_client",
     "llm_available",
+    "reasoning_model",
     "reset_client",
     "set_client",
+    "use_selection",
+    "vision_model",
 ]

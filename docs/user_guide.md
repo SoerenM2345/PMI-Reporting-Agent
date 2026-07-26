@@ -43,8 +43,11 @@ Optional, but it changes what the system can do.
 
 ```bash
 cp .env.example .env
-# add ANTHROPIC_API_KEY=sk-ant-...
+# add OPENAI_API_KEY=sk-...
 ```
+
+The default model is `gpt-5.6`. To use a different one, change `LLM_MODEL` in
+`.env` or pick it per-chat from the model picker — no code change either way.
 
 **Without a key**, everything still runs — extraction, all 39 consistency checks,
 conflict resolution, and the generated files. What you lose is the semantic layer:

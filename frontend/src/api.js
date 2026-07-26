@@ -10,9 +10,16 @@
  */
 
 async function call(path, options = {}) {
+  // A multipart body must NOT carry a Content-Type header — the browser sets
+  // it, boundary and all. Sending the JSON header with a FormData body makes
+  // the upload arrive unparseable.
+  const isForm = options.body instanceof FormData;
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: {
+      ...(isForm ? {} : { "Content-Type": "application/json" }),
+      ...(options.headers ?? {}),
+    },
   });
 
   let body = null;
@@ -38,31 +45,14 @@ export function createSession() {
   return call("/api/session", { method: "POST" });
 }
 
-export function setProject(payload) {
-  return call("/api/project", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function uploadFiles(sessionId, files) {
+/** Upload into a chat — a real conversational turn: the files are stored in the
+ *  transcript, everything is re-read, and the reply says what changed. This
+ *  replaced the bare `/api/upload` side effect the pre-chat wizard used. */
+export async function addChatFiles(chatId, files) {
   const form = new FormData();
   for (const file of files) form.append("files", file);
-
-  // No Content-Type header: the browser must set the multipart boundary itself.
-  const response = await fetch(`/api/upload?session_id=${sessionId}`, {
-    method: "POST",
-    body: form,
-  });
-  if (!response.ok) throw new Error(`Upload failed (${response.status})`);
-  return response.json();
-}
-
-export function analyze(payload) {
-  return call("/api/analyze", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  // No Content-Type header — the browser must set the multipart boundary.
+  return call(`/api/chats/${chatId}/files`, { method: "POST", body: form });
 }
 
 export function resolveConflicts(sessionId, choices) {
@@ -70,17 +60,6 @@ export function resolveConflicts(sessionId, choices) {
     method: "POST",
     body: JSON.stringify({ choices }),
   });
-}
-
-export function generate(sessionId, force = false) {
-  return call("/api/generate", {
-    method: "POST",
-    body: JSON.stringify({ session_id: sessionId, force }),
-  });
-}
-
-export function getQuality(sessionId) {
-  return call(`/api/quality/${sessionId}`);
 }
 
 export function downloadUrl(sessionId, filename) {
@@ -127,6 +106,37 @@ export function sendMessage(chatId, text) {
   });
 }
 
+/* --------------------------------------------------------------- projects */
+/* A project is a folder over chats plus a knowledge scratchpad. It owns no
+   session; a chat carries `project_id` to say which folder it lives in, and
+   null means "outside any project". */
+
+export function listProjects() {
+  return call("/api/projects");
+}
+
+export function createProject(payload = {}) {
+  return call("/api/projects", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getProject(projectId) {
+  return call(`/api/projects/${projectId}`);
+}
+
+export function patchProject(projectId, patch) {
+  return call(`/api/projects/${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteProject(projectId) {
+  return call(`/api/projects/${projectId}`, { method: "DELETE" });
+}
+
 /* --------------------------------------------------------- report content */
 /* The preview loop: plan -> read -> revise -> render. None of these re-run
    extraction, so iterating on wording is free. */
@@ -147,6 +157,32 @@ export function listContentVersions(sessionId) {
 export function revertContent(sessionId, version) {
   return call(`/api/content/${sessionId}/revert?version=${version}`, {
     method: "POST",
+  });
+}
+
+/** Edit one preview cell.
+ *
+ * The value is written **through to the data model** and the report re-planned,
+ * so the deck, the workbook and the document all pick it up. A rejected value
+ * comes back as `{applied: false, message}` — a 200 with a reason, not a 4xx the
+ * UI has to translate. */
+export function editCell(sessionId, { blockId, row, column, value }) {
+  return call(`/api/content/${sessionId}/cell`, {
+    method: "POST",
+    body: JSON.stringify({ block_id: blockId, row, column, value }),
+  });
+}
+
+/** Save rewritten card text (a prose or bullets block).
+ *
+ * The text is stored as a user override and the report re-planned, so it
+ * survives the next re-plan and appears in every format. A figure the report
+ * does not already hold comes back as `{applied: false, message}` — the split
+ * that keeps prose editable while numbers stay owned by the data model. */
+export function editProse(sessionId, { blockId, text }) {
+  return call(`/api/content/${sessionId}/prose`, {
+    method: "POST",
+    body: JSON.stringify({ block_id: blockId, text }),
   });
 }
 

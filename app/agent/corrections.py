@@ -132,6 +132,39 @@ def apply_correction(
     )
 
 
+def apply_and_persist(analysis, issue: ValidationIssue, raw_value: str) -> CorrectionResult:
+    """Apply a correction, re-run the checks, re-score, and save the analysis.
+
+    The write-back half of a correction, factored out so the two callers — the
+    REST ``/api/issues/{sid}/fill`` endpoint and the chat correction flow in
+    ``agent/conversation.py`` — stay byte-for-byte identical. Filling a gap makes
+    the check that reported it stop reporting it, moves the quality score, and
+    (because ``fingerprint`` reads entity/issue counts and the score) leaves any
+    drafted report stale, so it is re-planned before it renders. Persisting here
+    is what keeps the durable model — ``analysis.json`` — the single source of
+    truth, whether the value arrived over HTTP or in the chat.
+    """
+    from app.agent.consistency import run_checks
+    from app.agent.data_quality import build_report
+    from app.storage import json_store
+
+    model = analysis.data_model
+    result = apply_correction(model, issue, raw_value)
+    if not result.applied:
+        return result
+
+    results = run_checks(model)
+    model.conflicts = results.conflicts
+    model.validation_issues = results.issues
+    analysis.quality_report = build_report(
+        model,
+        failed_files=[e.split(":", 1)[0] for e in analysis.errors],
+        warnings=analysis.warnings,
+    )
+    json_store.save_analysis(analysis)
+    return result
+
+
 def _coerce(entity, field: str, raw: str) -> Any:
     """Turn the typed string into whatever the model expects.
 
