@@ -539,6 +539,245 @@ def delete_project(project_id: str) -> dict:
     return {"deleted": chat_store.delete_project(project_id)}
 
 
+# ================================================= unified conversation (§Phase 3)
+class ChatRequest(BaseModel):
+    """The one endpoint the workspace talks to (spec §"API Direction").
+
+    The frontend no longer sequences analyze → resolve → generate → download by
+    hand; it sends a message (and optionally the files it just uploaded, the draft
+    on screen, and any selected text) and gets back Markdown plus structured
+    actions."""
+
+    project_id: str
+    message: str
+    chat_id: Optional[str] = None
+    file_ids: Optional[list[str]] = None
+    active_draft_id: Optional[str] = None
+    selected_text: Optional[str] = None
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest) -> dict:
+    from app.project import orchestrator
+
+    resp = orchestrator.respond(
+        req.project_id, req.message, chat_id=req.chat_id,
+        active_draft_id=req.active_draft_id, selected_text=req.selected_text)
+    return resp.model_dump()
+
+
+@app.get("/api/projects/{project_id}/knowledge")
+def get_project_knowledge(project_id: str) -> dict:
+    """The project's current knowledge state — version, size, and the conflict gate.
+
+    Read by the workspace on open to show the status pill and decide whether a
+    report can be drafted yet."""
+    from app.project import conflict_impact
+    from app.project.json_repositories import default_repositories
+
+    knowledge = default_repositories().knowledge.current(project_id)
+    if knowledge is None:
+        return {"exists": False, "version": 0, "entity_count": 0}
+    return {
+        "exists": True,
+        "version": knowledge.version,
+        "entity_count": knowledge.entity_count(),
+        "conflict_state": conflict_impact.assess(knowledge).model_dump(),
+    }
+
+
+@app.post("/api/projects/{project_id}/files")
+async def upload_project_files(project_id: str,
+                               files: list[UploadFile] = File(...)) -> dict:
+    """Continuous ingestion: every uploaded file becomes a source, the knowledge
+    base re-derives incrementally, and affected drafts are flagged stale (§Phase 1)."""
+    import tempfile
+
+    from app.project import drafts as project_drafts
+    from app.project import files as project_files
+    from app.project.rebuild import rebuild
+
+    settings = get_settings()
+    limit = settings.upload_max_mb * 1024 * 1024
+    ingested: list[dict] = []
+    rejected: list[dict] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for upload_file in files:
+            name = Path(upload_file.filename or "").name
+            payload = await upload_file.read()
+            if len(payload) > limit:
+                rejected.append({"file": name,
+                                 "reason": f"larger than {settings.upload_max_mb} MB"})
+                continue
+            tmp_path = Path(tmp) / name
+            tmp_path.write_bytes(payload)
+            record = project_files.ingest_file(project_id, tmp_path)
+            ingested.append(record.model_dump())
+
+    knowledge = rebuild(project_id, trigger="upload")
+    stale = project_drafts.mark_stale_if_affected(project_id)
+    return {
+        "ingested": ingested,
+        "rejected": rejected,
+        "knowledge_version": knowledge.version,
+        "stale_drafts": [{"draft_id": d.draft_id, "status": d.status} for d in stale],
+    }
+
+
+# ============================================================ editable drafts (§Phase 2)
+class CreateDraftRequest(BaseModel):
+    audience: Optional[str] = None
+    audience_label: str = ""
+    title: Optional[str] = None
+    draft_type: str = "custom"
+    chat_id: Optional[str] = None
+
+
+class PatchDraftRequest(BaseModel):
+    """A direct user edit. Either the whole text (`content`)/`title`, or one
+    section (`section_id` + `text`). Every edit mints a new draft version."""
+
+    title: Optional[str] = None
+    content: Optional[str] = None
+    section_id: Optional[str] = None
+    text: Optional[str] = None
+    chat_id: Optional[str] = None
+
+
+class RegenerateSectionRequest(BaseModel):
+    section_id: str
+    chat_id: Optional[str] = None
+
+
+class RestoreVersionRequest(BaseModel):
+    version: int
+    chat_id: Optional[str] = None
+
+
+def _drafting():
+    """Imported lazily so the draft layer's imports never slow app startup."""
+    from app.project import drafting
+    from app.project.drafting import DraftError
+
+    return drafting, DraftError
+
+
+@app.post("/api/projects/{project_id}/drafts")
+def create_draft(project_id: str, req: CreateDraftRequest) -> dict:
+    _project_or_404(project_id)
+    drafting, DraftError = _drafting()
+    try:
+        draft = drafting.create_draft(
+            project_id, audience=req.audience, audience_label=req.audience_label,
+            title=req.title, draft_type=req.draft_type, chat_id=req.chat_id)
+    except DraftError as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)})
+    return {"draft": draft.model_dump()}
+
+
+@app.get("/api/projects/{project_id}/drafts")
+def list_drafts(project_id: str) -> dict:
+    _project_or_404(project_id)
+    from app.project.json_repositories import default_repositories
+
+    return {"drafts": [d.model_dump()
+                       for d in default_repositories().drafts.list(project_id)]}
+
+
+@app.get("/api/projects/{project_id}/drafts/{draft_id}")
+def get_draft(project_id: str, draft_id: str) -> dict:
+    from app.project.json_repositories import default_repositories
+
+    draft = default_repositories().drafts.get(project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail={"error": "no_such_draft"})
+    return {"draft": draft.model_dump()}
+
+
+@app.patch("/api/projects/{project_id}/drafts/{draft_id}")
+def patch_draft(project_id: str, draft_id: str, req: PatchDraftRequest) -> dict:
+    drafting, DraftError = _drafting()
+    try:
+        if req.section_id is not None and req.text is not None:
+            draft = drafting.edit_section(project_id, draft_id, req.section_id,
+                                          req.text, chat_id=req.chat_id)
+        else:
+            draft = drafting.edit_draft(project_id, draft_id, title=req.title,
+                                        content=req.content, chat_id=req.chat_id)
+    except DraftError as exc:
+        raise HTTPException(status_code=404, detail={"error": str(exc)})
+    return {"draft": draft.model_dump()}
+
+
+@app.post("/api/projects/{project_id}/drafts/{draft_id}/regenerate-section")
+def regenerate_section(project_id: str, draft_id: str,
+                       req: RegenerateSectionRequest) -> dict:
+    drafting, DraftError = _drafting()
+    try:
+        draft = drafting.regenerate_section(project_id, draft_id, req.section_id,
+                                            chat_id=req.chat_id)
+    except DraftError as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)})
+    return {"draft": draft.model_dump()}
+
+
+@app.get("/api/projects/{project_id}/drafts/{draft_id}/versions")
+def list_draft_versions(project_id: str, draft_id: str) -> dict:
+    from app.project.json_repositories import default_repositories
+
+    versions = default_repositories().drafts.list_versions(project_id, draft_id)
+    return {"versions": [v.model_dump() for v in versions]}
+
+
+@app.post("/api/projects/{project_id}/drafts/{draft_id}/restore-version")
+def restore_draft_version(project_id: str, draft_id: str,
+                          req: RestoreVersionRequest) -> dict:
+    drafting, DraftError = _drafting()
+    try:
+        draft = drafting.restore_version(project_id, draft_id, req.version,
+                                         chat_id=req.chat_id)
+    except DraftError as exc:
+        raise HTTPException(status_code=404, detail={"error": str(exc)})
+    return {"draft": draft.model_dump()}
+
+
+# ============================================================ export (§Phase 4)
+class ExportRequest(BaseModel):
+    format: str
+    chat_id: Optional[str] = None
+
+
+@app.post("/api/projects/{project_id}/drafts/{draft_id}/export")
+def export_draft(project_id: str, draft_id: str, req: ExportRequest) -> dict:
+    """Export the latest saved draft to a file (spec §"Report and Export Separation").
+
+    The file is built from the saved draft, so it matches the approved text — it does
+    not re-plan a different narrative (Scenario 6)."""
+    from app.project import exporting
+
+    try:
+        path = exporting.export_draft(project_id, draft_id, req.format,
+                                      chat_id=req.chat_id)
+    except exporting.ExportError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    return {"file": path.name,
+            "download_url": f"/api/projects/{project_id}/exports/{path.name}"}
+
+
+@app.get("/api/projects/{project_id}/exports/{filename}")
+def download_export(project_id: str, filename: str) -> FileResponse:
+    from app.project import paths as project_paths
+
+    # Guard against path traversal: only a bare filename inside the exports dir.
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail={"error": "bad_filename"})
+    path = project_paths.exports_dir(project_id) / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail={"error": "no_such_export"})
+    return FileResponse(str(path), filename=filename)
+
+
 @app.get("/api/chats")
 def list_chats(include_archived: bool = False) -> dict:
     return {"chats": [c.model_dump()
@@ -878,8 +1117,7 @@ def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
         return replies + [Reply(kind="text", content={"text": chat_fmt.reply(
             f"{chat_fmt.count(len(added), 'file')} ready",
             body=chat_fmt.bullets(added),
-            action="What do you need — a SteerCo deck, an IMO status report, a "
-                   "Finance dashboard?",
+            action="Reading your files and analyzing the data now",
         )})]
 
     kb = knowledge.load(chat.session_id)

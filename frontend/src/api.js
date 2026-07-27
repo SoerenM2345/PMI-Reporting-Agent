@@ -208,6 +208,84 @@ export function listModels() {
   return call("/api/models");
 }
 
+/* ------------------------------------------------ project workspace (§Phase 3-5) */
+/* The project-centric, continuously-updating flow: every uploaded file becomes a
+   source, knowledge re-derives incrementally, drafts are editable and versioned,
+   and export happens only when asked. Keyed by `project_id`, not a session. */
+
+/** The one conversational endpoint: a message (with optional context) → a Markdown
+    reply plus structured actions/warnings/conflict_state. */
+export function chat(payload) {
+  return call("/api/chat", { method: "POST", body: JSON.stringify(payload) });
+}
+
+/** Continuous ingestion: upload files into a project. Returns the new knowledge
+    version and any drafts the change flagged stale. */
+export function uploadProjectFiles(projectId, files) {
+  const form = new FormData();
+  for (const file of files) form.append("files", file);
+  return call(`/api/projects/${projectId}/files`, { method: "POST", body: form });
+}
+
+export function getProjectKnowledge(projectId) {
+  return call(`/api/projects/${projectId}/knowledge`);
+}
+
+export function listDrafts(projectId) {
+  return call(`/api/projects/${projectId}/drafts`);
+}
+
+export function createDraft(projectId, payload = {}) {
+  return call(`/api/projects/${projectId}/drafts`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getDraft(projectId, draftId) {
+  return call(`/api/projects/${projectId}/drafts/${draftId}`);
+}
+
+/** A direct user edit → a new draft version. Pass either `{ section_id, text }`
+    for one section, or `{ title, content }` for the whole draft. */
+export function patchDraft(projectId, draftId, patch) {
+  return call(`/api/projects/${projectId}/drafts/${draftId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function regenerateSection(projectId, draftId, sectionId) {
+  return call(`/api/projects/${projectId}/drafts/${draftId}/regenerate-section`, {
+    method: "POST",
+    body: JSON.stringify({ section_id: sectionId }),
+  });
+}
+
+export function listDraftVersions(projectId, draftId) {
+  return call(`/api/projects/${projectId}/drafts/${draftId}/versions`);
+}
+
+export function restoreDraftVersion(projectId, draftId, version) {
+  return call(`/api/projects/${projectId}/drafts/${draftId}/restore-version`, {
+    method: "POST",
+    body: JSON.stringify({ version }),
+  });
+}
+
+/** Export the latest saved draft. Returns `{ file, download_url }` — the file is
+    built from the draft, so it matches the approved text (Scenario 6). */
+export function exportDraft(projectId, draftId, format) {
+  return call(`/api/projects/${projectId}/drafts/${draftId}/export`, {
+    method: "POST",
+    body: JSON.stringify({ format }),
+  });
+}
+
+export function exportDownloadUrl(projectId, filename) {
+  return `/api/projects/${projectId}/exports/${encodeURIComponent(filename)}`;
+}
+
 /** Completeness gaps (§8.2) the user can close, and closing one. */
 export function listIssues(sessionId) {
   return call(`/api/issues/${sessionId}`);

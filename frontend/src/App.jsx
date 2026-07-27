@@ -7,6 +7,7 @@ import ModelPicker from "./components/chat/ModelPicker";
 import ProjectPanel from "./components/chat/ProjectPanel";
 import Sidebar from "./components/chat/Sidebar";
 import Thinking from "./components/chat/Thinking";
+import ProjectWorkspace from "./components/report/ProjectWorkspace";
 
 /**
  * The §4 journey, as a conversation: upload → ask → resolve → *read the draft*
@@ -33,6 +34,16 @@ export default function App() {
   // opening or creating a chat clears it, so the two views never overlap.
   const [projects, setProjects] = useState([]);
   const [activeProject, setActiveProject] = useState(null);
+
+  // The project-centric workspace (Phase 3-5): a /api/chat conversation plus an
+  // editable, versioned report draft, both keyed by project_id. Lives here rather
+  // than in the component, per the app's "all state in App.jsx" convention.
+  const [projectTab, setProjectTab] = useState("workspace");
+  const [wsMessages, setWsMessages] = useState([]);
+  const [wsDraft, setWsDraft] = useState(null);
+  const [wsVersions, setWsVersions] = useState([]);
+  const [wsKnowledge, setWsKnowledge] = useState({ version: null, exists: false });
+  const [wsStale, setWsStale] = useState(0);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -122,6 +133,121 @@ export default function App() {
       // knowledge text is only returned by the single-project read.
       const body = await api.getProject(id);
       setActiveProject(body.project);
+      setProjectTab("workspace");
+      setWsMessages([]);
+      setWsVersions([]);
+      setWsStale(0);
+      await loadWorkspace(id);
+    });
+
+  /* --------------------------------------------------- project workspace */
+  // The continuously-updating flow: files → knowledge → editable draft → export,
+  // all through the project-centric endpoints. Every call goes through `run(fn)`,
+  // and the refreshed draft/knowledge comes back into state so the UI can't drift
+  // from the server.
+  const loadWorkspace = async (projectId) => {
+    const kb = await api.getProjectKnowledge(projectId);
+    setWsKnowledge({ version: kb.exists ? kb.version : null, exists: kb.exists });
+    const drafts = await api.listDrafts(projectId);
+    setWsDraft(drafts.drafts?.[0] || null);
+  };
+
+  const wsUpload = (files) =>
+    run(async () => {
+      const pid = activeProject.project_id;
+      const body = await api.uploadProjectFiles(pid, files);
+      setWsKnowledge({ version: body.knowledge_version, exists: true });
+      setWsStale((body.stale_drafts || []).length);
+      if (wsDraft) {
+        const d = await api.getDraft(pid, wsDraft.draft_id);
+        setWsDraft(d.draft);
+      }
+      setWsMessages((prior) => [
+        ...prior,
+        wsTurn(`Processed ${body.ingested.length} file(s) — project knowledge ` +
+          `updated to version ${body.knowledge_version}.`),
+      ]);
+    });
+
+  const wsSend = (text) =>
+    run(async () => {
+      const pid = activeProject.project_id;
+      setWsMessages((prior) => [
+        ...prior,
+        { id: `u-${Date.now()}`, role: "user", text },
+      ]);
+      const resp = await api.chat({
+        project_id: pid,
+        message: text,
+        active_draft_id: wsDraft?.draft_id || null,
+      });
+      setWsMessages((prior) => [...prior, wsAgentTurn(pid, resp)]);
+      if (resp.knowledge_version != null) {
+        setWsKnowledge({ version: resp.knowledge_version, exists: true });
+      }
+      const staleActions = (resp.actions || []).filter((a) => a.type === "draft_stale");
+      if (staleActions.length) setWsStale(staleActions.length);
+      // A turn that created, updated or pointed at a draft → load it on the right.
+      const target =
+        resp.draft?.draft_id ||
+        (resp.actions || []).find((a) => a.draft_id)?.draft_id;
+      if (target) {
+        const d = await api.getDraft(pid, target);
+        setWsDraft(d.draft);
+      }
+    });
+
+  const wsCreateDraft = () =>
+    run(async () => {
+      const body = await api.createDraft(activeProject.project_id, {});
+      setWsDraft(body.draft);
+    });
+
+  const wsSaveSection = (sectionId, text) =>
+    run(async () => {
+      const body = await api.patchDraft(activeProject.project_id, wsDraft.draft_id, {
+        section_id: sectionId,
+        text,
+      });
+      setWsDraft(body.draft);
+    });
+
+  const wsRegenerate = (sectionId) =>
+    run(async () => {
+      const body = await api.regenerateSection(
+        activeProject.project_id, wsDraft.draft_id, sectionId);
+      setWsDraft(body.draft);
+    });
+
+  const wsExport = (format) =>
+    run(async () => {
+      const pid = activeProject.project_id;
+      const body = await api.exportDraft(pid, wsDraft.draft_id, format);
+      setWsMessages((prior) => [
+        ...prior,
+        {
+          id: `x-${Date.now()}`,
+          role: "agent",
+          text: `Exported the saved draft as **${format}**.`,
+          actions: [{ type: "download", file: body.file, url: body.download_url }],
+        },
+      ]);
+    });
+
+  const wsLoadVersions = () =>
+    run(async () => {
+      const body = await api.listDraftVersions(
+        activeProject.project_id, wsDraft.draft_id);
+      setWsVersions(body.versions);
+    });
+
+  const wsRestore = (version) =>
+    run(async () => {
+      const pid = activeProject.project_id;
+      const body = await api.restoreDraftVersion(pid, wsDraft.draft_id, version);
+      setWsDraft(body.draft);
+      const v = await api.listDraftVersions(pid, wsDraft.draft_id);
+      setWsVersions(v.versions);
     });
 
   const createProject = ({ name, icon }) =>
@@ -372,31 +498,76 @@ export default function App() {
       />
 
       {activeProject ? (
-        <ProjectPanel
-          project={activeProject}
-          chats={chats.filter((c) => c.project_id === activeProject.project_id)}
-          busy={busy}
-          onSaveKnowledge={(text) =>
-            saveProjectKnowledge(activeProject.project_id, text)
-          }
-          onNewChat={() => newChat(activeProject.project_id)}
-          onOpenChat={openChat}
-          onChangeIcon={(icon) =>
-            changeProjectIcon(activeProject.project_id, icon)
-          }
-          onRename={(name) => renameProject(activeProject.project_id, name)}
-        />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center gap-1 border-b border-slate-200
+                          bg-white px-6 py-2">
+            <span className="mr-2 text-lg">{activeProject.icon || "📁"}</span>
+            <span className="mr-3 truncate text-sm font-semibold text-slate-800">
+              {activeProject.name}
+            </span>
+            <TabButton active={projectTab === "workspace"}
+                       onClick={() => setProjectTab("workspace")}>
+              Workspace
+            </TabButton>
+            <TabButton active={projectTab === "knowledge"}
+                       onClick={() => setProjectTab("knowledge")}>
+              Knowledge &amp; chats
+            </TabButton>
+          </div>
+
+          {error && (
+            <div className="border-b border-rag-red/30 bg-red-50 px-6 py-2 text-sm
+                            text-rag-red">
+              {error}
+            </div>
+          )}
+
+          {projectTab === "workspace" ? (
+            <main className="flex min-h-0 flex-1 flex-col bg-slate-50">
+              <ProjectWorkspace
+                messages={wsMessages}
+                draft={wsDraft}
+                versions={wsVersions}
+                knowledgeVersion={wsKnowledge.version}
+                staleCount={wsStale}
+                hasKnowledge={wsKnowledge.exists}
+                busy={busy}
+                onUploadFiles={wsUpload}
+                onSend={wsSend}
+                onCreateDraft={wsCreateDraft}
+                onSaveSection={wsSaveSection}
+                onRegenerate={wsRegenerate}
+                onExport={wsExport}
+                onLoadVersions={wsLoadVersions}
+                onRestore={wsRestore}
+              />
+            </main>
+          ) : (
+            <ProjectPanel
+              project={activeProject}
+              chats={chats.filter((c) => c.project_id === activeProject.project_id)}
+              busy={busy}
+              onSaveKnowledge={(text) =>
+                saveProjectKnowledge(activeProject.project_id, text)
+              }
+              onNewChat={() => newChat(activeProject.project_id)}
+              onOpenChat={openChat}
+              onChangeIcon={(icon) =>
+                changeProjectIcon(activeProject.project_id, icon)
+              }
+              onRename={(name) => renameProject(activeProject.project_id, name)}
+            />
+          )}
+        </div>
       ) : (
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b
                            border-slate-200 bg-white px-6 py-3">
           <div>
             <h1 className="text-sm font-semibold text-slate-900">
-              PMI Reporting Agent
+              
             </h1>
-            <p className="text-xs text-slate-500">
-              Every figure traced to the file it came from.
-            </p>
+
           </div>
           <ModelPicker
             chat={chat}
@@ -442,6 +613,37 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function TabButton({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+        active
+          ? "bg-slate-900 text-white"
+          : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+// A workspace turn from /api/chat: the agent's Markdown reply, with any download
+// actions resolved to a URL so the bubble can offer the file directly.
+function wsAgentTurn(projectId, resp) {
+  const actions = (resp.actions || []).map((a) =>
+    a.type === "download" && a.file
+      ? { ...a, url: api.exportDownloadUrl(projectId, a.file) }
+      : a,
+  );
+  return { id: `a-${Date.now()}`, role: "agent", text: resp.message || "", actions };
+}
+
+function wsTurn(text) {
+  return { id: `s-${Date.now()}`, role: "agent", text };
 }
 
 function agentSays(text, kind = "text") {
