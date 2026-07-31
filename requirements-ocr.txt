@@ -1,0 +1,12 @@
+# Optional local OCR — a weak fallback for image extraction (§5.6) when no
+# vision-capable model is configured.
+#
+# It reads text and understands nothing: a risk heatmap is colour and position, and
+# OCR sees neither. Findings from this path are scored at 0.4 confidence and flagged
+# for review. Prefer a vision model.
+#
+#   pip install -r requirements-ocr.txt
+#   brew install tesseract        # macOS
+#   apt-get install tesseract-ocr # Debian/Ubuntu
+
+pytesseract>=0.3.10

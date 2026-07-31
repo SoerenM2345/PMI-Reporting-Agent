@@ -1,107 +1,159 @@
 # MASTER — What This Codebase Does and How It Is Built
 
-Single source of truth for the implementation. The functional spec is
-`2026_DPID_PreCourseMeeting.pdf` (slides 5–7); this file describes how the code
-realizes it. For how to *use* the app, see `README.md`.
+Orientation for a developer. The functional spec is `agent.md`; this file says how the
+code realises it. To *use* the app, see [README.md](README.md). For the design reasoning,
+see [docs/architecture.md](docs/architecture.md).
 
 ## What this is
 
-A **single-agent Automated Reporting & Status Updates system** for Post-Merger
-Integration (PMI). A consultant uploads the files gathered over the week (Excel
-trackers, PowerPoint updates, Word meeting notes, PDFs, HTML), types what they
-need ("Create a SteerCo PowerPoint"), and the agent produces an
-audience-specific PowerPoint report, Excel dashboard, or chart — including
-task assignments per person and cross-source consistency checking.
+An agent that turns a week of fragmented PMI files into an audience-specific report.
 
-This is **Version 2** (single agent, LangGraph) as defined in
-`../UC2_V2_SingleAgent_Definition.md` — the counterpart to Version 1's
-three-sub-agent design in `PMI-Coordination-Agent`.
+Its defining behaviour is not what it produces but what it **refuses** to produce. The
+files disagree with each other, and a tool that silently picks one number launders a
+disagreement into a fact — which then goes to a board. So:
 
-## The 7-step workflow (spec slide 5 → `app/agent/graph.py`)
+- Conflicts that change the management message are put to a human. `POST /api/generate`
+  returns **409** until they are answered.
+- A field no source stated is `None`, rendered "Not Reported". Never a guess, never a zero.
+- Anything read from an image is capped below full confidence and flagged for review.
+- With no vision model, an unreadable screenshot is *reported as unreadable* — not
+  silently dropped.
 
-| # | Step | Node / code |
-|---|------|-------------|
-| 1 | User uploads PMI files + request | `POST /api/upload`, `POST /api/report` (`app/main.py`) |
-| 2 | Ask role/audience (Executive/PMO/Finance) if unclear | `parse_request` node; graph ends early with `needs_audience`, UI asks, request is re-sent |
-| 3 | Extract data from Excel/PPTX/PDF/Word/HTML | `extract` node → `app/extractors/` |
-| 4 | Standardize into one PMI data model | `standardize` node → `app/agent/standardize.py` |
-| 5 | Consistency checks (e.g. Excel 82% vs PPT 75%) | `check_consistency` → `app/agent/consistency.py::detect_conflicts` |
-| 6 | Conflict handling: Option A ask user / Option B priority Excel > Word/PDF > PPT > HTML | `resolve_conflicts` node; priority in `app/models/pmi.py::SOURCE_PRIORITY` |
-| 7 | Generate output (PPTX / XLSX dashboard / chart) | `generate_output` → `app/generators/` |
-
-## Module map
+## Layout
 
 ```
 app/
-├── main.py               FastAPI: session, upload, report, download endpoints
-├── models/pmi.py         Pydantic PMI schema: TaskItem, Milestone, Risk, BudgetItem,
-│                         KPI, Conflict, PMIDataModel; SOURCE_PRIORITY
-├── extractors/
-│   ├── base.py           header-alias mapping (EN+DE), status/date/number/percent
-│   │                     normalization, progress-mention regexes, action-item
-│   │                     extraction from free text, table classification
-│   ├── excel.py          pandas; header-row detection; all sheets; cell scan for "%"
-│   ├── powerpoint.py     python-pptx; tables + text frames per slide
-│   ├── word.py           python-docx; tables + paragraphs (meeting notes)
-│   ├── pdf.py            pdfplumber; tables + page text
-│   ├── html.py           BeautifulSoup4; tables + visible text
-│   └── __init__.py       extension → extractor dispatch
+├── config.py             every model ID, threshold and policy knob (§21.10, test-enforced)
+├── main.py               FastAPI: project → upload → analyze → resolve → generate → download
+│
+├── llm/                  provider abstraction; the LLM never does arithmetic (§11)
+│   ├── base.py           LLMClient Protocol: one method, structured() -> validated Pydantic
+│   ├── anthropic_client.py   default; vision-capable (this is what §5.6 needs)
+│   ├── openai_client.py      kept working; LLM_PROVIDER=openai
+│   ├── null_client.py        no key -> raises -> tasks.py falls back deterministically
+│   ├── tasks.py          the semantic tasks; records a warning on every fallback
+│   ├── fallbacks.py      keyword matching + template prose. Honest but dumb.
+│   ├── schemas.py        Pydantic contracts for every LLM output
+│   └── prompts/          *.md, loaded at runtime
+│
+├── extractors/           one module per format: suffixes, format, extract(path) -> [dict]
+│   ├── base.py           header aliases (EN+DE), the Extractor protocol, parsers
+│   ├── excel.py csv.py powerpoint.py word.py pdf.py html.py
+│   └── image.py          §5.6 — the biggest subsystem. Confidence computed in Python.
+│
+├── models/               the 14 spec entities (§6)
+│   ├── enums.py          taxonomies + alias maps (§7)
+│   ├── source.py         SourceReference: file/sheet/cell/slide/page/region + confidence
+│   ├── entities.py       the 13 entities
+│   ├── quality.py        Conflict, ValidationIssue, DataQualityReport
+│   └── pmi.py            PMIDataModel + the import surface
+│
 ├── agent/
-│   ├── graph.py          LangGraph StateGraph wiring of the 7 steps
-│   ├── state.py          AgentState TypedDict
-│   ├── standardize.py    raw record dicts → validated PMIDataModel
-│   ├── consistency.py    conflict detection (KPI + task level) and resolution
-│   └── llm.py            OpenAI (gpt-5.5, env-switched) OR deterministic mock
+│   ├── graph.py          three compiled LangGraph graphs over shared nodes
+│   ├── state.py          AgentState
+│   ├── standardize.py    raw records -> entities. Bad rows are REPORTED, not swallowed.
+│   ├── calculations.py   risk scores, variances, overdue. Deterministic (§11).
+│   ├── matching.py       "ERP go-live" == "ERP Go Live". Without this, no conflict exists.
+│   ├── consistency/      32 registered checks + severity + §9 Mode A/B/C resolution
+│   └── data_quality.py   the score, and the honest account of what the run could not do
+│
 ├── generators/
-│   ├── pptx_report.py    Deloitte-styled deck: title, exec summary, tasks-per-owner,
-│   │                     milestones, risks, budget (Finance), KPIs, conflicts slide
-│   ├── xlsx_dashboard.py Overview (+embedded chart), Tasks grouped by owner with
-│   │                     autofilter, Milestones, Risks, Budget, Conflicts sheets
-│   └── charts.py         matplotlib: risks-by-severity, tasks-by-status, budget
-└── storage/json_store.py local JSON session store (spec: "Storage (Prototype): Local JSON")
+│   ├── pptx_report.py    4 audience decks (§12), management-message titles (§12.5)
+│   ├── xlsx_dashboard.py the 10 sheets of §13
+│   ├── charts.py         10 chart types (§14), incl. the risk heatmap
+│   └── quality_report.py the conflict + data-quality reports — on EVERY run
+│
+├── storage/json_store.py sessions + the persisted analysis
+└── utils/images.py       §5.6 steps 1-4: orient, resize, contrast, measure quality
 
-static/index.html          drag-and-drop UI (vanilla JS, no build step)
-scripts/make_sample_data.py generates sample inputs incl. the 82%-vs-75% conflict
-tests/test_pipeline.py     unit + end-to-end + API round-trip tests
-data/ectsum/               ECTSum dataset (train 1681 / val 249 / test 495) — see data/README.md
-data/samples/              generated sample inputs
+frontend/                 React + JavaScript + Tailwind (Vite)
+scripts/                  sample data (11 files), vision-fixture recorder, §20 demo
+tests/                    136 tests, all green with no API key
+docs/                     architecture · data model · reporting logic · user guide ·
+                          evaluation plan · known limitations · UAT questionnaire
 ```
 
-## Key design decisions
+## The design decisions that matter
 
-- **Extraction is deterministic-first.** Tables are parsed via fuzzy header
-  mapping (`HEADER_ALIASES`, English + German); free text goes through regex
-  action-item/progress extraction. The LLM never invents numbers — it only
-  classifies the request and words the summary. This keeps outputs auditable
-  (project rule: precision) and lets the whole pipeline run without a key.
-- **LLM switch is environmental.** `OPENAI_API_KEY` set → OpenAI `gpt-5.5`
-  (model name via `OPENAI_MODEL`); unset → deterministic mock. All LLM failures
-  fall back to heuristics — the pipeline never hard-fails on the LLM.
-- **Audience question = graph interrupt.** If step 2 can't infer the audience,
-  the graph ends before extraction and the API returns `needs_audience: true`;
-  the UI shows Executive/PMO/Finance chips and re-submits.
-- **Conflicts carry provenance.** Every record keeps a `SourceRef`
-  (file, format, sheet/slide/page). Conflicts store per-file values, the winning
-  value, which file won, and whether resolution was `source_priority` or `user`.
-- **Guardrail (from interview evidence, binding per UC2_V2 §2):** outputs are
-  prototypes for **Senior Manager review before stakeholder distribution** —
-  stated in the UI footer and README. Jira is intentionally not required.
+### Three graphs, not one
 
-## Known scope cuts (deliberate, per spec + UC2_V2 §7)
+Generation must never re-run extraction. The original single graph re-ran from the top on
+every human-in-the-loop round trip — which, once image extraction landed, meant paying
+for a vision call every time the user resolved a conflict, and re-rolling the dice on
+what the model saw. Analysis is run once and persisted to
+`storage_data/<session>/analysis.json`; resolving patches it, generating reads it.
 
-- **No meeting-recording/transcript ingestion** — slide 5's input list is
-  documents only. Open team decision; Word meeting *notes* are supported.
-- **SQLite** marked optional in spec — not used; local JSON only.
-- **Conflict detection** covers same-name KPIs (incl. Overall Progress) and
-  same-title tasks (status/progress). Fuzzy entity matching (near-identical
-  titles) is future work.
-- **ECTSum** is included for later evaluation of the generation step (see
-  `data/README.md`), not wired into runtime.
+We did **not** adopt a LangGraph checkpointer: `MemorySaver` dies on a uvicorn reload,
+and `SqliteSaver` buys durability the JSON store already provides. Upgrade path is in the
+architecture doc.
 
-## Testing
+### Severity is assigned by topic first, magnitude second
 
-`pytest -q` from repo root: header/status/percent normalization units,
-per-format extractor tests, conflict detection incl. the spec's 82/75 example
-(asserts Excel wins by priority and ask-mode leaves critical conflicts open),
-three full agent runs (PPTX, XLSX, audience-question path), and a FastAPI
-TestClient round-trip (upload → report → download).
+The load-bearing detail of the whole conflict system.
+
+The spec's own example is 82% vs 75% — a **9% delta**. A magnitude-based severity rule
+calls that "medium", auto-resolves it, and never tells the user. But §20 step 9 requires
+the system to ask. So `consistency/severity.py` escalates on **topic**, encoding §9's
+critical list (overall status, Day 1 readiness, go-live dates, budget totals, synergy
+realization, critical risks, SteerCo decisions, TSA exits, regulatory milestones).
+Magnitude is the second axis, not the first.
+
+### Image confidence is computed in Python, not taken from the model
+
+The model is not the authority on how much to trust the model (§21.14). Its self-reported
+confidence is an *input*, multiplied down by measured legibility, blur, resolution,
+handwriting and cropping — then **capped at 0.90**. No image reading ever reaches the
+confidence of a spreadsheet read, so a figure from a screenshot always loses an automatic
+conflict against the tracker it was screenshotted from.
+
+Anything read by vision or OCR lands in the review panel even at a high score: it is a
+transcription, and nobody has confirmed it against the source system.
+
+### The LLM does not do arithmetic
+
+§11 forbids it, and `calculations.py` enforces it. Where a *source* reports a derived
+value that disagrees with the computed one, ours wins and the disagreement is reported.
+A tracker that gets its own arithmetic wrong should not have that error laundered into a
+board pack.
+
+## Bugs fixed from v1 (each one silently lost data)
+
+| Where | Was | Now |
+|---|---|---|
+| `base.py::classify_table` | Both branches of a ternary returned `"task"` — classification was dead code. | Best-scoring specific type wins. |
+| `base.py::parse_number` | `"1,234"` → `1.234`. | Locale heuristic: last separator is the decimal mark. |
+| `base.py::normalize_header` | Naive substring matching — `"Not Started"` matched an alias, so data rows were mistaken for header rows and tables were split in half. | Exact → whole-word (≥4 chars) → prefix, and status values are never headers. |
+| `main.py::download` | Path-traversal guard ran *after* `path.exists()`, and a URL segment never contains `".."` — it never fired. | `resolve()` + `is_relative_to()`. |
+| `llm.py` | `model_dump_json()[:12000]` sliced JSON mid-token. | Whole entities dropped from the tail; payload stays parseable. |
+| `llm.py` | `except Exception: pass` around every call — a broken API key looked exactly like a working one. | Logged, and recorded as a warning that reaches the data-quality report. |
+| `standardize.py` | `except Exception: continue` silently dropped bad rows. | Each dropped row is reported with its file, location and reason. |
+| `resolution.py` | Re-running resolution clobbered a user's decision with "a person must decide". | Idempotent: an already-resolved conflict is left alone. |
+| `matching.py` | At a 0.6 threshold, "Migrate payroll" and "Migrate CRM" merged. | 0.75 — a false merge destroys data; a missed match only misses a conflict. |
+
+## Tests
+
+```bash
+pytest -q          # 136, all green, no API key
+```
+
+| File | Covers |
+|---|---|
+| `test_acceptance.py` | **the §20 scenario, all 15 steps** — including the 409 |
+| `test_config_and_llm.py` | provider swap, keyless fallback, the no-hard-coded-model-ID grep |
+| `test_model_and_calculations.py` | the data model, and §11's deterministic arithmetic |
+| `test_extractors.py` | every format, and the image pipeline against a stored vision fixture |
+| `test_consistency.py` | matching, the check suite, severity, Modes A/B/C |
+| `test_generators.py` | decks, workbooks, charts, the two reports |
+| `test_api.py` | the analyze → resolve → generate round trip, and path traversal |
+| `test_pipeline.py` | the original v1 suite, still green |
+
+The vision fixture (`tests/fixtures/vision/risk_dashboard.json`) is currently
+**hand-authored**, not captured from a live model. It proves the plumbing; it does not
+prove the model can read a heatmap. Re-record it with
+`python scripts/record_vision_fixture.py` and read the diff.
+
+## Known scope cuts
+
+See [docs/known_limitations.md](docs/known_limitations.md). The honest summary: no
+ground-truth PMI corpus, no auth, local JSON storage, and a figure stated only in prose
+(rather than a table) is not extracted without an LLM.

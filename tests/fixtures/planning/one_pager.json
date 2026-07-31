@@ -1,0 +1,73 @@
+{
+  "OutputBrief": {
+    "document_kind": "one_pager",
+    "primary_format": "pdf",
+    "audience_label": "CFO",
+    "audience_seniority": "executive",
+    "reader_goal": "Know in one page what could stop Day 1 and what is needed from them.",
+    "decisions_sought": ["Assign an owner to the unmitigated data-protection risk"],
+    "scope_topics": [],
+    "tone": "direct",
+    "length_hint": "tight",
+    "target_page_count": 1,
+    "title_proposal": "What could stop Day 1"
+  },
+
+  "StorylinePlan": {
+    "governing_message": "One unowned data-protection risk is the only thing that currently threatens Day 1.",
+    "executive_takeaway": "Everything else on the critical path has an owner and a plan. One risk does not, and it is the highest-scoring item on the register.",
+    "situation": "Day 1 preparation is on plan across the workstreams.",
+    "complication": "The highest-scoring risk on the register has no mitigation and no owner.",
+    "question": "Who owns it, and by when?",
+    "supporting_arguments": [
+      "Only one item on the critical path lacks an owner.",
+      "That item is the highest-scoring risk on the register."
+    ],
+    "narrative_flow": "decision_first",
+    "closing_ask": "Name an owner this week.",
+    "sections": [
+      {
+        "section_id": "the-risk",
+        "working_title": "One unowned risk is the only current threat to Day 1",
+        "management_question": "What could stop Day 1?",
+        "intended_message": "The data-protection risk has no mitigation and no owner.",
+        "purpose": "decision",
+        "evidence_ids": ["ev:risk:R1", "ev:fact:risk.open_critical"],
+        "depth": "detailed",
+        "suggested_pages": 1,
+        "recommended_expression": "none",
+        "visual_priority": "low"
+      }
+    ]
+  },
+
+  "DocumentDesign": {
+    "rationale": "One page, one message, no cover: a one-pager that opens with a title slide is a two-pager.",
+    "pages": [
+      {
+        "page_id": "the-risk",
+        "section_id": "the-risk",
+        "purpose": "content",
+        "composition": "single",
+        "message_title": "One unowned risk is the only current threat to Day 1",
+        "supporting_message": "Prepared for the CFO",
+        "elements": [
+          {
+            "role": "body",
+            "intent": "State the risk, that it has no owner and no mitigation, and what is needed.",
+            "evidence_ids": ["ev:risk:R1"],
+            "prominence": "primary"
+          },
+          {
+            "role": "callout",
+            "intent": "Name an owner this week.",
+            "evidence_ids": ["ev:fact:risk.open_critical"],
+            "prominence": "supporting"
+          }
+        ],
+        "visual_hierarchy": ["body", "callout"],
+        "density": "sparse"
+      }
+    ]
+  }
+}

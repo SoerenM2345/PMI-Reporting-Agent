@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from typing import Optional, TypedDict
 
-from app.models.pmi import Audience, PMIDataModel
+from typing import Any
+
+from app.models.pmi import Audience, DataQualityReport, PMIDataModel, PMIProject
+from app.report.content import ReportContent
 
 
 class AgentState(TypedDict, total=False):
@@ -11,8 +14,13 @@ class AgentState(TypedDict, total=False):
     session_id: str
     file_paths: list[str]
     request_text: str
-    conflict_strategy: str  # "priority" (Option B) | "ask" (Option A)
-    user_conflict_choices: dict[str, str]
+    #: What the user told us that no file contains (§4 step 1): reporting date,
+    #: Day 1 date, phase. Without these, whole check families cannot run.
+    project: Optional[PMIProject]
+    #: "ask" (Mode A) | "priority" (Mode B) | "hybrid" (Mode C, the default)
+    conflict_strategy: Optional[str]
+    #: conflict_id -> a file name, or {"value": "..."} to state the truth (§9)
+    user_conflict_choices: dict[str, Any]
     # step 2
     audience: Optional[Audience]
     needs_audience: bool
@@ -21,7 +29,24 @@ class AgentState(TypedDict, total=False):
     # steps 3-4
     raw_records: list[dict]
     data_model: Optional[PMIDataModel]
+    # steps 5-6
+    quality_report: Optional[DataQualityReport]
     # step 7
+    #: What the report says, before anything draws it. Set by `plan_content`;
+    #: when the API passes one in, it is a version the user has already read and
+    #: approved, so the planner is skipped rather than second-guessing them.
+    report_content: Optional[ReportContent]
+    #: The planned `Deliverable`, when the caller has one the user approved.
+    deliverable: Optional[Any]
+    #: A cancellation token, checked between stages. Cooperative rather than a
+    #: thread kill: a killed render leaves a half-written file on disk that
+    #: opens and is wrong, which is worse than not stopping at all.
+    cancel: Optional[Any]
     summary_bullets: list[str]
     output_files: list[str]
+    #: Hard failures — a file that could not be read at all.
     errors: list[str]
+    #: Soft caveats the user must see: an LLM call that fell back to a heuristic,
+    #: a low-confidence image reading, a row that could not be parsed. These feed
+    #: the data-quality report (§21.17) rather than being swallowed.
+    warnings: list[str]

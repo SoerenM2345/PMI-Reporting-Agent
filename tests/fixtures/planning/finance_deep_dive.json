@@ -1,0 +1,200 @@
+{
+  "OutputBrief": {
+    "document_kind": "financial_review",
+    "primary_format": "pptx",
+    "audience_label": "CFO",
+    "audience_seniority": "executive",
+    "reader_goal": "Decide whether the forecast overrun is absorbed centrally or offset by scope reduction.",
+    "decisions_sought": [
+      "Approve the additional integration spend, or mandate an offsetting scope reduction"
+    ],
+    "scope_topics": ["Budget vs. Actual", "Synergy Realisation", "One-Time Costs"],
+    "tone": "direct",
+    "length_hint": "thorough",
+    "title_proposal": "Integration finance review"
+  },
+
+  "StorylinePlan": {
+    "governing_message": "Integration spending is within budget on actuals but the forecast is not, and the gap is not covered by synergies landing this year.",
+    "executive_takeaway": "On an actual-cost basis the programme remains inside its approved envelope. The current forecast does not, and the shortfall is concentrated in a small number of one-time items. Synergy realisation is running behind the profile that was assumed when the budget was set, so the gap cannot be expected to close itself.",
+    "situation": "The integration budget was approved at signing on a profile that assumed synergies landing through the year.",
+    "complication": "Forecast costs have risen while synergy realisation has run behind the assumed profile.",
+    "question": "Is the overrun absorbed centrally, or offset by reducing scope?",
+    "supporting_arguments": [
+      "Actual spend is inside budget; the exposure is entirely in the forecast.",
+      "The forecast increase is concentrated in a small number of one-time items rather than spread across the programme.",
+      "Synergy realisation is behind the profile the budget assumed, so it will not close the gap."
+    ],
+    "narrative_flow": "options_analysis",
+    "closing_ask": "Confirm the funding route for the forecast overrun.",
+    "sections": [
+      {
+        "section_id": "budget-position",
+        "working_title": "Actual spend is inside budget; the forecast is not",
+        "management_question": "Where does the money actually stand?",
+        "intended_message": "The exposure is in the forecast, not in what has been spent.",
+        "purpose": "analysis",
+        "evidence_ids": ["ev:budget:B1", "ev:fact:budget.variance", "ev:fact:budget.actual"],
+        "depth": "detailed",
+        "suggested_pages": 1,
+        "recommended_expression": "comparison",
+        "visual_priority": "high",
+        "covers_requested": ["Budget vs. Actual"]
+      },
+      {
+        "section_id": "synergies",
+        "working_title": "Synergy realisation is behind the profile the budget assumed",
+        "management_question": "Will synergies close the gap?",
+        "intended_message": "Realisation is running behind target, so it will not offset the overrun this year.",
+        "purpose": "analysis",
+        "evidence_ids": ["ev:synergy:S1", "ev:fact:synergy.realization_pct"],
+        "depth": "detailed",
+        "suggested_pages": 1,
+        "recommended_expression": "composition",
+        "visual_priority": "high",
+        "covers_requested": ["Synergy Realisation"]
+      },
+      {
+        "section_id": "one-time",
+        "working_title": "The increase is concentrated in a small number of one-time items",
+        "management_question": "What is driving the forecast increase?",
+        "intended_message": "A few lines account for most of the movement, which makes it addressable.",
+        "purpose": "evidence",
+        "evidence_ids": ["ev:budget:B1"],
+        "depth": "summary",
+        "suggested_pages": 1,
+        "recommended_expression": "table",
+        "visual_priority": "medium",
+        "covers_requested": ["One-Time Costs"]
+      },
+      {
+        "section_id": "options",
+        "working_title": "Two funding routes are available and both need a decision now",
+        "management_question": "What are my options?",
+        "intended_message": "Absorb centrally or reduce scope; deferring costs optionality.",
+        "purpose": "decision",
+        "evidence_ids": ["ev:fact:budget.variance"],
+        "depth": "detailed",
+        "suggested_pages": 1,
+        "recommended_expression": "none",
+        "visual_priority": "low"
+      }
+    ]
+  },
+
+  "DocumentDesign": {
+    "rationale": "Finance readers want the reconciliation before the recommendation, so evidence leads and the options page closes.",
+    "pages": [
+      {
+        "page_id": "cover",
+        "purpose": "cover",
+        "composition": "single",
+        "message_title": "Integration finance review",
+        "supporting_message": "Prepared for the CFO",
+        "elements": []
+      },
+      {
+        "page_id": "kpis",
+        "section_id": "budget-position",
+        "purpose": "content",
+        "composition": "kpi_banner",
+        "message_title": "Actual spend is inside budget; the forecast is not",
+        "elements": [
+          {
+            "role": "kpi_row",
+            "intent": "Budget, actual, forecast and variance at a glance.",
+            "evidence_ids": [
+              "ev:fact:budget.total",
+              "ev:fact:budget.actual",
+              "ev:fact:budget.forecast",
+              "ev:fact:budget.variance"
+            ],
+            "prominence": "primary"
+          },
+          {
+            "role": "body",
+            "intent": "State that the exposure sits entirely in the forecast.",
+            "evidence_ids": ["ev:fact:budget.variance"],
+            "prominence": "supporting"
+          }
+        ],
+        "visual_hierarchy": ["kpi_row", "body"],
+        "density": "normal"
+      },
+      {
+        "page_id": "budget-detail",
+        "section_id": "budget-position",
+        "purpose": "content",
+        "composition": "chart_plus_commentary",
+        "message_title": "The movement is in forecast, not in actuals",
+        "elements": [
+          {
+            "role": "chart",
+            "intent": "Budget, actual and forecast side by side for each cost line.",
+            "evidence_ids": ["ev:budget:B1"],
+            "prominence": "primary"
+          },
+          {
+            "role": "body",
+            "intent": "Explain which lines moved and why that makes the overrun addressable.",
+            "evidence_ids": ["ev:budget:B1", "ev:fact:budget.variance"],
+            "prominence": "supporting"
+          }
+        ],
+        "visual_hierarchy": ["chart", "body"]
+      },
+      {
+        "page_id": "synergies",
+        "section_id": "synergies",
+        "purpose": "content",
+        "composition": "hero_chart",
+        "message_title": "Synergy realisation is behind the profile the budget assumed",
+        "elements": [
+          {
+            "role": "chart",
+            "intent": "Target against realised value for each synergy initiative.",
+            "evidence_ids": ["ev:synergy:S1", "ev:fact:synergy.realization_pct"],
+            "prominence": "primary"
+          }
+        ],
+        "density": "sparse"
+      },
+      {
+        "page_id": "one-time",
+        "section_id": "one-time",
+        "purpose": "content",
+        "composition": "table_full",
+        "message_title": "A small number of one-time items account for most of the movement",
+        "elements": [
+          {
+            "role": "table",
+            "intent": "Cost lines with the largest forecast movement, exceptions highlighted.",
+            "evidence_ids": ["ev:budget:B1"],
+            "prominence": "primary"
+          }
+        ]
+      },
+      {
+        "page_id": "options",
+        "section_id": "options",
+        "purpose": "content",
+        "composition": "two_column",
+        "message_title": "Two funding routes are available and both need a decision now",
+        "elements": [
+          {
+            "role": "bullets",
+            "intent": "Absorb centrally: what it costs and what it protects.",
+            "evidence_ids": ["ev:fact:budget.variance"],
+            "prominence": "primary"
+          },
+          {
+            "role": "bullets",
+            "intent": "Reduce scope: which items and what is given up.",
+            "evidence_ids": ["ev:fact:budget.variance"],
+            "prominence": "supporting"
+          }
+        ]
+      }
+    ]
+  }
+}

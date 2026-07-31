@@ -1,0 +1,109 @@
+{
+  "_comment": "The adversarial scenario. Every field here is something a real model plausibly gets wrong: invented evidence ids, a duplicate section id, a requested topic silently dropped, a page composition the template cannot serve, and an element citing nothing. Python must catch all of it without refusing to produce a document.",
+  "OutputBrief": {
+    "document_kind": "status_report",
+    "primary_format": "pptx",
+    "audience_label": "Steering Committee",
+    "audience_seniority": "executive",
+    "reader_goal": "Understand where things stand.",
+    "scope_topics": [
+      "Risks",
+      "Budget position"
+    ],
+    "tone": "neutral",
+    "length_hint": "standard",
+    "title_proposal": "Status"
+  },
+  "StorylinePlan": {
+    "governing_message": "The programme is proceeding.",
+    "executive_takeaway": "Things are broadly fine.",
+    "situation": "The integration is underway.",
+    "complication": "Some items need attention.",
+    "question": "What needs attention?",
+    "supporting_arguments": [
+      "Some risks are open."
+    ],
+    "narrative_flow": "scqa",
+    "sections": [
+      {
+        "section_id": "risks",
+        "working_title": "Open risks",
+        "management_question": "What risks are open?",
+        "intended_message": "Several risks remain open.",
+        "purpose": "risk",
+        "evidence_ids": [
+          "ev:risk:R1",
+          "ev:risk:DOES_NOT_EXIST",
+          "ev:fact:invented"
+        ],
+        "depth": "summary",
+        "suggested_pages": 1,
+        "recommended_expression": "table",
+        "covers_requested": [
+          "Risks"
+        ]
+      },
+      {
+        "section_id": "risks",
+        "working_title": "More about risks",
+        "management_question": "Anything else?",
+        "intended_message": "There is more to say about risks.",
+        "purpose": "evidence",
+        "evidence_ids": [
+          "ev:risk:R1"
+        ],
+        "depth": "summary",
+        "suggested_pages": 99
+      }
+    ]
+  },
+  "DocumentDesign": {
+    "rationale": "",
+    "pages": [
+      {
+        "page_id": "risks",
+        "section_id": "risks",
+        "purpose": "content",
+        "composition": "four_column",
+        "message_title": "Open risks",
+        "elements": [
+          {
+            "role": "table",
+            "intent": "The open risks.",
+            "evidence_ids": [
+              "ev:risk:R1",
+              "ev:risk:DOES_NOT_EXIST"
+            ],
+            "prominence": "primary"
+          },
+          {
+            "role": "chart",
+            "intent": "A chart of something.",
+            "evidence_ids": [],
+            "prominence": "supporting"
+          }
+        ]
+      },
+      {
+        "page_id": "risks",
+        "section_id": "risks",
+        "purpose": "content",
+        "composition": "single",
+        "message_title": "More about risks",
+        "elements": [
+          {
+            "role": "body",
+            "intent": "More detail.",
+            "evidence_ids": [
+              "ev:risk:R1"
+            ],
+            "prominence": "primary"
+          }
+        ]
+      }
+    ]
+  },
+  "ChatReplyDraft": {
+    "content": "Integration is 91.4% complete and the programme will realise EUR 7,300,000 of synergies by Day 1."
+  }
+}
