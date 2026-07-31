@@ -128,6 +128,25 @@ class ValidationIssue(BaseModel):
             object.__setattr__(self, "issue_id", f"vi_{digest}")
 
 
+class ScoreComponent(BaseModel):
+    """One weighted term of the data-quality score, with its inputs.
+
+    Stored rather than recomputed so the explanation and the number can never
+    disagree: `data_quality.explain()` renders exactly the arithmetic that
+    produced `DataQualityReport.score`, and there is no second implementation to
+    drift from it.
+    """
+
+    key: str                     # "provenance" | "conflicts" | ...
+    label: str
+    weight: float                # points this component is worth
+    ratio: float                 # 0.0-1.0, how much of them were earned
+    earned: float                # weight * ratio, rounded for display
+    #: Plain-English statement of what produced `ratio` — the counts themselves,
+    #: so a reader can check the figure rather than take it on trust.
+    basis: str
+
+
 class DataQualityReport(BaseModel):
     """The honesty artefact (§17, §18.19, §21.17).
 
@@ -149,6 +168,12 @@ class DataQualityReport(BaseModel):
 
     issues_by_family: dict[str, int] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
+
+    #: How `score` was arrived at. Empty only for a report built before this
+    #: existed; `explain()` says so rather than inventing a breakdown.
+    score_components: list[ScoreComponent] = Field(default_factory=list)
+    #: Set when the score was capped because a file could not be read at all.
+    score_cap: Optional[float] = None
 
     #: Files that could not be read at all.
     failed_files: list[str] = Field(default_factory=list)

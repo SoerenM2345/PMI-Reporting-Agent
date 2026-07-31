@@ -57,6 +57,58 @@ def test_settings_defaults_to_anthropic_and_hybrid_conflicts():
     assert s.llm_model and s.vision_model  # both configured, both overridable
 
 
+def test_models_for_default_provider_honours_env_overrides():
+    """The default backend's three roles come from the (overridable) settings."""
+    s = Settings(_env_file=None, llm_provider="anthropic",
+                 llm_model="m-reason", vision_model="m-see", fast_model="m-fast")
+    roles = s.models_for("anthropic")
+    assert (roles.reasoning, roles.vision, roles.fast) == ("m-reason", "m-see", "m-fast")
+
+
+def test_models_for_other_provider_uses_that_providers_defaults():
+    """Switching a chat to OpenAI fills vision/fast from the provider defaults,
+    not the anthropic env knobs — the picker only names one model."""
+    s = Settings(_env_file=None, llm_provider="anthropic",
+                 vision_model="anthropic-vision", fast_model="anthropic-fast")
+    roles = s.models_for("openai")
+    assert roles.provider == "openai"
+    assert roles.vision != "anthropic-vision"
+    assert roles.fast != "anthropic-fast"
+    # The chat's chosen model names the reasoning role; vision/fast stay defaults.
+    picked = s.models_for("openai", model="gpt-4o")
+    assert picked.reasoning == "gpt-4o"
+    assert picked.vision == roles.vision
+
+
+def test_use_selection_routes_client_and_models_for_the_whole_run():
+    """A per-chat selection reaches file reading and summaries, not just the
+    conversational classifier — the point of threading it through a context var."""
+    seen: dict[str, str] = {}
+
+    class RecordingClient:
+        name = "rec"
+        supports_vision = True
+
+        def structured(self, *, output_model, model=None, **kw):
+            seen["model"] = model
+            return output_model(bullets=["ok"])
+
+    from app.config import get_settings
+
+    llm.set_client(RecordingClient())
+    selection = get_settings().models_for("openai", model="gpt-4o")
+    with llm.use_selection(selection):
+        assert llm.current_selection().provider == "openai"
+        assert llm.reasoning_model() == "gpt-4o"
+        assert llm.vision_model() == selection.vision
+        # A reasoning task inside the block uses the selection's model.
+        model = PMIDataModel(source_files=["a.xlsx"])
+        tasks.write_summary(model, Audience.PMO, "status")
+        assert seen["model"] == "gpt-4o"
+    # Outside the block the selection is gone — fall back to settings.
+    assert llm.current_selection() is None
+
+
 def test_images_rank_lowest_in_source_priority():
     """§9: images are least trusted — OCR/vision output is less reliable than a tracker."""
     p = Settings(_env_file=None).source_priority
@@ -65,8 +117,13 @@ def test_images_rank_lowest_in_source_priority():
 
 
 def test_llm_configured_is_false_without_a_key():
+    # The default provider is anthropic, so its key is the one that counts.
     assert Settings(_env_file=None, anthropic_api_key=None).llm_configured() is False
     assert Settings(_env_file=None, anthropic_api_key="sk-test").llm_configured() is True
+    # A key for a *different* provider than the selected one is not a key.
+    assert Settings(
+        _env_file=None, openai_api_key="sk-test"
+    ).llm_configured() is False
     # "none" ignores any key that happens to be present
     assert Settings(
         _env_file=None, llm_provider="none", anthropic_api_key="sk-test"

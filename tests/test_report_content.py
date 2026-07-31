@@ -176,6 +176,40 @@ def test_the_corpus_compares_numbers_not_their_formatting(display, expected):
     assert expected in table.numeric_corpus()
 
 
+def test_a_prose_edit_may_keep_a_figure_the_block_already_shows():
+    """Once a bullet has been LLM-revised or previously edited it is no longer
+    planner-authored, so its own figures — never facts to begin with — drop out of
+    the corpus. Rejecting an edit against the very numbers the block displays is
+    the bug behind "-01, -07, -08, … are not a figure this report states": the
+    error lists the summary's own conflict percentages and date fragments. The
+    prose route grants the block's current figures; a genuinely invented one is
+    still refused."""
+    from app.report import guard
+
+    content = _content([
+        Section(section_id="summary.executive", label="Executive summary",
+                headline="Status", narrative_order=1,
+                blocks=[BulletsBlock(block_id="summary.bullets", items=[
+                    Bullet(text="Sources conflict at 82%, 78% and 41%.",
+                           authored_by="llm"),
+                ])]),
+    ])
+    block = content.sections[0].blocks[0]
+    block_text = "\n".join(i.text for i in block.items)
+
+    # The exclusion this documents: llm-authored figures are not corpus figures.
+    corpus = content.numeric_corpus_cached()
+    assert guard.check_text(block_text, corpus), \
+        "precondition: the block's own figures are not in the fact corpus"
+
+    # What `edit_prose` now allows — the figures the block already shows.
+    allowed = corpus | guard.numbers_in(block_text)
+    assert guard.check_text(block_text, allowed) == [], \
+        "a rephrase that keeps the block's own figures must be accepted"
+    assert guard.check_text("Growth hit 999% this quarter.", allowed) == ["999"], \
+        "a genuinely new figure is still refused"
+
+
 # ================================================================ projections
 def _content(sections: list[Section], audience=Audience.EXECUTIVE) -> ReportContent:
     return ReportContent(session_id="s", audience=audience, title="T",

@@ -338,7 +338,12 @@ class PMIProject(BaseModel):
     """
 
     project_id: str
-    project_name: str = "PMI Project"
+    #: Empty, never a placeholder. A default of "PMI Project" is indistinguishable
+    #: from a real name downstream, so every deck, filename and title used it even
+    #: when the acquirer and target were both known. Callers that need something
+    #: to print use `PMIDataModel.project_name`; callers that need to *resolve* a
+    #: name use `app/context/builder.py::resolve_document_name`.
+    project_name: str = ""
     deal_name: Optional[str] = None
     acquirer_name: Optional[str] = None
     target_name: Optional[str] = None

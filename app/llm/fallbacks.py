@@ -17,15 +17,36 @@ _REQUEST_HINTS: dict[str, list[str]] = {
     "powerpoint": ["powerpoint", "pptx", "slide", "deck", "presentation", "steerco",
                    "steering", "präsentation"],
     "excel": ["excel", "xlsx", "dashboard", "spreadsheet", "sheet", "tabelle"],
-    "chart": ["chart", "graph", "plot", "diagramm", "figure", "visual"],
+    "chart": ["chart", "charts", "graph", "plot", "diagramm", "diagram", "figure",
+              "visual", "image", "images", "picture", "png"],
 }
 
+#: The one audience map, shared with `conversation._match_audience` (§4/§9).
+#:
+#: Order is significant — the first audience whose keywords match wins — and
+#: `WORKSTREAM` comes before `PMO` deliberately: "workstream lead" is a
+#: workstream report, not an IMO one, and it used to be listed under PMO so
+#: every workstream request produced the wrong document.
+#:
+#: Kept wide on purpose. §4 says to ask when the audience *cannot be inferred*;
+#: asking about "a deck for the Integration Director" is not carefulness, it is
+#: the agent failing to read a title that names its reader unambiguously.
 _AUDIENCE_HINTS: dict[Audience, list[str]] = {
-    Audience.EXECUTIVE: ["executive", "steerco", "steering", "c-level", "board",
-                         "management", "leadership", "geschäftsführung"],
-    Audience.FINANCE: ["finance", "financial", "budget", "cost", "cfo", "finanz"],
-    Audience.PMO: ["pmo", "project office", "workstream", "detailed", "team",
-                   "operational", "imo"],
+    Audience.EXECUTIVE: ["executive", "executives", "steerco", "steering",
+                         "steering committee", "steering board", "c-level",
+                         "board", "management", "senior management",
+                         "leadership", "ceo", "coo", "sponsor",
+                         "integration director", "director", "geschäftsführung",
+                         "vorstand", "lenkungsausschuss"],
+    Audience.FINANCE: ["finance", "finances", "financial", "budget", "cost",
+                       "costs", "controlling", "cfo", "treasury", "finanz"],
+    Audience.WORKSTREAM: ["workstream", "workstreams", "work stream",
+                          "work streams", "workstream lead",
+                          "workstream leads", "stream lead", "teilprojekt"],
+    Audience.PMO: ["pmo", "imo", "project office", "integration office",
+                   "integration management office", "programme office",
+                   "program office", "detailed", "team", "operational",
+                   "projektbüro"],
 }
 
 
@@ -40,7 +61,22 @@ def heuristic_parse(request_text: str) -> RequestParse:
         (ot for ot, kws in _REQUEST_HINTS.items() if has_kw(kws)), "powerpoint"
     )
     audience = next((a for a, kws in _AUDIENCE_HINTS.items() if has_kw(kws)), None)
-    topic = "risks" if "risk" in text or "risiko" in text else "status"
+    # The topic steers which charts an image request produces (see
+    # `charts.generate`), so "an image of the milestones and project plan" has
+    # to land on "milestone", not the "status" catch-all — otherwise the picture
+    # shows workstream progress and the user's actual words are ignored.
+    topic = "status"
+    for needle, name in (
+        (("risk", "risiko"), "risks"),
+        (("milestone", "timeline", "project plan", "roadmap", "go-live",
+          "go live", "day 1", "day-1"), "milestone"),
+        (("budget", "cost", "spend"), "budget"),
+        (("synerg",), "synergy"),
+        (("depend",), "dependency"),
+    ):
+        if any(word in text for word in needle):
+            topic = name
+            break
     return RequestParse(output_type=output_type, audience=audience, topic=topic)
 
 

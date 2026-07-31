@@ -42,10 +42,19 @@ Kind = Literal[
 ]
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+    project_id     TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    icon           TEXT NOT NULL DEFAULT '📁',
+    knowledge      TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chats (
     chat_id        TEXT PRIMARY KEY,
     title          TEXT NOT NULL,
     session_id     TEXT NOT NULL,
+    project_id     TEXT,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL,
     archived_at    TEXT,
@@ -68,11 +77,46 @@ CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at DESC);
 """
 
 
+def _migrate(connection: sqlite3.Connection) -> None:
+    """Bring a pre-projects database up to the current schema.
+
+    `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a `chats.db`
+    created before projects existed keeps its old column set. Adding `project_id`
+    with a guarded `ALTER` is the whole migration story — the `projects` table
+    itself is created fresh by `_SCHEMA`, and untagged chats simply carry a NULL
+    `project_id`, which is exactly "outside a project".
+
+    The `project_id` index is created here rather than in `_SCHEMA` because the
+    column it references may not exist until the `ALTER` above has run.
+    """
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(chats)")}
+    if "project_id" not in columns:
+        connection.execute("ALTER TABLE chats ADD COLUMN project_id TEXT")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id)"
+    )
+
+
 # ------------------------------------------------------------------- models
+class Project(BaseModel):
+    project_id: str
+    name: str
+    icon: str = "📁"
+    #: Free text the user pins to the project — background, glossary, standing
+    #: instructions. Persisted here so it survives across the project's chats;
+    #: wiring it into a turn's context is a separate, later concern.
+    knowledge: str = ""
+    created_at: str
+    updated_at: str
+    chat_count: int = 0
+
+
 class Chat(BaseModel):
     chat_id: str
     title: str
     session_id: str
+    #: NULL means the chat lives outside any project — the default.
+    project_id: Optional[str] = None
     created_at: str
     updated_at: str
     archived_at: Optional[str] = None
@@ -117,6 +161,7 @@ def _connect() -> Iterator[sqlite3.Connection]:
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(_SCHEMA)
+        _migrate(connection)
         yield connection
         connection.commit()
     finally:
@@ -148,18 +193,22 @@ def estimate_tokens(text: str) -> int:
 # ------------------------------------------------------------------- chats
 def create_chat(session_id: str, title: str = "New chat", *,
                 provider: Optional[str] = None,
-                model: Optional[str] = None) -> Chat:
+                model: Optional[str] = None,
+                project_id: Optional[str] = None) -> Chat:
     chat_id = uuid.uuid4().hex[:12]
     now = _now()
     with _connect() as connection:
         connection.execute(
-            "INSERT INTO chats (chat_id, title, session_id, created_at, "
-            "updated_at, provider, model) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (chat_id, title, session_id, now, now, provider, model),
+            "INSERT INTO chats (chat_id, title, session_id, project_id, "
+            "created_at, updated_at, provider, model) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, title, session_id, project_id, now, now, provider, model),
         )
-    log.info("created chat %s for session %s", chat_id, session_id)
+    log.info("created chat %s for session %s (project %s)",
+             chat_id, session_id, project_id or "-")
     return Chat(chat_id=chat_id, title=title, session_id=session_id,
-                created_at=now, updated_at=now, provider=provider, model=model)
+                project_id=project_id, created_at=now, updated_at=now,
+                provider=provider, model=model)
 
 
 def list_chats(*, include_archived: bool = False, limit: int = 100) -> list[Chat]:
@@ -196,11 +245,36 @@ def get_chat(chat_id: str) -> Optional[Chat]:
     return _chat(row) if row else None
 
 
+def get_chat_for_session(session_id: str) -> Optional[Chat]:
+    """The most recently active chat backed by this analysis session."""
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT c.*, COUNT(m.message_id) AS message_count
+            FROM chats c
+            LEFT JOIN messages m ON m.chat_id = c.chat_id
+            WHERE c.session_id = ?
+            GROUP BY c.chat_id
+            ORDER BY c.updated_at DESC, c.rowid DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    return _chat(row) if row else None
+
+
 def rename_chat(chat_id: str, title: str) -> Optional[Chat]:
+    """Rename in place — deliberately leaves `updated_at` untouched.
+
+    The sidebar is ordered `updated_at DESC`, so bumping the timestamp here would
+    yank a renamed chat to the top of the list, which is not what "rename" means.
+    A rename changes the chat's label, not its recency; only new activity
+    (`add_message`, `set_model`, `archive_chat`) should reorder the sidebar.
+    """
     with _connect() as connection:
         connection.execute(
-            "UPDATE chats SET title = ?, updated_at = ? WHERE chat_id = ?",
-            (title.strip() or "Untitled chat", _now(), chat_id),
+            "UPDATE chats SET title = ? WHERE chat_id = ?",
+            (title.strip() or "Untitled chat", chat_id),
         )
     return get_chat(chat_id)
 
@@ -242,6 +316,127 @@ def delete_chat(chat_id: str) -> bool:
     with _connect() as connection:
         cursor = connection.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
         return cursor.rowcount > 0
+
+
+# ---------------------------------------------------------------- projects
+def create_project(name: str, *, icon: str = "📁",
+                   knowledge: str = "") -> Project:
+    project_id = uuid.uuid4().hex[:12]
+    now = _now()
+    with _connect() as connection:
+        connection.execute(
+            "INSERT INTO projects (project_id, name, icon, knowledge, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, name.strip() or "Untitled project",
+             icon or "📁", knowledge or "", now, now),
+        )
+    log.info("created project %s", project_id)
+    return Project(project_id=project_id, name=name.strip() or "Untitled project",
+                   icon=icon or "📁", knowledge=knowledge or "",
+                   created_at=now, updated_at=now)
+
+
+def list_projects() -> list[Project]:
+    """Every project, each with a count of the chats filed under it.
+
+    Ordered by name so the sidebar list is stable — projects are a filing
+    structure, not a recency feed like the chat list.
+    """
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT p.*, COUNT(c.chat_id) AS chat_count
+            FROM projects p
+            LEFT JOIN chats c
+                ON c.project_id = p.project_id AND c.archived_at IS NULL
+            GROUP BY p.project_id
+            ORDER BY p.name COLLATE NOCASE, p.rowid
+            """,
+        ).fetchall()
+    return [_project(row) for row in rows]
+
+
+def get_project(project_id: str) -> Optional[Project]:
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT p.*, COUNT(c.chat_id) AS chat_count
+            FROM projects p
+            LEFT JOIN chats c
+                ON c.project_id = p.project_id AND c.archived_at IS NULL
+            WHERE p.project_id = ?
+            GROUP BY p.project_id
+            """,
+            (project_id,),
+        ).fetchone()
+    return _project(row) if row else None
+
+
+def update_project(project_id: str, *, name: Optional[str] = None,
+                   icon: Optional[str] = None,
+                   knowledge: Optional[str] = None) -> Optional[Project]:
+    """Rename, re-icon, or re-knowledge a project — any subset in one call.
+
+    Only the fields the caller actually passes are written; `None` means "leave
+    it", which is what lets the icon picker and the rename box touch the same row
+    without clobbering each other's value.
+    """
+    sets: list[str] = []
+    values: list[Any] = []
+    if name is not None:
+        sets.append("name = ?")
+        values.append(name.strip() or "Untitled project")
+    if icon is not None:
+        sets.append("icon = ?")
+        values.append(icon or "📁")
+    if knowledge is not None:
+        sets.append("knowledge = ?")
+        values.append(knowledge)
+    if not sets:
+        return get_project(project_id)
+
+    sets.append("updated_at = ?")
+    values.append(_now())
+    values.append(project_id)
+    with _connect() as connection:
+        connection.execute(
+            f"UPDATE projects SET {', '.join(sets)} WHERE project_id = ?",
+            values,
+        )
+    return get_project(project_id)
+
+
+def delete_project(project_id: str) -> bool:
+    """Delete the project, keeping its chats.
+
+    Its chats are pushed back out to the top level (`project_id = NULL`) rather
+    than cascade-deleted: a project is a folder, and deleting a folder in this
+    app must never take a week's conversations with it. Same reasoning as
+    `delete_chat` sparing the analysis.
+    """
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE chats SET project_id = NULL WHERE project_id = ?",
+            (project_id,),
+        )
+        cursor = connection.execute(
+            "DELETE FROM projects WHERE project_id = ?", (project_id,)
+        )
+        return cursor.rowcount > 0
+
+
+def set_chat_project(chat_id: str, project_id: Optional[str]) -> Optional[Chat]:
+    """Move a chat into a project, or out of one when `project_id` is None.
+
+    Leaves `updated_at` alone for the same reason `rename_chat` does — filing a
+    chat is not activity in it, and should not jump it to the top of the list.
+    """
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE chats SET project_id = ? WHERE chat_id = ?",
+            (project_id, chat_id),
+        )
+    return get_chat(chat_id)
 
 
 # ---------------------------------------------------------------- messages
@@ -292,13 +487,25 @@ def supersede(message_ids: list[str]) -> int:
 
 
 # ------------------------------------------------------------------ mapping
+def _project(row: sqlite3.Row) -> Project:
+    keys = row.keys()
+    return Project(
+        project_id=row["project_id"], name=row["name"], icon=row["icon"],
+        knowledge=row["knowledge"], created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        chat_count=row["chat_count"] if "chat_count" in keys else 0,
+    )
+
+
 def _chat(row: sqlite3.Row) -> Chat:
+    keys = row.keys()
     return Chat(
         chat_id=row["chat_id"], title=row["title"], session_id=row["session_id"],
+        project_id=row["project_id"] if "project_id" in keys else None,
         created_at=row["created_at"], updated_at=row["updated_at"],
         archived_at=row["archived_at"], provider=row["provider"],
         model=row["model"], token_estimate=row["token_estimate"],
-        message_count=row["message_count"] if "message_count" in row.keys() else 0,
+        message_count=row["message_count"] if "message_count" in keys else 0,
     )
 
 

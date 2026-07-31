@@ -68,7 +68,11 @@ class OpenAIClient:
 
         kwargs = {
             "model": model or s.llm_model,
-            "max_tokens": max_tokens or s.llm_max_tokens,
+            # `max_tokens` is rejected outright by the GPT-5 / o-series reasoning
+            # models and is deprecated on the rest; `max_completion_tokens` is
+            # accepted by every chat-completions model this app can be pointed at.
+            # It also budgets reasoning tokens, which the older name did not.
+            "max_completion_tokens": max_tokens or s.llm_max_tokens,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": content},

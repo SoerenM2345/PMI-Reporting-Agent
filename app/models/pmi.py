@@ -56,6 +56,7 @@ from app.models.quality import (
     Conflict,
     ConflictEvidence,
     DataQualityReport,
+    ScoreComponent,
     ValidationIssue,
 )
 from app.models.source import ImageRegion, SourceReference
@@ -94,7 +95,14 @@ class PMIDataModel(BaseModel):
     # ------------------------------------------------------------- convenience
     @property
     def project_name(self) -> str:
-        return self.project.project_name
+        """Something safe to print. Never a name the project does not have.
+
+        The header defaults to empty rather than to "PMI Project" so that a
+        caller resolving a *real* name (`context.builder.resolve_document_name`)
+        can tell "unknown" from "known". Display sites want a string, and this
+        is the one place that decides what an unknown one looks like.
+        """
+        return self.project.project_name or "(unnamed project)"
 
     def overall_progress(self) -> Optional[float]:
         """Mean task progress. Returns None rather than 0 when nothing is known —
@@ -178,6 +186,7 @@ __all__ = [
     "SourceReference", "ImageRegion",
     # quality (§8, §9)
     "Conflict", "ConflictEvidence", "ValidationIssue", "DataQualityReport",
+    "ScoreComponent",
     # enums (§7)
     "SourceFormat", "Status", "Severity", "Audience", "Trend", "RiskCategory",
     "SynergyType", "BudgetCategory", "DecisionBody", "MeetingType",

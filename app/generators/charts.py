@@ -27,10 +27,15 @@ from app.models.pmi import PMIDataModel, Severity, Status  # noqa: E402
 
 log = logging.getLogger("pmi.charts")
 
-GREEN = "#2E7D32"
+# The RAG palette from `app/report/brand.py` — shared with the workbook, the
+# dashboard and (via tailwind.config.js) the UI, so a chart cannot use a
+# different green from the deck it ships beside.
+from app.report import brand
+
+GREEN = brand.RAG_GREEN
 LIGHT_GREEN = "#A5D6A7"
-AMBER = "#F9A825"
-RED = "#C62828"
+AMBER = brand.RAG_AMBER
+RED = brand.RAG_RED
 GREY = "#9E9E9E"
 DARK = "#1A1A1A"
 

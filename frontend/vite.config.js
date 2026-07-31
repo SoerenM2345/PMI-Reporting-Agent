@@ -14,4 +14,15 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
   },
+  test: {
+    // jsdom rather than a headless browser: what is worth testing here is
+    // component *state*, and the composer's attachment bug was a state-timing
+    // bug that only a component test can pin. Real drag-and-drop and a real
+    // AbortController would need Playwright; that is a different tool for a
+    // different question.
+    environment: "jsdom",
+    globals: true,
+    setupFiles: "./src/test/setup.js",
+    include: ["src/**/*.test.{js,jsx}"],
+  },
 });

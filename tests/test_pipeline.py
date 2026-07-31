@@ -12,7 +12,17 @@ SAMPLES = ROOT / "data" / "samples"
 sys.path.insert(0, str(ROOT))
 
 from app.agent.consistency import detect_conflicts, resolve_conflicts  # noqa: E402
-from app.agent.graph import run_agent  # noqa: E402
+from app.agent.graph import run_analysis, run_generation  # noqa: E402
+
+
+def _run_agent(state):
+    """Analysis then generation — the two-step path that replaced the one-shot
+    wizard graph. Generation must never re-run extraction, which is exactly why
+    the single `FULL_GRAPH` was removed."""
+    analysed = run_analysis(dict(state))
+    if analysed.get("needs_audience"):
+        return analysed
+    return run_generation({**analysed, "conflict_strategy": "hybrid"})
 from app.agent.standardize import standardize  # noqa: E402
 from app.extractors import extract_file  # noqa: E402
 from app.extractors.base import (find_progress_mentions, normalize_header,  # noqa: E402
@@ -105,7 +115,7 @@ def test_conflict_ask_mode(sample_files):
 
 # ------------------------------------------------------------------ end to end
 def test_full_agent_powerpoint(sample_files, tmp_path):
-    result = run_agent({
+    result = _run_agent({
         "session_id": "pytest",
         "file_paths": [str(sample_files / f) for f in
                        ("integration_tracker.xlsx", "weekly_update.pptx",
@@ -127,7 +137,7 @@ def test_full_agent_powerpoint(sample_files, tmp_path):
 
 
 def test_full_agent_excel(sample_files):
-    result = run_agent({
+    result = _run_agent({
         "session_id": "pytest",
         "file_paths": [str(sample_files / "integration_tracker.xlsx")],
         "request_text": "Create a Finance Excel dashboard",
@@ -139,7 +149,7 @@ def test_full_agent_excel(sample_files):
 
 
 def test_audience_question_when_unclear(sample_files):
-    result = run_agent({
+    result = _run_agent({
         "session_id": "pytest",
         "file_paths": [str(sample_files / "integration_tracker.xlsx")],
         "request_text": "Create a chart about risks",
@@ -161,12 +171,17 @@ def test_api_roundtrip(sample_files):
                         files={"files": ("integration_tracker.xlsx", f,
                                          "application/octet-stream")})
     assert r.status_code == 200 and r.json()["saved"]
-    r = client.post("/api/report", json={
+    analysis = client.post("/api/analyze", json={
         "session_id": sid,
         "request_text": "Create a PMO Excel dashboard",
     })
-    assert r.status_code == 200
-    body = r.json()
-    assert body["outputs"] and body["stats"]["tasks"] > 0
+    assert analysis.status_code == 200
+    assert analysis.json()["stats"]["tasks"] > 0
+
+    generated = client.post("/api/generate",
+                            json={"session_id": sid, "force": True})
+    assert generated.status_code == 200
+    body = generated.json()
+    assert body["outputs"]
     dl = client.get(f"/api/download/{sid}/{body['outputs'][0]}")
     assert dl.status_code == 200

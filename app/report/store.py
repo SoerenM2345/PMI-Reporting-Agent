@@ -60,9 +60,12 @@ def _version_file(session_id: str, version: int) -> Path:
 
 # ---------------------------------------------------------------- fingerprint
 def fingerprint(
-    model: PMIDataModel, quality: Optional[DataQualityReport] = None
+    model: PMIDataModel,
+    quality: Optional[DataQualityReport] = None,
+    *,
+    session_id: str = "",
 ) -> str:
-    """A cheap hash of the analysis a plan was built from.
+    """A cheap hash of everything a plan was built from.
 
     Not a checksum of everything — just the things that change what the report
     *says*: how many entities we found, how many conflicts are open, how many
@@ -76,9 +79,23 @@ def fingerprint(
     # whose entities happen to balance out a removed one would leave the
     # fingerprint unchanged and a stale report looking current.
     sources = ",".join(sorted(model.source_files))
+    # …and so is what the *user* has told us. A supplied value, a chosen
+    # audience or a requested structure changes the report without touching a
+    # single extracted entity, so without this a draft would survive them all
+    # and render exactly what the user just corrected.
+    session = session_id or model.project.project_id or ""
+    knowledge = _knowledge_revision(session)
     seed = (f"{model.entity_count()}|{len(model.conflicts)}|{resolved}|"
-            f"{len(model.unresolved_conflicts())}|{score}|{sources}")
+            f"{len(model.unresolved_conflicts())}|{score}|{sources}|kb{knowledge}")
     return hashlib.sha1(seed.encode()).hexdigest()[:12]
+
+
+def _knowledge_revision(session_id: str) -> int:
+    if not session_id:
+        return 0
+    from app.agent import knowledge
+
+    return knowledge.content_revision(session_id)
 
 
 def is_stale(
@@ -96,7 +113,9 @@ def is_stale(
     """
     if not content.analysis_fingerprint:
         return True
-    return content.analysis_fingerprint != fingerprint(model, quality)
+    return content.analysis_fingerprint != fingerprint(
+        model, quality, session_id=content.session_id
+    )
 
 
 # --------------------------------------------------------------------- write

@@ -11,8 +11,9 @@ be read as a straight mapping from block kind to slide furniture:
 
 The slide primitives (`_table`, `_tile`, `_header`, `_footer`) still live in
 `app/generators/pptx_report.py` and are imported rather than copied — they carry
-the geometry, the RAG palette and the §12.5 footer, none of which changes when
-the content does.
+the geometry and the RAG palette, neither of which changes when the content
+does. The footer is the content's — `_footer` draws whatever `ReportContent`
+asked for and nothing when it asked for nothing.
 """
 from __future__ import annotations
 
@@ -38,9 +39,7 @@ def render(
     """Write the deck. `model` is needed only to build chart images."""
     from app.generators import pptx_report as deck
 
-    prs = Presentation()
-    prs.slide_width, prs.slide_height = deck.SLIDE_W, deck.SLIDE_H
-
+    prs = _base_presentation(deck)
     _title_slide(prs, content, deck)
 
     for section in content.narrative():
@@ -61,15 +60,53 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+def _base_presentation(deck):
+    """Start from the Deloitte master so every slide inherits its background,
+    logos, theme colours and Aptos font — then strip the 26 demo slides so the
+    deck begins empty. Falls back to a blank python-pptx deck when the template
+    is absent, so generation never hard-depends on the asset."""
+    from pathlib import Path
+
+    from app.config import get_settings
+
+    template = get_settings().pptx_template
+    if template and Path(template).is_file():
+        prs = Presentation(str(template))
+        _strip_slides(prs)
+        return prs
+
+    log.info("no Deloitte template at %s; using a blank deck", template)
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = deck.SLIDE_W, deck.SLIDE_H
+    return prs
+
+
+_R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+
+def _strip_slides(prs) -> None:
+    """Delete the template's demo slides — both the ``sldIdLst`` entries and the
+    relationships, so the orphaned slide *parts* are pruned on save. Removing only
+    the list entries leaves the parts in the package, which then collide on name
+    with the freshly added slides and produce a corrupt zip."""
+    slide_ids = prs.slides._sldIdLst
+    for slide_id in list(slide_ids):
+        rel_id = slide_id.get(_R_NS)
+        if rel_id:
+            prs.part.drop_rel(rel_id)
+        slide_ids.remove(slide_id)
+
+
 def _title_slide(prs, content: ReportContent, deck) -> None:
-    slide = deck._blank(prs)
-    deck._text(slide, content.title, deck.MARGIN, Inches(2.4), size=40, bold=True)
+    slide = deck._blank(prs, deck.COVER_LAYOUT)
+    deck._text(slide, content.title, deck.MARGIN, Inches(2.4), size=40, bold=True,
+               colour=deck.GREEN)
     deck._text(slide, content.subtitle, deck.MARGIN, Inches(3.4), size=20,
                colour=deck.GREY)
     if content.meta_line:
         deck._text(slide, "   ·   ".join(content.meta_line), deck.MARGIN,
                    Inches(4.1), size=13, colour=deck.GREY)
-    deck._footer(slide)
+    deck._footer(slide, content.footer)
 
 
 def _section_slide(
@@ -80,7 +117,8 @@ def _section_slide(
     # A chart section is a picture slide; nothing else goes on it.
     chart = next((b for b in section.blocks if b.kind == "chart"), None)
     if chart is not None:
-        _chart_slide(prs, section, chart, out_dir, model, deck)
+        _chart_slide(prs, section, chart, out_dir, model, deck,
+                     content.footer)
         return
 
     tables = [b for b in section.blocks if b.kind == "table" and b.rows]
@@ -92,6 +130,7 @@ def _section_slide(
                 [[cell.text for cell in row] for row in
                  block.rows[:(block.row_limit or len(block.rows))]],
                 note=block.note or "",
+                footer=content.footer,
             )
         return
 
@@ -101,7 +140,7 @@ def _section_slide(
     tiles = next((b for b in section.blocks if b.kind == "tiles"), None)
     if tiles is not None:
         _tiles(slide, tiles, content, deck)
-        deck._footer(slide)
+        deck._footer(slide, content.footer)
         return
 
     top = Inches(1.9)
@@ -132,7 +171,7 @@ def _section_slide(
         deck._text(slide, section.empty_explanation, deck.MARGIN, Inches(2.2),
                    size=14, colour=deck.GREY)
 
-    deck._footer(slide)
+    deck._footer(slide, content.footer)
 
 
 def _tiles(slide, block, content: ReportContent, deck) -> None:
@@ -151,7 +190,7 @@ def _tiles(slide, block, content: ReportContent, deck) -> None:
 
 def _chart_slide(
     prs, section: Section, block, out_dir: Path,
-    model: Optional[PMIDataModel], deck,
+    model: Optional[PMIDataModel], deck, footer: str = "",
 ) -> None:
     builder = charts_registry.resolve(block.builder)
     if builder is None or model is None:
@@ -172,4 +211,4 @@ def _chart_slide(
     deck._header(slide, section.headline, "")
     slide.shapes.add_picture(str(path), Inches(1.9), Inches(1.7),
                              height=Inches(5.2))
-    deck._footer(slide)
+    deck._footer(slide, footer)

@@ -51,8 +51,11 @@ uvicorn app.main:app --reload
 ### API key (optional)
 
 ```bash
-cp .env.example .env     # add ANTHROPIC_API_KEY=...
+cp .env.example .env     # add OPENAI_API_KEY=sk-...
 ```
+
+The default is `gpt-5.6` on the OpenAI provider; `.env` is gitignored, so whoever
+runs this supplies their own key and never edits code to do it.
 
 **Without a key everything still runs** — extraction, all 39 consistency checks, conflict
 resolution, and every generated file. What you lose is the semantic layer: summaries
@@ -60,7 +63,7 @@ become template prose, and **images cannot be interpreted at all**. Every fallba
 recorded in the data-quality report, so a keyless run is honest about what it could not
 do.
 
-The provider is swappable (`LLM_PROVIDER=anthropic|openai|none`), and no model ID is
+The provider is swappable (`LLM_PROVIDER=openai|anthropic|none`), and no model ID is
 hard-coded anywhere but `app/config.py` — there is a test that enforces it.
 
 ### Try it on the sample project

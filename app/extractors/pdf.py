@@ -127,7 +127,7 @@ def _interpret_scanned(path: Path, pages: list[int]) -> list[dict]:
     that is the difference between "there was nothing in it" and "we could not open
     it", and only one of those is honest (§21.17).
     """
-    from app.llm import DocumentPart, LLMError, get_client
+    from app.llm import DocumentPart, LLMError, get_client, vision_model
     from app.llm.prompts import load as load_prompt
     from app.llm.schemas import ImageExtraction
 
@@ -159,6 +159,7 @@ def _interpret_scanned(path: Path, pages: list[int]) -> list[dict]:
                 f"extract the PMI information they contain."
             ),
             output_model=ImageExtraction,
+            model=vision_model(),
             documents=[DocumentPart(b64=b64)],
         )
     except (LLMError, Exception) as exc:

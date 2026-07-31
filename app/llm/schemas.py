@@ -80,13 +80,43 @@ class VisionRegion(BaseModel):
     height: Optional[int] = Field(default=None, description="Box height in pixels.")
 
 
+class ImageFields(BaseModel):
+    """Closed image attributes, compatible with strict structured outputs.
+
+    OpenAI does not support a free-form ``dict[str, str]`` inside a strict
+    response schema. Keeping the known extractor vocabulary as nullable fields
+    also prevents a model from inventing attribute names the standardizer could
+    never consume.
+    """
+
+    owner: Optional[str] = None
+    status: Optional[str] = None
+    due_date: Optional[str] = None
+    workstream: Optional[str] = None
+    probability: Optional[str] = None
+    impact: Optional[str] = None
+    severity: Optional[str] = None
+    mitigation: Optional[str] = None
+    category: Optional[str] = None
+    planned: Optional[str] = None
+    actual: Optional[str] = None
+    forecast: Optional[str] = None
+    target: Optional[str] = None
+    value: Optional[str] = None
+    unit: Optional[str] = None
+    description: Optional[str] = None
+
+    def items(self):
+        return self.model_dump(exclude_none=True).items()
+
+
 class ExtractedImageItem(BaseModel):
     """One PMI fact read out of a picture."""
 
     type: RecordType = Field(description="Which PMI entity this is.")
     title: str = Field(description="The item's name, exactly as written in the image.")
-    fields: dict[str, str] = Field(
-        default_factory=dict,
+    fields: ImageFields = Field(
+        default_factory=ImageFields,
         description=(
             "Other attributes you can read, as flat key/value strings. Use these keys "
             "where they apply: owner, status, due_date, workstream, probability, impact, "

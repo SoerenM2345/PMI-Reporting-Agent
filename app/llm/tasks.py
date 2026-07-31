@@ -14,15 +14,17 @@ those are in this module.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional, TypeVar
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Callable, Iterator, Optional, Sequence, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from app.config import get_settings
-from app.llm import fallbacks, get_client
-from app.llm.base import LLMError
+from app.llm import fallbacks, fast_model, get_client, reasoning_model
+from app.llm.base import ImagePart, LLMError
 from app.llm.prompts import load as load_prompt
 from app.llm.schemas import RequestParse, SummaryBullets
+from app.llm.serialize import budgeted_json, truncation_note
 from app.models.pmi import Audience, PMIDataModel
 
 log = logging.getLogger("pmi.llm")
@@ -41,6 +43,34 @@ def drain_warnings() -> list[str]:
     return out
 
 
+#: Task names that fell back inside the innermost active `collect()` block.
+_collected: ContextVar[Optional[list[str]]] = ContextVar("collected", default=None)
+
+
+@contextmanager
+def collect() -> Iterator[list[str]]:
+    """The task names that fell back inside this block.
+
+    `_warnings` cannot answer that question. It is one list shared by every
+    request in the process and it is only drained by the graph, so a caller that
+    reaches the engine without going through a graph node — `/api/content` is
+    one — sees warnings left behind by an *earlier, unrelated* run. Asking it
+    "did planning fall back?" answers "did planning fall back at some point since
+    someone last drained", which is how one failed storyline came to stamp
+    "Unplanned layout" on every later document in the process, across sessions.
+
+    A `ContextVar` is scoped to this call and safe under FastAPI's threadpool,
+    and it keeps every intermediate signature unchanged — the alternative was
+    threading a flag through `interpret`, `develop` and `design_pages`.
+    """
+    stages: list[str] = []
+    token = _collected.set(stages)
+    try:
+        yield stages
+    finally:
+        _collected.reset(token)
+
+
 def _fallback(task: str, exc: Exception, fn: Callable[[], T]) -> T:
     message = (
         f"LLM unavailable for '{task}' ({type(exc).__name__}: {exc}); "
@@ -48,81 +78,82 @@ def _fallback(task: str, exc: Exception, fn: Callable[[], T]) -> T:
     )
     log.warning(message)
     _warnings.append(message)
+    collected = _collected.get()
+    if collected is not None:
+        collected.append(task)
     return fn()
+
+
+def run_task(name: str, *, system: str, user: str, output_model: type[T],
+             fallback: Callable[[], T], model: Optional[str] = None,
+             max_tokens: Optional[int] = None,
+             images: Sequence[ImagePart] = ()) -> T:
+    """Run one LLM task, or fall back deterministically and record that it did.
+
+    Every semantic call in the codebase goes through here, so there is exactly
+    one place that decides what "the model was unavailable" means and exactly
+    one place that records it. The planning pipeline adds nine more callers; if
+    each handled its own failure, a keyless run would produce a document that
+    looked planned and silently was not — which is the failure `_fallback`'s
+    wording was written to prevent.
+    """
+    try:
+        return get_client().structured(
+            system=system, user=user, output_model=output_model,
+            model=model, max_tokens=max_tokens, images=images,
+        )
+    except (LLMError, ValidationError) as exc:
+        return _fallback(name, exc, fallback)
 
 
 # --------------------------------------------------------------------- tasks
 def parse_request(request_text: str) -> RequestParse:
     """§11: 'Understanding the reporting request' + 'Detecting target audience'."""
-    settings = get_settings()
-    try:
-        return get_client().structured(
-            system=load_prompt("detect_pmi_request"),
-            user=request_text,
-            output_model=RequestParse,
-            model=settings.fast_model,
-        )
-    except (LLMError, ValidationError) as exc:
-        return _fallback(
-            "parse_request", exc, lambda: fallbacks.heuristic_parse(request_text)
-        )
+    return run_task(
+        "parse_request",
+        system=load_prompt("detect_pmi_request"),
+        user=request_text,
+        output_model=RequestParse,
+        model=fast_model(),
+        fallback=lambda: fallbacks.heuristic_parse(request_text),
+    )
 
 
 def write_summary(
     model: PMIDataModel, audience: Audience, request_text: str
 ) -> list[str]:
     """§11: 'Generating executive summaries' / 'Creating audience-specific wording'."""
-    try:
-        payload = _serialize_for_llm(model)
-        result = get_client().structured(
-            system=load_prompt("create_executive_summary"),
-            user=(
-                f"Audience: {audience.value}\n"
-                f"Request: {request_text}\n\n"
-                f"Standardized PMI data:\n{payload}"
-            ),
-            output_model=SummaryBullets,
-        )
-        return result.bullets
-    except (LLMError, ValidationError) as exc:
-        return _fallback(
-            "write_summary", exc, lambda: fallbacks.template_summary(model, audience)
-        ).bullets
+    payload = _serialize_for_llm(model)
+    return run_task(
+        "write_summary",
+        system=load_prompt("create_executive_summary"),
+        user=(f"Audience: {audience.value}\n"
+              f"Request: {request_text}\n\n"
+              f"Standardized PMI data:\n{payload}"),
+        output_model=SummaryBullets,
+        model=reasoning_model(),
+        fallback=lambda: fallbacks.template_summary(model, audience),
+    ).bullets
 
 
 # ------------------------------------------------------------------- helpers
 def _serialize_for_llm(model: PMIDataModel, budget_chars: int = 60_000) -> str:
     """Serialize the data model for a prompt without corrupting it.
 
-    The original code did `model_dump_json()[:12000]`, which slices mid-token and
-    hands the model malformed JSON. Instead we drop whole entities from the tail
-    of the largest collections until the payload fits, and say what we dropped —
-    truncated-but-valid beats corrupt-but-complete.
+    The shedding logic now lives in `app/llm/serialize.py` so the planning
+    pipeline can reuse it; this keeps the warning wording, which reaches the
+    data-quality report.
     """
-    payload = model.model_dump_json(exclude={"notes"}, indent=None)
-    if len(payload) <= budget_chars:
+    # Shed the bulkiest, least summary-relevant collections first.
+    payload, dropped = budgeted_json(
+        model, budget_chars=budget_chars, exclude={"notes"},
+        shed_order=("tasks", "milestones", "budget", "kpis", "risks"),
+    )
+    if not dropped:
         return payload
 
-    trimmed = model.model_copy(deep=True)
-    dropped: list[str] = []
-
-    # Shed the bulkiest, least summary-relevant collections first.
-    for field in ("tasks", "milestones", "budget", "kpis", "risks"):
-        while len(payload) > budget_chars:
-            items = getattr(trimmed, field, None)
-            if not items:
-                break
-            items.pop()
-            payload = trimmed.model_dump_json(exclude={"notes"}, indent=None)
-        removed = len(getattr(model, field, [])) - len(getattr(trimmed, field, []))
-        if removed:
-            dropped.append(f"{removed} {field}")
-
-    if dropped:
-        note = f"NOTE: payload truncated for size — omitted {', '.join(dropped)}."
-        _warnings.append(
-            "PMI data model exceeded the prompt budget; the summary was written "
-            f"from a subset (omitted {', '.join(dropped)})."
-        )
-        return f"{note}\n{payload}"
-    return payload
+    _warnings.append(
+        "PMI data model exceeded the prompt budget; the summary was written "
+        f"from a subset (omitted {', '.join(dropped)})."
+    )
+    return f"{truncation_note(dropped)}\n{payload}"

@@ -5,11 +5,12 @@ Three compiled graphs over one set of shared node functions:
     ANALYSIS_GRAPH    parse -> validate -> extract -> standardize -> derive -> calculate
                       -> match -> check -> score -> auto-resolve
     GENERATION_GRAPH  apply resolutions -> summarize -> generate -> verify outputs
-    FULL_GRAPH        both, in one shot
 
-The split exists for one concrete reason: **generation must never re-run extraction.**
-The original design had a single graph, and the human-in-the-loop round trip re-ran it
-from the top — which, once §5.6 landed, meant paying for a vision call on every
+There are two graphs, not three: the one-shot `FULL_GRAPH` and its `/api/report`
+endpoint were the pre-chat wizard's path and are gone. Analysis and generation
+stay separate for one concrete reason: **generation must never re-run
+extraction.** The original design had a single graph, and the human-in-the-loop
+round trip re-ran it from the top — which, once §5.6 landed, meant paying for a vision call on every
 conflict the user resolved, and re-rolling the dice on what the model saw each time.
 Analysis is now run once and persisted; resolving a conflict and regenerating reads
 that back.
@@ -59,7 +60,12 @@ def _out_dir(state: AgentState) -> Path:
 # ============================================================ analysis nodes
 def parse_request(state: AgentState) -> AgentState:
     """§10.1-6: what was asked for, for whom. Ask about the audience if unclear."""
-    parsed = tasks.parse_request(state.get("request_text", ""))
+    # File analysis needs three routing fields, not another semantic opinion.
+    # The complete report planner will interpret the actual request later with
+    # the full project and evidence context.
+    from app.llm.fallbacks import heuristic_parse
+
+    parsed = heuristic_parse(state.get("request_text", ""))
     audience = state.get("audience") or parsed.audience
 
     log.info("Request parsed: output=%s audience=%s topic=%s",
@@ -186,35 +192,56 @@ def plan_content(state: AgentState) -> AgentState:
     An approved version passed in by the API wins. Otherwise we plan fresh, so
     callers that never touch the preview behave exactly as they did before.
     """
-    from app.report import store
-    from app.report.planner import plan
+    from app.report.pipeline import plan_for_session
+    from app.storage.json_store import SessionAnalysis
 
     approved = state.get("report_content")
     if approved is not None:
         return {"report_content": approved,
                 "summary_bullets": _summary_bullets(approved)}
 
-    model = state["data_model"]
-    audience = state.get("audience") or Audience.PMO
-    report = state.get("quality_report")
+    # Designed documents are planned before the user previews them. Their
+    # renderer consumes that approved Deliverable directly, so building the
+    # legacy ReportContent here cannot affect the file; it only adds another
+    # reasoning-model round trip to every PowerPoint/Word/PDF/HTML export.
+    # Preserve the response summary from the approved argument without
+    # re-planning a second, unused document.
+    deliverable = state.get("deliverable")
+    output_type = _canonical_format(state.get("output_type", "powerpoint"))
+    if deliverable is not None and output_type in (
+            "powerpoint", "word", "pdf", "html"):
+        bullets = ([deliverable.executive_takeaway]
+                   if deliverable.executive_takeaway else [])
+        return {"report_content": None, "summary_bullets": bullets}
 
-    bullets = tasks.write_summary(model, audience, state.get("request_text", ""))
-    content = plan(
-        model, audience,
-        session_id=state.get("session_id", ""),
-        topic=state.get("topic", "status"),
-        bullets=bullets,
-        quality=report,
-        fingerprint=store.fingerprint(model, report),
+    # `plan_for_session` is the only place a report is planned. Feeding it the
+    # graph's state as a `SessionAnalysis` keeps this node a caller rather than
+    # a fourth implementation — the three that existed before all assembled the
+    # bullets, the quality report and the fingerprint slightly differently.
+    content = plan_for_session(
+        state.get("session_id", ""),
+        SessionAnalysis(
+            session_id=state.get("session_id", ""),
+            request_text=state.get("request_text", ""),
+            topic=state.get("topic", "status"),
+            audience=state.get("audience") or Audience.PMO,
+            data_model=state["data_model"],
+            quality_report=state.get("quality_report"),
+            errors=list(state.get("errors", [])),
+            warnings=list(state.get("warnings", [])),
+        ),
+        # The graph runs on paths that may have no stored draft to reuse prose
+        # from; `plan_for_session` falls back to writing it either way.
+        save=False,
     )
     return {
         "report_content": content,
-        "summary_bullets": bullets,
+        "summary_bullets": _summary_bullets(content),
         "warnings": list(state.get("warnings", [])) + tasks.drain_warnings(),
     }
 
 
-def _render_document(output_type: str, content, out_dir: Path) -> Path:
+def _render_document(output_type: str, content, out_dir: Path, model=None) -> Path:
     """Word, PDF and HTML all read the same approved `ReportContent`."""
     from datetime import date as _date
 
@@ -239,8 +266,56 @@ def _render_document(output_type: str, content, out_dir: Path) -> Path:
     path = out_dir / (
         f"PMI_Report_{content.audience.value}_{_date.today().isoformat()}.html"
     )
-    path.write_text(render_html(content), encoding="utf-8")
+    # The model lets the dashboard render and inline its charts; without it the
+    # page still builds and names the charts instead.
+    path.write_text(render_html(content, model, out_dir), encoding="utf-8")
     return path
+
+
+def _render_workbook(content, out_dir: Path, model):
+    from app.report.render import xlsx as renderer
+
+    return renderer.render(content, out_dir, model)
+
+
+def _render_charts(content, model, topic: str, out_dir: Path) -> list[Path]:
+    """The content's own charts, then the topic's — deduplicated, in order.
+
+    A "generate an image of the milestones" request maps through the topic to
+    `milestone_timeline` + `day_1_readiness`; a preview that already carried a
+    workstream-progress chart contributes that one first. Rendering the
+    approved charts before the topic extras is what stops a picture asserting
+    something the preview did not.
+    """
+    from app.report import charts_registry
+
+    seen: set[str] = set()
+    paths: list[Path] = []
+
+    if content is not None:
+        for section in content.sections:
+            for block in section.blocks:
+                if getattr(block, "kind", None) != "chart":
+                    continue
+                builder = charts_registry.resolve(block.builder)
+                if builder is None or block.builder in seen:
+                    continue
+                seen.add(block.builder)
+                try:
+                    path = builder(model, out_dir)
+                except Exception as exc:                      # noqa: BLE001
+                    log.warning("chart %s failed: %s", block.builder, exc)
+                    continue
+                if path is not None:
+                    paths.append(Path(path))
+
+    # Topic-driven extras fill in anything the content did not already show,
+    # and guarantee a non-empty result — an empty chart request looks like a
+    # broken app.
+    for path in charts.generate(model, topic, out_dir):
+        if Path(path).name not in {p.name for p in paths}:
+            paths.append(Path(path))
+    return paths
 
 
 def _summary_bullets(content) -> list[str]:
@@ -251,12 +326,100 @@ def _summary_bullets(content) -> list[str]:
     return [item.text for item in section.blocks[0].items]
 
 
+#: `parse_request` and the chat classifier both emit "image" for a picture; the
+#: renderer branch is called "chart". Normalising here rather than at each caller
+#: means a new entry point cannot reintroduce the silent fall-through that made
+#: "generate an image of the milestones" hand back the data-quality report.
+_FORMAT_ALIASES = {"image": "chart", "images": "chart", "picture": "chart",
+                   "png": "chart", "graph": "chart", "diagram": "chart",
+                   "pptx": "powerpoint", "docx": "word", "xlsx": "excel"}
+
+
+def _canonical_format(output_type: str) -> str:
+    return _FORMAT_ALIASES.get((output_type or "").strip().lower(),
+                               output_type or "powerpoint")
+
+
+def _render_designed(state: AgentState, output_type: str,
+                     out_dir: Path) -> list[str]:
+    """Render the approved `Deliverable`, planning one only if there is none.
+
+    Planning here rather than reusing the approved plan would break the promise
+    the preview makes: the user would approve one document and receive another,
+    invisibly, because both look right on their own.
+
+    On failure this returns nothing and records the error, so the run still hands
+    over the quality and conflict reports — a session that produces no deck but
+    explains why is better than one that 500s.
+    """
+    from app.agent.cancellation import Cancelled
+    from app.deliverable import session as session_plan
+    from app.renderers import registry
+
+    session_id = state.get("session_id") or ""
+    fmt = registry.normalize(output_type)
+    try:
+        from app.context import builder
+        from app.quality import repair, review
+
+        from app.agent.cancellation import check
+
+        cancel = state.get("cancel")
+        deliverable = state.get("deliverable")
+        analysis = _analysis_for(state)
+        if deliverable is None:
+            deliverable = session_plan.plan(session_id, analysis,
+                                            request_text=state.get("request_text", ""),
+                                            fmt=fmt, cancel=cancel)
+        check(cancel, f"rendering the {fmt}")
+
+        context = builder.build_for_session(
+            session_id, state.get("request_text", "") or "", analysis=analysis)
+        reviewed = review(deliverable, context, use_model=False)
+        if not reviewed.passed:
+            deliverable, _applied = repair(deliverable, context, reviewed)
+
+        check(cancel, f"writing the {fmt} file")
+        results = registry.render_all(deliverable, context, out_dir, [fmt])
+        state["deliverable_warnings"] = (list(deliverable.warnings)
+                                        + [w for r in results for w in r.warnings])
+        return [str(r.path) for r in results if r.page_count]
+    except Cancelled:
+        # Re-raised so the turn reports "stopped" rather than "failed": the
+        # user asked for this, and a half-written file is never handed over as
+        # though it were finished.
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        log.exception("could not generate the %s deliverable", output_type)
+        state["deliverable_errors"] = [
+            f"The {output_type} deliverable could not be produced "
+            f"({type(exc).__name__}: {exc})."]
+        return []
+
+
+def _analysis_for(state: AgentState):
+    """The stored analysis, or one assembled from the state we were handed."""
+    from app.storage.json_store import SessionAnalysis, load_analysis
+
+    stored = load_analysis(state.get("session_id", ""))
+    if stored is not None:
+        return stored
+    return SessionAnalysis(
+        session_id=state.get("session_id", ""),
+        request_text=state.get("request_text", ""),
+        output_type=state.get("output_type", "powerpoint"),
+        topic=state.get("topic", "status"),
+        audience=state.get("audience"),
+        data_model=state["data_model"],
+        quality_report=state.get("quality_report"))
+
+
 def generate_output(state: AgentState) -> AgentState:
     """§10.24-31: the deliverable, plus the two reports the spec always requires.
 
-    Makes no LLM call: the prose was written during `plan_content`. Generation
-    is therefore deterministic and free, and rendering the same approved content
-    into a second format cannot change a word of it.
+    The designed formats render the approved `Deliverable`. The workbook and the
+    standalone charts still render from `ReportContent`, because a data dump and
+    a set of PNGs are not documents and gain nothing from a storyline.
     """
     model = state["data_model"]
     audience = state.get("audience") or Audience.PMO
@@ -264,28 +427,33 @@ def generate_output(state: AgentState) -> AgentState:
 
     content = state.get("report_content")
     bullets = state.get("summary_bullets") or []
-    output_type = state.get("output_type", "powerpoint")
+    output_type = _canonical_format(state.get("output_type", "powerpoint"))
     report = state.get("quality_report")
     files: list[str] = []
 
-    if output_type == "powerpoint":
-        files.append(str(
-            pptx_report.generate_from_content(content, out_dir, model)
-            if content is not None else
-            pptx_report.generate(model, audience, bullets, out_dir, quality=report)
-        ))
-    elif output_type in ("word", "pdf", "html"):
-        # These render straight from the approved content, so the document, the
-        # PDF and the web page state exactly what the user read in the preview.
-        files.append(str(_render_document(output_type, content, out_dir)))
+    if output_type in ("powerpoint", "word", "pdf", "html"):
+        # The designed formats render the *approved plan* — the very object the
+        # preview projected — so the deck, the document, the PDF and the web page
+        # state exactly what the user read. `ReportContent` remains the revision
+        # vocabulary; it is no longer the shape of the artifact.
+        files.extend(_render_designed(state, output_type, out_dir))
     elif output_type == "excel":
+        # The workbook renders the same approved content as everything else.
+        # It used to re-walk `PMIDataModel`, which made it the one format that
+        # could contradict the preview the user had signed off.
         files.append(str(
-            xlsx_dashboard.generate(model, audience, bullets, out_dir, quality=report)
+            _render_workbook(content, out_dir, model)
+            if content is not None else
+            xlsx_dashboard.generate(model, audience, bullets, out_dir,
+                                    quality=report)
         ))
     elif output_type == "chart":
-        files.extend(
-            str(p) for p in charts.generate(model, state.get("topic", "status"), out_dir)
-        )
+        # The approved content's own charts first, so a picture cannot show
+        # something the preview did not — then topic-driven extras. A chart the
+        # user read about in the preview and a chart the topic implies are both
+        # legitimate; a chart that contradicts the preview is not.
+        files.extend(str(p) for p in _render_charts(
+            content, model, state.get("topic", "status"), out_dir))
 
     # §18.18-19: the conflict report and the data-quality report ship with EVERY run,
     # not only when the user thinks to ask. They are what make the deck defensible.
@@ -298,7 +466,13 @@ def generate_output(state: AgentState) -> AgentState:
     return {
         "summary_bullets": bullets,
         "output_files": files,
-        "warnings": list(state.get("warnings", [])) + tasks.drain_warnings(),
+        # Returned, not appended to `state`: the graph merges what a node
+        # returns, so a mutation of the input dict is lost.
+        "errors": (list(state.get("errors", []))
+                   + list(state.get("deliverable_errors", []))),
+        "warnings": (list(state.get("warnings", []))
+                     + list(state.get("deliverable_warnings", []))
+                     + tasks.drain_warnings()),
     }
 
 
@@ -409,18 +583,8 @@ def build_generation_graph():
     return g.compile()
 
 
-def build_graph():
-    """The one-shot path (`POST /api/report`)."""
-    g = StateGraph(AgentState)
-    _analysis_nodes(g)
-    _generation_nodes(g)
-    g.add_edge("resolve_conflicts", "plan_content")
-    return g.compile()
-
-
 _ANALYSIS = None
 _GENERATION = None
-_FULL = None
 
 
 def run_analysis(state: AgentState) -> AgentState:
@@ -435,14 +599,6 @@ def run_generation(state: AgentState) -> AgentState:
     if _GENERATION is None:
         _GENERATION = build_generation_graph()
     return _GENERATION.invoke(state)
-
-
-def run_agent(state: AgentState) -> AgentState:
-    """Analysis + generation in one call."""
-    global _FULL
-    if _FULL is None:
-        _FULL = build_graph()
-    return _FULL.invoke(state)
 
 
 def blocking_conflicts(state: AgentState):
