@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import Attachments from "./Attachments";
 
@@ -32,6 +32,7 @@ export default function Composer({ onSend, onStop, busy, disabled }) {
   const [draft, setDraft] = useState({ text: "", attachments: [] });
   const [dragging, setDragging] = useState(false);
   const input = useRef(null);
+  const textarea = useRef(null);
 
   const setText = (text) => setDraft((current) => ({ ...current, text }));
 
@@ -50,6 +51,21 @@ export default function Composer({ onSend, onStop, busy, disabled }) {
       return { ...current, attachments: next };
     });
   };
+
+  useLayoutEffect(() => {
+    const element = textarea.current;
+    if (!element) return;
+
+    // Reset first so the textarea can also shrink after text is deleted.
+    element.style.height = "auto";
+
+    const maxHeight = 160;
+    const nextHeight = Math.min(element.scrollHeight, maxHeight);
+
+    element.style.height = `${nextHeight}px`;
+    element.style.overflowY =
+      element.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [draft.text]);
 
   const removeFile = (target) =>
     setDraft((current) => ({
@@ -137,23 +153,30 @@ export default function Composer({ onSend, onStop, busy, disabled }) {
         />
 
         <textarea
+          ref={textarea}
           rows={1}
           value={draft.text}
           disabled={busy || disabled}
           aria-label="Message"
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
-            // Enter sends; Shift+Enter is a newline. A status update is often
-            // one line, and needing a mouse to send it gets old fast.
-            if (event.key === "Enter" && !event.shiftKey) submit(event);
+            if (
+              event.key === "Enter" &&
+              !event.shiftKey &&
+              !event.nativeEvent.isComposing
+            ) {
+              event.preventDefault();
+              submit();
+            }
           }}
           placeholder={
             dragging
               ? "Drop the files here…"
               : "Ask for a report, or tell me what to change…"
           }
-          className="max-h-40 flex-1 resize-y rounded-lg border border-slate-300 px-3 py-2
-                     text-sm focus:border-slate-500 focus:outline-none disabled:opacity-50"
+          className="min-h-10 max-h-40 flex-1 resize-none overflow-y-hidden rounded-lg
+             border border-slate-300 px-3 py-2 text-sm leading-5
+             focus:border-slate-500 focus:outline-none disabled:opacity-50"
         />
 
         {/* Send becomes Stop while a turn is running. One control, because

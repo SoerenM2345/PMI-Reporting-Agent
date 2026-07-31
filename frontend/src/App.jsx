@@ -353,6 +353,7 @@ export default function App() {
         ...prior.filter((m) => !localIds.includes(m.message_id)),
         ...(body.messages ?? []),
       ]);
+      if (body.chat) setChat(body.chat);
 
       await refreshChats();
     });

@@ -124,6 +124,31 @@ def test_a_chat_can_be_renamed_and_closed_and_reopened(client):
     assert chat_id in [c["chat_id"] for c in client.get("/api/chats").json()["chats"]]
 
 
+def test_the_first_exchange_automatically_names_a_default_chat(client):
+    chat_id = client.post("/api/chats", json={}).json()["chat"]["chat_id"]
+
+    body = client.post(
+        f"/api/chats/{chat_id}/turn",
+        data={"text": "Prepare the weekly SteerCo risk update"},
+    ).json()
+
+    assert body["chat"]["title"] != "New chat"
+    assert "SteerCo" in body["chat"]["title"]
+
+
+def test_automatic_naming_never_overwrites_a_chosen_title(client):
+    chat_id = client.post(
+        "/api/chats", json={"title": "Aurora integration"}
+    ).json()["chat"]["chat_id"]
+
+    body = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "Prepare the weekly SteerCo risk update"},
+    ).json()
+
+    assert body["chat"]["title"] == "Aurora integration"
+
+
 def test_renaming_a_chat_keeps_its_position_in_the_list(client):
     """A rename changes a chat's label, not its recency — it must not jump to the
     top of the sidebar, which is ordered by last activity."""
