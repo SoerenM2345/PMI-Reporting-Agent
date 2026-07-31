@@ -84,9 +84,10 @@ def detect(request_text: str, *, provider: str = "", model: str = "") -> Optiona
     if not text:
         return None
 
-    spec = _detect_with_llm(text, provider, model)
-    if spec:
-        return spec
+    # Explicit lists and headings are syntax, not a semantic task. The complete
+    # report call sees the verbatim request and handles any implicit structure.
+    # Keeping a separate model call here made every report request slower before
+    # planning had even started.
     return _detect_deterministically(text)
 
 

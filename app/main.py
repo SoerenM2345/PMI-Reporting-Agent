@@ -23,7 +23,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -38,8 +38,6 @@ from app.models.pmi import (
     IntegrationType,
     PMIProject,
 )
-from app.report import store as report_store
-from app.report.render.markdown import render_blocks, render_markdown
 from app.storage import chat_store, json_store
 from app.storage.json_store import SessionAnalysis
 
@@ -59,7 +57,9 @@ class ProjectRequest(BaseModel):
     """§4 step 1: what the user can tell us that no file contains."""
 
     session_id: str
-    project_name: str = "PMI Project"
+    #: Optional: an unnamed project resolves its title from the deal or the
+    #: companies rather than being labelled with a placeholder.
+    project_name: str = ""
     deal_name: Optional[str] = None
     acquirer_name: Optional[str] = None
     target_name: Optional[str] = None
@@ -286,9 +286,11 @@ def generate(req: GenerateRequest) -> dict:
     # Render the version the user read and approved, when there is one. Falls
     # back to planning fresh, so a caller that never opens the preview behaves
     # exactly as it did before this existed.
-    approved = report_store.load(req.session_id)
-    if approved is not None and report_store.is_stale(
-        approved, analysis.data_model, analysis.quality_report
+    from app.deliverable import session as session_plan
+
+    approved = session_plan.load(req.session_id)
+    if approved is not None and session_plan.is_stale(
+        approved, req.session_id, analysis
     ):
         # The analysis moved after this was planned — almost always because a
         # conflict was resolved. Rendering it would state the figure the user
@@ -307,7 +309,7 @@ def generate(req: GenerateRequest) -> dict:
         "errors": analysis.errors,
         "warnings": analysis.warnings,
         "conflict_strategy": "hybrid",
-        "report_content": approved,
+        "deliverable": approved,
     }
     result = run_generation(state)
 
@@ -337,46 +339,46 @@ def generate(req: GenerateRequest) -> dict:
 # The §4 loop this enables: plan -> read it as text -> revise -> render. The
 # expensive half (extraction, vision) already happened during analysis and is
 # never repeated here, so a user can iterate on wording for free.
-def _content_payload(content, analysis, *, stale: bool = False) -> dict:
-    return {
-        "version": content.version,
-        "stale": stale,
-        "audience": _audience_str(content.audience),
-        "markdown": render_markdown(content),
-        "sections": [
-            {
-                "section_id": s.section_id,
-                "label": s.label,
-                "headline": s.headline,
-                "origin": s.origin,
-                "block_kinds": [b.kind for b in s.blocks],
-                "empty_explanation": s.empty_explanation,
-            }
-            for s in content.narrative()
-        ],
-        # Structured blocks, carrying each cell's identity so the preview can
-        # offer to edit it. Kept separate from `sections` above, which several
-        # callers already read for its headline/label shape.
-        "blocks": render_blocks(content),
-        "warnings": content.warnings,
-    }
+def _content_payload(deliverable, analysis, *, stale: bool = False,
+                     reason: str = "") -> dict:
+    """The preview, projected from the deliverable the renderers will consume.
+
+    A *projection*, never a second plan. The preview and the artifact used to be
+    planned separately once generation moved to the planning engine, which meant
+    a user could approve one document and receive another — invisibly, because
+    each looked right on its own.
+    """
+    from app.deliverable import preview
+
+    return preview.payload(deliverable, stale=stale, stale_reason=reason)
+
+
+def _evidence_corpus(session_id: str, analysis) -> set[str]:
+    """Every figure this session's evidence supports."""
+    from app.context import builder
+
+    context = builder.build_for_session(session_id, analysis.request_text or "",
+                                        analysis=analysis)
+    return context.evidence.numeric_corpus()
 
 
 @app.post("/api/content/{session_id}")
 def plan_content_route(session_id: str) -> dict:
     """Plan (or re-plan) the report and store it as a new version."""
-    from app.report.pipeline import plan_for_session
+    from app.deliverable import session as session_plan
 
     analysis = _analysis_or_404(session_id)
-    stored = plan_for_session(session_id, analysis)
+    stored = session_plan.plan(session_id, analysis)
     return _content_payload(stored, analysis)
 
 
 @app.get("/api/content/{session_id}")
 def get_content(session_id: str, version: Optional[int] = None) -> dict:
     """The current plan as text. 404 when nothing has been planned yet."""
+    from app.deliverable import session as session_plan
+
     analysis = _analysis_or_404(session_id)
-    content = report_store.load(session_id, version)
+    content = session_plan.load(session_id, version)
     if content is None:
         raise HTTPException(
             status_code=404,
@@ -385,31 +387,42 @@ def get_content(session_id: str, version: Optional[int] = None) -> dict:
                                "POST to this path to plan it."},
         )
 
-    stale = report_store.is_stale(
-        content, analysis.data_model, analysis.quality_report
-    )
-    return _content_payload(content, analysis, stale=stale)
+    stale = session_plan.is_stale(content, session_id, analysis)
+    reason = session_plan.stale_reason(content, session_id, analysis) if stale else ""
+    return _content_payload(content, analysis, stale=stale, reason=reason)
 
 
 @app.get("/api/content/{session_id}/versions")
 def list_content_versions(session_id: str) -> dict:
+    from app.deliverable import session as session_plan, store as dlv_store
+
     _analysis_or_404(session_id)
-    return {"versions": [v.model_dump(mode="json")
-                         for v in report_store.versions(session_id)]}
+    head = dlv_store.head(session_id=session_id)
+    versions = []
+    for number in reversed(dlv_store.versions(session_id=session_id)):
+        stored = session_plan.load(session_id, number)
+        if stored is None:
+            continue
+        versions.append({"version": number, "is_head": number == head,
+                         "created_at": stored.created_at,
+                         "title": stored.title,
+                         "page_count": stored.page_count,
+                         "parent_version": stored.parent_version})
+    return {"versions": versions}
 
 
 @app.post("/api/content/{session_id}/revert")
 def revert_content(session_id: str, version: int) -> dict:
     """Restore an earlier version by appending it again — nothing is erased."""
+    from app.deliverable import session as session_plan, store as dlv_store
+
     analysis = _analysis_or_404(session_id)
-    restored = report_store.revert(session_id, version)
+    restored = dlv_store.revert(session_id=session_id, version=version)
     if restored is None:
         raise HTTPException(status_code=404,
                             detail={"error": "no_such_version",
                                     "message": f"No version {version}."})
-    stale = report_store.is_stale(
-        restored, analysis.data_model, analysis.quality_report
-    )
+    stale = session_plan.is_stale(restored, session_id, analysis)
     return _content_payload(restored, analysis, stale=stale)
 
 
@@ -824,30 +837,54 @@ def delete_chat(chat_id: str) -> dict:
 
 
 @app.post("/api/chats/{chat_id}/messages")
-def post_chat_message(chat_id: str, req: ChatMessageRequest) -> dict:
-    """One conversational turn: record what the user said, act, reply."""
-    from app.agent.conversation import Reply, respond
+async def post_chat_message(chat_id: str, req: ChatMessageRequest,
+                            request: Request) -> dict:
+    """One conversational turn: record what the user said, act, reply.
+
+    `async def`, and that is the whole reason Stop can work. As a `def` this ran
+    on the threadpool, where a disconnect is invisible: Starlette abandons the
+    response and the thread carries on building — and paying for — a deck nobody
+    is waiting for. Here the work runs in a worker thread the event loop can
+    watch, and a token is set the moment the client goes away.
+
+    Cancellation is checked at stage boundaries, never forced. A killed render
+    leaves a half-written `.pptx` on disk that opens and is wrong; a checked one
+    stops with nothing written.
+    """
+    import asyncio
+
+    from starlette.concurrency import run_in_threadpool
+
+    from app.agent.cancellation import Token
+    from app.agent.conversation import respond
+    from app.agent.replies import ChatAnswer
 
     chat = _chat_or_404(chat_id)
     user_message = chat_store.add_message(chat_id, "user", {"text": req.text})
 
+    token = Token()
+    work = asyncio.create_task(run_in_threadpool(respond, chat, req.text,
+                                                 cancel=token))
+    watch = asyncio.create_task(_watch_for_disconnect(request, token))
+
     # A chat turn must never surface as a bare 500. The frontend has no way to
     # render one except as "something went wrong", which tells the user nothing
-    # and loses the turn; a notice carrying the reason at least says what broke
+    # and loses the turn; an answer carrying the reason at least says what broke
     # and leaves the conversation usable.
     try:
-        replies = respond(chat, req.text)
+        answer = await work
     except Exception as exc:                                  # noqa: BLE001
         log.exception("chat turn failed for %s", chat_id)
-        replies = [Reply(kind="notice", content={
-            "text": "I hit an error working on that, so nothing was changed.",
-            "reasons": [f"{type(exc).__name__}: {exc}"],
-        })]
+        answer = ChatAnswer(
+            content=("I hit an error working on that, so nothing was changed.\n\n"
+                     f"*{type(exc).__name__}: {exc}*"),
+            status="failed")
+    finally:
+        watch.cancel()
 
-    stored = [
-        chat_store.add_message(chat_id, "agent", reply.content, kind=reply.kind)
-        for reply in replies
-    ]
+    # The turn is stored either way. A stopped turn that vanished would leave
+    # the user staring at their own message with no sign anything happened.
+    stored = [_store_answer(chat_id, answer)]
 
     # Keep the conversation inside the chosen model's window. Done after the
     # turn rather than before it, so the reply the user is waiting for is never
@@ -866,6 +903,40 @@ def post_chat_message(chat_id: str, req: ChatMessageRequest) -> dict:
         "chat": chat_store.get_chat(chat_id).model_dump(),
         "usage": budget.usage(chat_store.get_chat(chat_id)),
     }
+
+
+async def _watch_for_disconnect(request: Request, token) -> None:
+    """Set the token when the client goes away.
+
+    Polled rather than awaited on a signal, because that is the only thing
+    Starlette offers a plain request. Half a second is well inside human
+    patience and far cheaper than the work it stops.
+    """
+    import asyncio
+
+    try:
+        while True:
+            if await request.is_disconnected():
+                log.info("client disconnected; stopping the turn")
+                token.cancel()
+                return
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:                             # normal teardown
+        raise
+
+
+def _store_answer(chat_id: str, answer) -> Any:
+    """One turn is one message.
+
+    A turn used to arrive as several: a "re-read the files" line, a conflict
+    card and a preview card were three bubbles for what a person would say once.
+    `ChatAnswer.then` composes them before they reach the transcript, so the
+    conversation reads as a conversation — and `agent/budget.py` has one message
+    to account for rather than three.
+    """
+    return chat_store.add_message(
+        chat_id, "agent", answer.model_dump(mode="json"),
+        kind="notice" if answer.status == "failed" else "text")
 
 
 class CellEditRequest(BaseModel):
@@ -896,8 +967,11 @@ def edit_cell(session_id: str, req: CellEditRequest) -> dict:
     from app.agent.corrections import apply_and_persist
     from app.models.quality import ValidationIssue
 
+    from app.deliverable import preview as dlv_preview
+    from app.deliverable import session as session_plan
+
     analysis = _analysis_or_404(session_id)
-    content = report_store.load(session_id)
+    content = session_plan.load(session_id)
     if content is None:
         raise HTTPException(
             status_code=404,
@@ -905,7 +979,8 @@ def edit_cell(session_id: str, req: CellEditRequest) -> dict:
                     "message": "Plan the report before editing it."},
         )
 
-    cell = _find_cell(content, req.block_id, req.row, req.column)
+    _spec, cell = dlv_preview.find_cell(content, req.block_id, req.row,
+                                        req.column)
     if cell is None:
         # A rejection is a normal outcome and comes back as a message, not a
         # 4xx the UI has to translate — the same discipline as `/issues/fill`.
@@ -932,33 +1007,44 @@ def edit_cell(session_id: str, req: CellEditRequest) -> dict:
     if not result.applied:
         return {"applied": False, "message": result.message}
 
-    _record_user_value(session_id, cell, req.value, result)
+    _record_user_value(session_id, cell, req.value, result, analysis)
     replanned = plan_content_route(session_id)
     return {"applied": True, "message": result.message, **replanned}
 
 
-def _find_cell(content, block_id: str, row: int, column: int):
-    for section in content.sections:
-        for block in section.blocks:
-            if block.block_id != block_id or block.kind != "table":
-                continue
-            if 0 <= row < len(block.rows) and 0 <= column < len(block.rows[row]):
-                return block.rows[row][column]
-    return None
+def _record_user_value(session_id: str, cell, raw: str, result,
+                       analysis=None) -> None:
+    """The KB half — so the value is known to be the user's next turn too, so
+    the fingerprint moves, and so a later re-read puts it back.
 
-
-def _record_user_value(session_id: str, cell, raw: str, result) -> None:
-    """The KB half — so the value is known to be the user's next turn too, and
-    so the fingerprint moves and any other draft is re-planned."""
+    `label` is the **entity's** name, not the cell's text. It used to be
+    `cell.text`, which is the value being edited — so the row recorded "82" as
+    the thing it was about, and the replay after a re-extraction could never
+    find the milestone it belonged to.
+    """
     from app.agent import knowledge
 
     kb = knowledge.load(session_id)
     kb.record_value(knowledge.UserValue(
         entity_type=cell.ref.entity_type, entity_id=cell.ref.entity_id,
-        label=cell.text, field=cell.ref.field or "",
-        value=result.value, raw=raw,
+        label=_entity_label(analysis, cell.ref), field=cell.ref.field or "",
+        value=result.value, raw=raw, source="preview_cell",
     ))
     knowledge.save(kb)
+
+
+def _entity_label(analysis, ref) -> str:
+    """What the entity is called, for matching after ids are reassigned."""
+    from app.agent.nl_updates import LABELS
+
+    entry = LABELS.get(getattr(ref, "entity_type", "") or "")
+    if analysis is None or entry is None:
+        return ""
+    collection, id_attr, label_attr = entry
+    entity = next(
+        (e for e in getattr(analysis.data_model, collection, []) or []
+         if str(getattr(e, id_attr, "")) == str(ref.entity_id)), None)
+    return str(getattr(entity, label_attr, "")) if entity is not None else ""
 
 
 class ProseEditRequest(BaseModel):
@@ -981,16 +1067,17 @@ def edit_prose(session_id: str, req: ProseEditRequest) -> dict:
     in the knowledge base and survives the next re-plan, exactly like a supplied
     value does.
     """
-    from app.agent import knowledge
+    from app.deliverable import preview as dlv_preview
+    from app.deliverable import session as session_plan
     from app.report import guard
 
     analysis = _analysis_or_404(session_id)
-    content = report_store.load(session_id)
+    content = session_plan.load(session_id)
     if content is None:
         return {"applied": False,
                 "message": "Plan the report before editing it."}
 
-    block = _find_prose_block(content, req.block_id)
+    _page, block = dlv_preview.find_text(content, req.block_id)
     if block is None:
         return {"applied": False,
                 "message": "That text is no longer in the report — it may have "
@@ -1004,7 +1091,12 @@ def edit_prose(session_id: str, req: ProseEditRequest) -> dict:
     # would otherwise make the block impossible to edit against its own numbers. A
     # genuinely new number, absent from both the corpus and this block, is still
     # refused.
-    allowed = content.numeric_corpus_cached() | guard.numbers_in(_block_text(block))
+    # The evidence's corpus, widened by the figures this block already shows: the
+    # user is rewriting text the report already states, so a number already here
+    # is one the report already stands behind. Without this the executive summary
+    # becomes impossible to edit against its own figures.
+    allowed = (_evidence_corpus(session_id, analysis)
+               | guard.numbers_in(dlv_preview.element_text(block)))
     offending = guard.check_text(req.text, allowed)
     if offending:
         return {"applied": False,
@@ -1012,9 +1104,7 @@ def edit_prose(session_id: str, req: ProseEditRequest) -> dict:
                 + " Set it as data first — e.g. “the due date for the ERP "
                   "cutover is 12-08-2026” — and it will appear in every format."}
 
-    kb = knowledge.load(session_id)
-    kb.set_prose_override(req.block_id, req.text)
-    knowledge.save(kb)
+    session_plan.record_override(session_id, req.block_id, req.text)
 
     replanned = plan_content_route(session_id)
     return {"applied": True,
@@ -1041,6 +1131,155 @@ def _block_text(block) -> str:
     return getattr(block, "text", "") or ""
 
 
+@app.post("/api/chats/{chat_id}/turn")
+async def post_chat_turn(chat_id: str, request: Request,
+                         text: str = Form(""),
+                         files: list[UploadFile] = File(default=[])) -> dict:
+    """One turn, whatever it carries: a message, some files, or both.
+
+    The client used to send two requests — files first, then the prompt — and
+    the ordering was the bug. `/files` re-runs the whole analysis synchronously,
+    so if it threw, the second call never fired and the user's typed sentence
+    was **silently dropped**, already cleared from the composer. On success the
+    optimistic bubble was re-appended after the upload's reply, so the user's own
+    words visibly jumped below the answer to them.
+
+    One request also means one thing to cancel. Stop could not have covered a
+    turn that was two calls with a gap in the middle.
+    """
+    from app.agent.cancellation import Cancelled, Token
+    from app.agent.replies import ChatAnswer
+
+    chat = _chat_or_404(chat_id)
+    message = (text or "").strip()
+    if not message and not files:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "empty_turn",
+                    "message": "Send a message, some files, or both."})
+
+    token = Token()
+    watch = None
+    ingested = None
+    user_message = None
+    try:
+        import asyncio
+
+        watch = asyncio.create_task(_watch_for_disconnect(request, token))
+
+        if files:
+            ingested = await _ingest_into_chat(chat, files, token)
+
+        answer = ChatAnswer()
+        if message:
+            user_message = chat_store.add_message(chat_id, "user",
+                                                  {"text": message})
+            answer = await _answer_in_thread(chat, message, token)
+        else:
+            user_message = None
+
+        stored = []
+        if ingested is not None:
+            answer = ingested.answer.then(answer)
+        if not answer.is_empty:
+            stored.append(_store_answer(chat_id, answer))
+
+        return {
+            "saved": ingested.saved if ingested else [],
+            "rejected": ingested.rejected if ingested else [],
+            "messages": (
+                ([ingested.message.model_dump()] if ingested else [])
+                + ([user_message.model_dump()] if user_message else [])
+                + [m.model_dump() for m in stored]
+            ),
+            "chat": chat_store.get_chat(chat_id).model_dump(),
+        }
+    except Cancelled:
+        stopped = _store_answer(chat_id, ChatAnswer(
+            content="Generation stopped.", status="stopped"))
+        return {"saved": [], "rejected": [],
+                "messages": [stopped.model_dump()],
+                "chat": chat_store.get_chat(chat_id).model_dump()}
+    except Exception as exc:                                  # noqa: BLE001
+        # A failed planning/provider stage is a conversational outcome, not an
+        # opaque HTTP 500. Keep the user's turn and give them something they can
+        # act on while the full traceback remains in the server log.
+        log.exception("chat turn failed for %s", chat_id)
+        failed = _store_answer(chat_id, ChatAnswer(
+            content=(
+                "I could not complete this turn. Nothing was published, and "
+                "your message and uploaded files are still saved.\n\n"
+                f"*{type(exc).__name__}: {exc}*"
+            ),
+            status="failed",
+        ))
+        return {
+            "saved": ingested.saved if ingested else [],
+            "rejected": ingested.rejected if ingested else [],
+            "messages": (
+                ([ingested.message.model_dump()] if ingested else [])
+                + ([user_message.model_dump()] if user_message else [])
+                + [failed.model_dump()]
+            ),
+            "chat": chat_store.get_chat(chat_id).model_dump(),
+        }
+    finally:
+        if watch is not None:
+            watch.cancel()
+
+
+async def _answer_in_thread(chat, text: str, token):
+    from starlette.concurrency import run_in_threadpool
+
+    from app.agent.conversation import respond
+
+    return await run_in_threadpool(respond, chat, text, cancel=token)
+
+
+class _Ingested(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+    saved: list[str] = Field(default_factory=list)
+    rejected: list[dict] = Field(default_factory=list)
+    message: Any = None
+    answer: Any = None
+
+
+async def _ingest_into_chat(chat, files, token) -> "_Ingested":
+    """Store the files, record the turn, re-read everything."""
+    from starlette.concurrency import run_in_threadpool
+
+    from app.agent.cancellation import check
+    from app.agent.replies import attachment
+
+    session_id = chat.session_id
+    before = _session_snapshot(session_id)
+    saved = await upload(session_id, files)
+    names = saved["saved"]
+
+    sizes = {}
+    for handle in files:
+        name = Path(handle.filename or "").name
+        path = json_store.uploads_dir(session_id) / name
+        if path.is_file():
+            sizes[name] = path.stat().st_size
+
+    message = chat_store.add_message(
+        chat.chat_id, "user",
+        {"text": "", "files": [attachment(name, session_id, size=sizes.get(name))
+                               for name in names]
+                    + [attachment(r["file"], session_id, status="failed",
+                                  error=r["reason"])
+                       for r in saved.get("rejected", [])]},
+        kind="files")
+
+    check(token, "reading the files")
+    answer = await run_in_threadpool(_merge_uploaded, chat, before, names,
+                                     saved.get("rejected", []))
+    return _Ingested(saved=names, rejected=saved.get("rejected", []),
+                     message=message, answer=answer)
+
+
 @app.post("/api/chats/{chat_id}/files")
 async def add_chat_files(chat_id: str, files: list[UploadFile] = File(...)) -> dict:
     """Uploading files mid-chat is a turn, with an answer.
@@ -1055,6 +1294,8 @@ async def add_chat_files(chat_id: str, files: list[UploadFile] = File(...)) -> d
     tracker can contradict an old one, and a conflict only exists between two
     sources considered together), and the reply says what actually changed.
     """
+    from app.agent.replies import attachment
+
     chat = _chat_or_404(chat_id)
     session_id = chat.session_id
     before = _session_snapshot(session_id)
@@ -1062,21 +1303,22 @@ async def add_chat_files(chat_id: str, files: list[UploadFile] = File(...)) -> d
     saved = await upload(session_id, files)
     names = saved["saved"]
 
-    chat_store.add_message(chat_id, "user",
-                           {"files": [{"name": n} for n in names],
-                            "text": ""},
-                           kind="files")
+    user_message = chat_store.add_message(
+        chat_id, "user",
+        {"text": "", "files": [attachment(name, session_id) for name in names]},
+        kind="files")
 
-    replies = _merge_uploaded(chat, before, names, saved.get("rejected", []))
-    stored = [chat_store.add_message(chat_id, "agent", reply.content,
-                                     kind=reply.kind)
-              for reply in replies]
+    answer = _merge_uploaded(chat, before, names, saved.get("rejected", []))
+    stored = _store_answer(chat_id, answer)
 
     return {
         "saved": names,
         "rejected": saved.get("rejected", []),
         "files": saved["files"],
-        "messages": [m.model_dump() for m in stored],
+        # The user's own message is included: the UI used to be handed only the
+        # agent's replies, so the record of what was uploaded appeared in the
+        # transcript only after a reload.
+        "messages": [user_message.model_dump(), stored.model_dump()],
         "chat": chat_store.get_chat(chat_id).model_dump(),
     }
 
@@ -1097,28 +1339,30 @@ def _session_snapshot(session_id: str) -> dict:
 def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
     """Re-read everything and say what moved."""
     from app.agent import knowledge
-    from app.agent.conversation import Reply, _analyse, _found
+    from app.agent.conversation import _analyse, _found
+    from app.agent.replies import ChatAnswer, say
     from app.report import chat_format as chat_fmt
 
-    replies = []
+    answer = ChatAnswer()
     if rejected:
-        replies.append(Reply(kind="notice", content={
-            "text": f"I couldn't read {len(rejected)} of those.",
-            "reasons": [f"{r['file']}: {r['reason']}" for r in rejected],
-        }))
+        answer = answer.then(ChatAnswer(
+            content=(f"I couldn't read {len(rejected)} of those:\n"
+                     + "\n".join(f"- {r['file']}: {r['reason']}"
+                                 for r in rejected)),
+            status="failed"))
 
     if not added:
-        return replies or [Reply(kind="text", content={
-            "text": "Nothing was added, so nothing changed."})]
+        return answer.then(say("Nothing was added, so nothing changed.")) \
+            if answer.is_empty else answer
 
     if not before:
         # Nothing had been read yet: this is the first upload, and the useful
         # answer is "what do you need?", not a diff against nothing.
-        return replies + [Reply(kind="text", content={"text": chat_fmt.reply(
+        return answer.then(say(chat_fmt.reply(
             f"{chat_fmt.count(len(added), 'file')} ready",
             body=chat_fmt.bullets(added),
             action="Reading your files and analyzing the data now",
-        )})]
+        )))
 
     kb = knowledge.load(chat.session_id)
     prior = json_store.load_analysis(chat.session_id)
@@ -1128,10 +1372,11 @@ def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
         kb.audience_label or (prior.audience_label if prior else ""),
     )
     if analysis is None:
-        return replies + [Reply(kind="notice", content={
-            "text": "I re-read the files but could not build a model from them.",
-            "reasons": ["the audience is still unknown"] if needs_audience else [],
-        })]
+        return answer.then(ChatAnswer(
+            content=("I re-read the files but could not build a model from them."
+                     + ("\n\n*The audience is still unknown.*"
+                        if needs_audience else "")),
+            status="failed"))
 
     after = _session_snapshot(chat.session_id)
     body = [
@@ -1150,11 +1395,10 @@ def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
                   f"I'll rebuild {'it' if len(kb.outputs) == 1 else 'them'} "
                   f"from the merged data.")
 
-    replies.append(Reply(kind="text", content={"text": chat_fmt.reply(
+    answer = answer.then(say(chat_fmt.reply(
         "Re-read everything", body=[line for line in body if line], action=action,
-    )}))
-    replies.extend(_found(chat, analysis))
-    return replies
+    )))
+    return answer.then(_found(chat, analysis))
 
 
 def _delta(label: str, before, after, *, fmt: str = "{:g}") -> str:
@@ -1182,10 +1426,13 @@ def revise_content(session_id: str, req: ReviseRequest) -> dict:
     Nothing is dropped silently — anything refused comes back with the reason,
     so the user learns the figure they asked for is not one the report holds.
     """
-    from app.report.revise import revise
+    from app.deliverable import preview as dlv_preview
+    from app.deliverable import session as session_plan
+    from app.deliverable import store as dlv_store
+    from app.deliverable.revise import revise
 
     analysis = _analysis_or_404(session_id)
-    content = report_store.load(session_id)
+    content = session_plan.load(session_id)
     if content is None:
         raise HTTPException(
             status_code=404,
@@ -1193,9 +1440,10 @@ def revise_content(session_id: str, req: ReviseRequest) -> dict:
                     "message": "Plan the report before revising it."},
         )
 
-    result, warnings = revise(content, req.instruction)
+    result, warnings = revise(content, req.instruction,
+                              corpus=_evidence_corpus(session_id, analysis))
 
-    if result.content is None:
+    if result.deliverable is None:
         # Refusing is a real outcome, not an error: the instruction was not
         # understood, or every op it implied was rejected. 200 with the reasons
         # beats a 4xx the UI has to translate.
@@ -1205,10 +1453,10 @@ def revise_content(session_id: str, req: ReviseRequest) -> dict:
             "applied": [],
             "rejected": [r.model_dump() for r in result.rejected],
             "warnings": warnings,
-            "markdown": render_markdown(content),
+            "markdown": dlv_preview.payload(content)["markdown"],
         }
 
-    stored = report_store.save(result.content)
+    stored = dlv_store.save(result.deliverable)
     payload = _content_payload(stored, analysis)
     payload.update({
         "changed": True,
@@ -1272,12 +1520,19 @@ def fill_issue(session_id: str, req: FillIssueRequest) -> dict:
         raise HTTPException(status_code=404,
                             detail={"error": "no_such_issue"})
 
+    before = getattr(_entity_of(model, issue), issue.field, None) if issue.field else None
     result = apply_and_persist(analysis, issue, req.value)
     if not result.applied:
         # A rejected value is a normal outcome, not an error: the user typed
         # something the field cannot hold and needs to be told what to type.
         return {"applied": False, "message": result.message,
                 "issue_id": req.issue_id}
+
+    # Recorded as the user's, not just written. Without this the value is in the
+    # model and in nothing else, so the next re-extraction reverts it — the same
+    # hole the chat path had.
+    _remember_user_value(session_id, issue, req.value, result, before,
+                         source="issue_fill")
 
     return {
         "applied": True,
@@ -1286,6 +1541,39 @@ def fill_issue(session_id: str, req: FillIssueRequest) -> dict:
         "remaining": len(model.validation_issues),
         "quality_score": analysis.quality_report.score,
     }
+
+
+def _entity_of(model, issue):
+    from app.agent.nl_updates import LABELS
+
+    entry = LABELS.get(issue.entity_type or "")
+    if entry is None:
+        return None
+    collection, id_attr, _label = entry
+    return next((e for e in getattr(model, collection, []) or []
+                 if str(getattr(e, id_attr, "")) == str(issue.entity_id)), None)
+
+
+def _remember_user_value(session_id: str, issue, raw: str, result,
+                         before=None, *, source: str = "chat") -> None:
+    """One durable record of a correction, whichever surface supplied it.
+
+    Three places write a value into `PMIDataModel`: a chat sentence, a preview
+    cell and a filled gap. Only the first recorded it as the *user's*, so the
+    other two survived exactly until the next file upload and then silently
+    reverted to what the file said.
+    """
+    from app.agent import knowledge
+
+    kb = knowledge.load(session_id)
+    kb.record_value(knowledge.UserValue(
+        entity_type=issue.entity_type, entity_id=issue.entity_id,
+        label=issue.entity_label or "", field=issue.field or "",
+        value=result.value, raw=raw,
+        old_value=None if before is None else str(before),
+        source=source,
+    ))
+    knowledge.save(kb)
 
 
 @app.get("/api/quality/{session_id}")

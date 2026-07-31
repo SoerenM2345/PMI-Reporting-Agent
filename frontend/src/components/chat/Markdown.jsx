@@ -175,17 +175,56 @@ const BULLET = /^\s*(?:-|•|·)\s+/;
 const ORDERED = /^\s*\d+\.\s+/;
 
 /**
- * `**bold**` and `*italic*`. Bold is matched first so `**x**` is never read as
- * an empty italic wrapping `*x*`.
+ * `**bold**`, `*italic*`, `` `code` `` and `[text](href)`.
+ *
+ * Order matters: bold is matched before italic so `**x**` is never read as an
+ * empty italic wrapping `*x*`, and links are matched before either so a title
+ * containing an asterisk cannot split the pattern.
+ *
+ * Links are the reason this grew: the assistant writes its own prose now and
+ * refers to the files it made. `href` is restricted to same-origin paths and
+ * http(s) — a rendered `javascript:` URL would be an injection route straight
+ * out of a model's output, which is exactly what this hand-written renderer
+ * exists to avoid.
  */
 function inline(text) {
-  const parts = String(text).split(/(\*\*[^*]+\*\*|\*[^*\n]+\*)/g);
+  const parts = String(text).split(
+    /(\[[^\]\n]+\]\([^)\s]+\)|\*\*[^*]+\*\*|\*[^*\n]+\*|`[^`\n]+`)/g,
+  );
   return parts.map((part, index) => {
+    const link = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(part);
+    if (link && isSafeHref(link[2])) {
+      return (
+        <a
+          key={index}
+          href={link[2]}
+          className="font-medium text-slate-900 underline decoration-slate-300
+                     underline-offset-2 hover:decoration-slate-600"
+        >
+          {link[1]}
+        </a>
+      );
+    }
+    if (link) {
+      // Refused, but the words the user was meant to read are still shown.
+      return <span key={index}>{link[1]}</span>;
+    }
     if (part.startsWith("**") && part.endsWith("**")) {
       return (
         <strong key={index} className="font-semibold text-slate-900">
           {part.slice(2, -2)}
         </strong>
+      );
+    }
+    if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code
+          key={index}
+          className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.85em]
+                     text-slate-800"
+        >
+          {part.slice(1, -1)}
+        </code>
       );
     }
     if (part.length > 2 && part.startsWith("*") && part.endsWith("*")) {
@@ -197,4 +236,8 @@ function inline(text) {
     }
     return <span key={index}>{part}</span>;
   });
+}
+
+function isSafeHref(href) {
+  return /^\/(?!\/)/.test(href) || /^https?:\/\//i.test(href);
 }

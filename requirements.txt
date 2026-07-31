@@ -12,8 +12,13 @@ openpyxl>=3.1
 XlsxWriter>=3.2
 python-pptx>=0.6.23
 python-docx>=1.1
-# PDF writing (§17). Pure python: no cairo/pango, so the slim image stays slim.
-fpdf2>=2.7
+# PDF writing. Pure python: no cairo/pango, so the slim image stays slim.
+# ReportLab (BSD) rather than WeasyPrint or a headless browser for that reason,
+# and rather than fpdf2 because a designed report needs tables that split across
+# pages with repeated headers, figures kept with their captions, a two-pass table
+# of contents, and exact text measurement — all of which platypus ships and all
+# of which would otherwise have to be written by hand.
+reportlab>=4.1
 PyMuPDF>=1.24
 pdfplumber>=0.11
 beautifulsoup4>=4.12

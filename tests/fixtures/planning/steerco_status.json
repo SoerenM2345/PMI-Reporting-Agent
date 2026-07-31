@@ -1,0 +1,434 @@
+{
+  "OutputBrief": {
+    "document_kind": "steerco_pack",
+    "primary_format": "pptx",
+    "audience_label": "Steering Committee",
+    "audience_seniority": "executive",
+    "reader_goal": "Decide whether the Day 1 date still holds and who owns the gaps.",
+    "decisions_sought": [
+      "Confirm whether the ERP go-live date moves",
+      "Assign an owner to the unmitigated data-protection risk"
+    ],
+    "scope_topics": [
+      "Overall status",
+      "Risks",
+      "Milestones",
+      "Budget position"
+    ],
+    "tone": "direct",
+    "length_hint": "standard",
+    "title_proposal": "Integration status",
+    "open_questions_for_user": [
+      "Is the ERP go-live date contractually fixed, or is it an internal target?"
+    ]
+  },
+  "StorylinePlan": {
+    "governing_message": "Day 1 remains achievable, but an unowned data-protection risk and a slipped ERP go-live date now sit on the critical path.",
+    "executive_takeaway": "The programme is progressing broadly as planned. Two items have moved onto the critical path since the last review: a data-protection risk that carries no mitigation and no owner, and an ERP go-live date that has moved without a revised plan behind it. Both need a decision from this Committee rather than escalation at the next one.",
+    "situation": "The integration has been running to plan since signing, with workstreams reporting on a weekly cycle.",
+    "complication": "Two items on the critical path have deteriorated and neither has an owner accountable for recovering it.",
+    "question": "Does Day 1 still hold, and who is accountable for the gaps?",
+    "supporting_arguments": [
+      "Delivery is broadly on plan and the exceptions are identifiable rather than systemic.",
+      "The data-protection risk is unmitigated and unowned, which makes it the binding constraint on Day 1.",
+      "The ERP go-live has slipped without a revised plan, so the reported date is not yet credible."
+    ],
+    "narrative_arc": [
+      "Where we are",
+      "What has changed",
+      "What it means for Day 1",
+      "What we need from you"
+    ],
+    "narrative_flow": "decision_first",
+    "closing_ask": "Confirm the Day 1 date and assign an owner to the data-protection risk.",
+    "sections": [
+      {
+        "section_id": "position",
+        "working_title": "Delivery is broadly on plan, with two identifiable exceptions",
+        "management_question": "Where does the programme stand?",
+        "intended_message": "The programme is progressing as expected apart from two items, both of which are known.",
+        "purpose": "frame",
+        "evidence_ids": [
+          "ev:fact:progress.overall",
+          "ev:fact:tasks.overdue"
+        ],
+        "depth": "summary",
+        "suggested_pages": 1,
+        "recommended_expression": "none",
+        "why_this_expression": "One conclusion; a chart would add nothing.",
+        "visual_priority": "low",
+        "covers_requested": [
+          "Overall status"
+        ]
+      },
+      {
+        "section_id": "critical-risk",
+        "working_title": "The data-protection risk is unmitigated and unowned",
+        "management_question": "What is the binding constraint on Day 1?",
+        "intended_message": "The highest-scoring open risk has neither a mitigation nor an owner.",
+        "purpose": "risk",
+        "evidence_ids": [
+          "ev:risk:R1",
+          "ev:fact:risk.open_critical"
+        ],
+        "depth": "detailed",
+        "suggested_pages": 1,
+        "recommended_expression": "table",
+        "why_this_expression": "The Committee needs the specifics, not a shape.",
+        "visual_priority": "high",
+        "covers_requested": [
+          "Risks"
+        ]
+      },
+      {
+        "section_id": "erp-date",
+        "working_title": "The ERP go-live has moved without a revised plan behind it",
+        "management_question": "Is the reported go-live date credible?",
+        "intended_message": "The date has slipped and no replanning has been recorded against it.",
+        "purpose": "analysis",
+        "evidence_ids": [
+          "ev:milestone:M1",
+          "ev:milestone:M2"
+        ],
+        "depth": "summary",
+        "suggested_pages": 1,
+        "recommended_expression": "sequence",
+        "why_this_expression": "A date that moved is best shown against the one it moved from.",
+        "visual_priority": "high",
+        "covers_requested": [
+          "Milestones"
+        ]
+      },
+      {
+        "section_id": "spend",
+        "working_title": "Forecast spend now exceeds the approved envelope",
+        "management_question": "Is the programme still within budget?",
+        "intended_message": "Actuals remain inside budget but the forecast does not.",
+        "purpose": "analysis",
+        "evidence_ids": [
+          "ev:budget:B1",
+          "ev:fact:budget.variance"
+        ],
+        "depth": "summary",
+        "suggested_pages": 1,
+        "recommended_expression": "comparison",
+        "why_this_expression": "Budget against forecast is a two-bar comparison.",
+        "visual_priority": "medium",
+        "covers_requested": [
+          "Budget position"
+        ]
+      },
+      {
+        "section_id": "asks",
+        "working_title": "Two decisions are needed from this Committee today",
+        "management_question": "What do you need from us?",
+        "intended_message": "Confirm the Day 1 date and assign the risk owner.",
+        "purpose": "decision",
+        "evidence_ids": [
+          "ev:risk:R1",
+          "ev:milestone:M1"
+        ],
+        "depth": "summary",
+        "suggested_pages": 1,
+        "recommended_expression": "none",
+        "visual_priority": "low"
+      }
+    ],
+    "evidence_not_used": [
+      "ev:synergy:S1"
+    ]
+  },
+  "DocumentDesign": {
+    "rationale": "Decision-first: the ask is on page two, evidence follows, so a Committee that reads only the front half still knows what it must do.",
+    "pages": [
+      {
+        "page_id": "cover",
+        "section_id": "",
+        "purpose": "cover",
+        "composition": "single",
+        "message_title": "Integration status",
+        "supporting_message": "Steering Committee",
+        "elements": []
+      },
+      {
+        "page_id": "governing",
+        "section_id": "position",
+        "purpose": "content",
+        "composition": "quote",
+        "message_title": "Day 1 remains achievable, but two items have moved onto the critical path",
+        "elements": [
+          {
+            "role": "body",
+            "intent": "State the governing message and name the two exceptions.",
+            "evidence_ids": [
+              "ev:fact:progress.overall",
+              "ev:fact:tasks.overdue"
+            ],
+            "prominence": "primary"
+          }
+        ],
+        "density": "sparse"
+      },
+      {
+        "page_id": "critical-risk",
+        "section_id": "critical-risk",
+        "purpose": "content",
+        "composition": "table_full",
+        "message_title": "The data-protection risk is unmitigated and unowned",
+        "supporting_message": "Highest-scoring open risk on the register",
+        "elements": [
+          {
+            "role": "table",
+            "intent": "The open critical risks, with owner and mitigation shown as gaps.",
+            "evidence_ids": [
+              "ev:risk:R1"
+            ],
+            "prominence": "primary"
+          },
+          {
+            "role": "callout",
+            "intent": "This risk was read from a screenshot and has not been confirmed against the register.",
+            "evidence_ids": [
+              "ev:risk:R1"
+            ],
+            "prominence": "aside"
+          }
+        ],
+        "visual_hierarchy": [
+          "table",
+          "callout"
+        ],
+        "density": "normal"
+      },
+      {
+        "page_id": "erp-date",
+        "section_id": "erp-date",
+        "purpose": "content",
+        "composition": "chart_plus_commentary",
+        "message_title": "The ERP go-live has moved without a revised plan behind it",
+        "elements": [
+          {
+            "role": "diagram",
+            "intent": "A timeline showing the planned go-live date against the current forecast.",
+            "evidence_ids": [
+              "ev:milestone:M1",
+              "ev:milestone:M2"
+            ],
+            "prominence": "primary"
+          },
+          {
+            "role": "body",
+            "intent": "Explain that no replanning has been recorded and what that implies for Day 1.",
+            "evidence_ids": [
+              "ev:milestone:M1",
+              "ev:milestone:M2"
+            ],
+            "prominence": "supporting"
+          }
+        ],
+        "visual_hierarchy": [
+          "diagram",
+          "body"
+        ],
+        "density": "normal"
+      },
+      {
+        "page_id": "spend",
+        "section_id": "spend",
+        "purpose": "content",
+        "composition": "hero_chart",
+        "message_title": "Forecast spend now exceeds the approved envelope",
+        "elements": [
+          {
+            "role": "chart",
+            "intent": "Compare approved budget, actual to date and current forecast for each line.",
+            "evidence_ids": [
+              "ev:budget:B1",
+              "ev:fact:budget.variance"
+            ],
+            "prominence": "primary"
+          },
+          {
+            "role": "body",
+            "intent": "State that actuals are inside budget and the forecast is not, and what would close the gap.",
+            "evidence_ids": [
+              "ev:fact:budget.variance"
+            ],
+            "prominence": "supporting"
+          }
+        ],
+        "visual_hierarchy": [
+          "chart",
+          "body"
+        ],
+        "density": "normal"
+      },
+      {
+        "page_id": "asks",
+        "section_id": "asks",
+        "purpose": "content",
+        "composition": "two_column",
+        "message_title": "Two decisions are needed from this Committee today",
+        "elements": [
+          {
+            "role": "bullets",
+            "intent": "The two decisions, each with the consequence of deferring it.",
+            "evidence_ids": [
+              "ev:risk:R1",
+              "ev:milestone:M1"
+            ],
+            "prominence": "primary"
+          },
+          {
+            "role": "body",
+            "intent": "What happens next once the decisions are taken.",
+            "evidence_ids": [],
+            "prominence": "supporting"
+          }
+        ],
+        "density": "sparse"
+      }
+    ]
+  },
+  "ChartRequests": {
+    "charts": [
+      {
+        "spec_id": "",
+        "chart_type": "column",
+        "title": "Forecast spend now exceeds the approved envelope",
+        "insight": "Actuals sit inside budget; the forecast does not.",
+        "evidence_ids": [
+          "ev:budget:B1",
+          "ev:budget:B2"
+        ],
+        "category_field": "label",
+        "series": [
+          {
+            "name": "Approved budget",
+            "value_field": "budget"
+          },
+          {
+            "name": "Actual to date",
+            "value_field": "actual"
+          },
+          {
+            "name": "Current forecast",
+            "value_field": "forecast"
+          }
+        ],
+        "sort": "none",
+        "legend": "bottom",
+        "data_labels": "all",
+        "caption": "Approved budget, actual spend to date and current forecast, by cost line.",
+        "alt_text": "Grouped column chart comparing budget, actual and forecast for each integration cost line."
+      }
+    ]
+  },
+  "DiagramRequests": {
+    "diagrams": [
+      {
+        "spec_id": "",
+        "diagram_type": "timeline",
+        "title": "The ERP go-live has moved without a revised plan behind it",
+        "insight": "The go-live date has slipped since the plan was approved.",
+        "evidence_ids": [
+          "ev:milestone:M1",
+          "ev:milestone:M2"
+        ],
+        "nodes": [],
+        "edges": [],
+        "caption": "Planned milestone dates against the current forecast.",
+        "alt_text": "Timeline of integration milestones showing the ERP go-live later than planned."
+      }
+    ]
+  },
+  "PageCopy": [
+    {
+      "page_id": "cover",
+      "message_title": "Integration status",
+      "supporting_message": "Steering Committee, July 2026",
+      "body": "",
+      "bullets": []
+    },
+    {
+      "page_id": "governing",
+      "message_title": "Day 1 remains achievable, but two items now sit on the critical path",
+      "supporting_message": "",
+      "body": "Delivery is broadly to plan. Two items have deteriorated since the last review and neither has an accountable owner: a data-protection risk carrying no mitigation, and an ERP go-live date that has moved without a revised plan behind it. Both need a decision here rather than an escalation next month.",
+      "bullets": [],
+      "speaker_notes": "Expect a challenge on whether the go-live date is contractual. It is an internal target; confirm with Legal before committing either way."
+    },
+    {
+      "page_id": "critical-risk",
+      "message_title": "The data-protection risk is unmitigated and unowned",
+      "supporting_message": "Highest-scoring open item on the register",
+      "body": "",
+      "bullets": [],
+      "callout": "This risk was read from a screenshot of the risk dashboard and has not been confirmed against the register itself. Confirm the score before it is minuted.",
+      "speaker_notes": "If asked who should own this: Legal has the regulatory exposure, but the remediation work sits with IT."
+    },
+    {
+      "page_id": "erp-date",
+      "message_title": "The ERP go-live has moved without a revised plan behind it",
+      "supporting_message": "",
+      "body": "The go-live has shifted later than the approved plan, and no replanning has been recorded against the dependent activities. Until that happens the reported date is an aspiration rather than a forecast, and the Day 1 sequence behind it cannot be relied on.",
+      "bullets": []
+    },
+    {
+      "page_id": "spend",
+      "message_title": "Forecast spend now exceeds the approved envelope",
+      "supporting_message": "",
+      "body": "On an actual-cost basis the programme remains inside its approved budget. The current forecast does not, and the movement is concentrated in a small number of one-time items rather than spread across the programme \u2014 which makes it addressable if it is addressed now.",
+      "bullets": []
+    },
+    {
+      "page_id": "asks",
+      "message_title": "Two decisions are needed from this Committee today",
+      "supporting_message": "",
+      "body": "Deferring either decision costs optionality rather than money: the mitigation window on the data-protection risk closes as Day 1 approaches.",
+      "bullets": [
+        "Confirm whether the ERP go-live date holds, or mandate a replan against the revised date.",
+        "Assign an accountable owner to the data-protection risk, with a mitigation plan due before the next review."
+      ]
+    }
+  ],
+  "DocumentTitles": {
+    "document_title": "MedAxis / NordCare integration status",
+    "document_subtitle": "Steering Committee, July 2026",
+    "titles": [
+      {
+        "page_id": "cover",
+        "title": "MedAxis / NordCare integration status",
+        "subtitle": "Steering Committee, July 2026"
+      },
+      {
+        "page_id": "governing",
+        "title": "Day 1 remains achievable, but two items now sit on the critical path",
+        "subtitle": ""
+      },
+      {
+        "page_id": "critical-risk",
+        "title": "The data-protection risk is unmitigated and unowned",
+        "subtitle": "Highest-scoring open item on the register"
+      },
+      {
+        "page_id": "erp-date",
+        "title": "The ERP go-live has moved without a revised plan behind it",
+        "subtitle": ""
+      },
+      {
+        "page_id": "spend",
+        "title": "Forecast spend now exceeds the approved envelope",
+        "subtitle": ""
+      },
+      {
+        "page_id": "asks",
+        "title": "Two decisions are needed from this Committee today",
+        "subtitle": ""
+      }
+    ]
+  },
+  "ChatReplyDraft": {
+    "content": "Three things need your attention this week.\n\nThe **ERP cutover** is the binding constraint: it has no mitigation owner, and the two trackers disagree about overall progress, so I cannot state a single completion figure with confidence.\n\nThe synergy target is not stated in any of the uploaded files, so realisation cannot be calculated yet."
+  }
+}

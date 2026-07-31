@@ -60,7 +60,12 @@ def _out_dir(state: AgentState) -> Path:
 # ============================================================ analysis nodes
 def parse_request(state: AgentState) -> AgentState:
     """§10.1-6: what was asked for, for whom. Ask about the audience if unclear."""
-    parsed = tasks.parse_request(state.get("request_text", ""))
+    # File analysis needs three routing fields, not another semantic opinion.
+    # The complete report planner will interpret the actual request later with
+    # the full project and evidence context.
+    from app.llm.fallbacks import heuristic_parse
+
+    parsed = heuristic_parse(state.get("request_text", ""))
     audience = state.get("audience") or parsed.audience
 
     log.info("Request parsed: output=%s audience=%s topic=%s",
@@ -195,6 +200,20 @@ def plan_content(state: AgentState) -> AgentState:
         return {"report_content": approved,
                 "summary_bullets": _summary_bullets(approved)}
 
+    # Designed documents are planned before the user previews them. Their
+    # renderer consumes that approved Deliverable directly, so building the
+    # legacy ReportContent here cannot affect the file; it only adds another
+    # reasoning-model round trip to every PowerPoint/Word/PDF/HTML export.
+    # Preserve the response summary from the approved argument without
+    # re-planning a second, unused document.
+    deliverable = state.get("deliverable")
+    output_type = _canonical_format(state.get("output_type", "powerpoint"))
+    if deliverable is not None and output_type in (
+            "powerpoint", "word", "pdf", "html"):
+        bullets = ([deliverable.executive_takeaway]
+                   if deliverable.executive_takeaway else [])
+        return {"report_content": None, "summary_bullets": bullets}
+
     # `plan_for_session` is the only place a report is planned. Feeding it the
     # graph's state as a `SessionAnalysis` keeps this node a caller rather than
     # a fourth implementation — the three that existed before all assembled the
@@ -321,12 +340,86 @@ def _canonical_format(output_type: str) -> str:
                                output_type or "powerpoint")
 
 
+def _render_designed(state: AgentState, output_type: str,
+                     out_dir: Path) -> list[str]:
+    """Render the approved `Deliverable`, planning one only if there is none.
+
+    Planning here rather than reusing the approved plan would break the promise
+    the preview makes: the user would approve one document and receive another,
+    invisibly, because both look right on their own.
+
+    On failure this returns nothing and records the error, so the run still hands
+    over the quality and conflict reports — a session that produces no deck but
+    explains why is better than one that 500s.
+    """
+    from app.agent.cancellation import Cancelled
+    from app.deliverable import session as session_plan
+    from app.renderers import registry
+
+    session_id = state.get("session_id") or ""
+    fmt = registry.normalize(output_type)
+    try:
+        from app.context import builder
+        from app.quality import repair, review
+
+        from app.agent.cancellation import check
+
+        cancel = state.get("cancel")
+        deliverable = state.get("deliverable")
+        analysis = _analysis_for(state)
+        if deliverable is None:
+            deliverable = session_plan.plan(session_id, analysis,
+                                            request_text=state.get("request_text", ""),
+                                            fmt=fmt, cancel=cancel)
+        check(cancel, f"rendering the {fmt}")
+
+        context = builder.build_for_session(
+            session_id, state.get("request_text", "") or "", analysis=analysis)
+        reviewed = review(deliverable, context, use_model=False)
+        if not reviewed.passed:
+            deliverable, _applied = repair(deliverable, context, reviewed)
+
+        check(cancel, f"writing the {fmt} file")
+        results = registry.render_all(deliverable, context, out_dir, [fmt])
+        state["deliverable_warnings"] = (list(deliverable.warnings)
+                                        + [w for r in results for w in r.warnings])
+        return [str(r.path) for r in results if r.page_count]
+    except Cancelled:
+        # Re-raised so the turn reports "stopped" rather than "failed": the
+        # user asked for this, and a half-written file is never handed over as
+        # though it were finished.
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        log.exception("could not generate the %s deliverable", output_type)
+        state["deliverable_errors"] = [
+            f"The {output_type} deliverable could not be produced "
+            f"({type(exc).__name__}: {exc})."]
+        return []
+
+
+def _analysis_for(state: AgentState):
+    """The stored analysis, or one assembled from the state we were handed."""
+    from app.storage.json_store import SessionAnalysis, load_analysis
+
+    stored = load_analysis(state.get("session_id", ""))
+    if stored is not None:
+        return stored
+    return SessionAnalysis(
+        session_id=state.get("session_id", ""),
+        request_text=state.get("request_text", ""),
+        output_type=state.get("output_type", "powerpoint"),
+        topic=state.get("topic", "status"),
+        audience=state.get("audience"),
+        data_model=state["data_model"],
+        quality_report=state.get("quality_report"))
+
+
 def generate_output(state: AgentState) -> AgentState:
     """§10.24-31: the deliverable, plus the two reports the spec always requires.
 
-    Makes no LLM call: the prose was written during `plan_content`. Generation
-    is therefore deterministic and free, and rendering the same approved content
-    into a second format cannot change a word of it.
+    The designed formats render the approved `Deliverable`. The workbook and the
+    standalone charts still render from `ReportContent`, because a data dump and
+    a set of PNGs are not documents and gain nothing from a storyline.
     """
     model = state["data_model"]
     audience = state.get("audience") or Audience.PMO
@@ -338,16 +431,12 @@ def generate_output(state: AgentState) -> AgentState:
     report = state.get("quality_report")
     files: list[str] = []
 
-    if output_type == "powerpoint":
-        files.append(str(
-            pptx_report.generate_from_content(content, out_dir, model)
-            if content is not None else
-            pptx_report.generate(model, audience, bullets, out_dir, quality=report)
-        ))
-    elif output_type in ("word", "pdf", "html"):
-        # These render straight from the approved content, so the document, the
-        # PDF and the web page state exactly what the user read in the preview.
-        files.append(str(_render_document(output_type, content, out_dir, model)))
+    if output_type in ("powerpoint", "word", "pdf", "html"):
+        # The designed formats render the *approved plan* — the very object the
+        # preview projected — so the deck, the document, the PDF and the web page
+        # state exactly what the user read. `ReportContent` remains the revision
+        # vocabulary; it is no longer the shape of the artifact.
+        files.extend(_render_designed(state, output_type, out_dir))
     elif output_type == "excel":
         # The workbook renders the same approved content as everything else.
         # It used to re-walk `PMIDataModel`, which made it the one format that
@@ -377,7 +466,13 @@ def generate_output(state: AgentState) -> AgentState:
     return {
         "summary_bullets": bullets,
         "output_files": files,
-        "warnings": list(state.get("warnings", [])) + tasks.drain_warnings(),
+        # Returned, not appended to `state`: the graph merges what a node
+        # returns, so a mutation of the input dict is lost.
+        "errors": (list(state.get("errors", []))
+                   + list(state.get("deliverable_errors", []))),
+        "warnings": (list(state.get("warnings", []))
+                     + list(state.get("deliverable_warnings", []))
+                     + tasks.drain_warnings()),
     }
 
 

@@ -9,18 +9,54 @@
  * doubt, read them, or open http://localhost:8000/docs.
  */
 
+/**
+ * The in-flight turn, so it can be stopped.
+ *
+ * One at a time by construction: the UI disables send while a turn is running,
+ * and a second call would abandon a request whose reply is already being
+ * waited on.
+ */
+let inFlight = null;
+
+/** Stop the running turn. The server sees the disconnect and stops too. */
+export function abort() {
+  inFlight?.abort();
+  inFlight = null;
+}
+
+export class Aborted extends Error {}
+
 async function call(path, options = {}) {
   // A multipart body must NOT carry a Content-Type header — the browser sets
   // it, boundary and all. Sending the JSON header with a FormData body makes
   // the upload arrive unparseable.
   const isForm = options.body instanceof FormData;
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(isForm ? {} : { "Content-Type": "application/json" }),
-      ...(options.headers ?? {}),
-    },
-  });
+
+  let controller = null;
+  if (options.abortable) {
+    controller = new AbortController();
+    inFlight = controller;
+  }
+
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      signal: controller?.signal,
+      headers: {
+        ...(isForm ? {} : { "Content-Type": "application/json" }),
+        ...(options.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    // A cancelled turn is an outcome the user asked for, not a failure — the
+    // caller distinguishes it so the UI shows "stopped" rather than an error
+    // banner.
+    if (error.name === "AbortError") throw new Aborted("stopped");
+    throw error;
+  } finally {
+    if (controller && inFlight === controller) inFlight = null;
+  }
 
   let body = null;
   try {
@@ -99,10 +135,22 @@ export function deleteChat(chatId) {
   return call(`/api/chats/${chatId}`, { method: "DELETE" });
 }
 
-export function sendMessage(chatId, text) {
-  return call(`/api/chats/${chatId}/messages`, {
+/**
+ * One turn: a message, some files, or both, in a single request.
+ *
+ * Two sequential POSTs is what this replaced, and the ordering was the bug —
+ * `/files` re-runs the whole analysis synchronously, so when it threw the
+ * message call never fired and the user's typed sentence was silently dropped.
+ * One request is also the only thing Stop can meaningfully cancel.
+ */
+export function sendTurn(chatId, text, files = []) {
+  const form = new FormData();
+  form.append("text", text ?? "");
+  for (const file of files) form.append("files", file);
+  return call(`/api/chats/${chatId}/turn`, {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: form,
+    abortable: true,
   });
 }
 

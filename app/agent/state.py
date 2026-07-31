@@ -36,6 +36,12 @@ class AgentState(TypedDict, total=False):
     #: when the API passes one in, it is a version the user has already read and
     #: approved, so the planner is skipped rather than second-guessing them.
     report_content: Optional[ReportContent]
+    #: The planned `Deliverable`, when the caller has one the user approved.
+    deliverable: Optional[Any]
+    #: A cancellation token, checked between stages. Cooperative rather than a
+    #: thread kill: a killed render leaves a half-written file on disk that
+    #: opens and is wrong, which is worse than not stopping at all.
+    cancel: Optional[Any]
     summary_bullets: list[str]
     output_files: list[str]
     #: Hard failures — a file that could not be read at all.

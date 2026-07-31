@@ -245,6 +245,24 @@ def get_chat(chat_id: str) -> Optional[Chat]:
     return _chat(row) if row else None
 
 
+def get_chat_for_session(session_id: str) -> Optional[Chat]:
+    """The most recently active chat backed by this analysis session."""
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT c.*, COUNT(m.message_id) AS message_count
+            FROM chats c
+            LEFT JOIN messages m ON m.chat_id = c.chat_id
+            WHERE c.session_id = ?
+            GROUP BY c.chat_id
+            ORDER BY c.updated_at DESC, c.rowid DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    return _chat(row) if row else None
+
+
 def rename_chat(chat_id: str, title: str) -> Optional[Chat]:
     """Rename in place — deliberately leaves `updated_at` untouched.
 

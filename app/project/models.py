@@ -259,12 +259,23 @@ class DraftRecord(BaseModel):
     chat_id: Optional[str] = None
     title: str = "Untitled draft"
     draft_type: str = "custom"
+    #: The draft's editable form. Always Markdown — that is what the user reads
+    #: and edits.
     format: Literal["markdown"] = "markdown"
+    #: What it was planned to be *delivered* as, which shapes how many pages it
+    #: has and how dense they are: a one-page PDF brief and a twelve-slide deck
+    #: are not the same document even from the same evidence.
+    target_format: Literal["pptx", "docx", "pdf", "html"] = "pptx"
     audience: Optional[str] = None
     audience_label: str = ""
     content: str = ""
     sections: list[DraftSection] = Field(default_factory=list)
     based_on_knowledge_version: int = 0
+    #: The planned `Deliverable` this draft was derived from, so an export can
+    #: render the real artifact rather than re-parsing the draft's Markdown.
+    #: Optional so drafts written before the planning engine still load.
+    deliverable_id: Optional[str] = None
+    deliverable_version: Optional[int] = None
     status: DraftStatus = "draft"
     version: int = 0
     created_by: Literal["assistant", "user"] = "assistant"

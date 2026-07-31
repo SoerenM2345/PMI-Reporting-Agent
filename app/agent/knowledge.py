@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -34,6 +34,15 @@ from app.models.pmi import Audience
 from app.storage.json_store import session_dir
 
 log = logging.getLogger("pmi.knowledge")
+
+
+def _as_text(value: Any) -> Optional[str]:
+    """A value as the user would read it back, or `None` for missing."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return f"{value:%d-%m-%Y}"
+    return str(value)
 
 
 class EntityRef(BaseModel):
@@ -50,7 +59,14 @@ class UserValue(BaseModel):
 
     `raw` is what they typed; `value` is what was written after coercion. Keeping
     both means a rejected re-read ("12-08-2026" parsed as a date) can be
-    explained in the user's own terms rather than ours.
+    explained in the user's own terms rather than ours — and it is what makes
+    the value **replayable**: re-extraction builds a brand-new model from the
+    files, and `raw` is re-coerced against the live field each time.
+
+    `label` is load-bearing for the same reason. Entity ids are reassigned by
+    every `standardize`, so `entity_id` cannot survive a re-read; the entity is
+    found again by `(type, label)`, which is the rule
+    `app/project/rebuild.py::_apply_confirmed_values` already follows.
     """
 
     entity_type: str
@@ -59,6 +75,13 @@ class UserValue(BaseModel):
     field: str
     value: Any = None
     raw: str = ""
+    #: What the files said before the user overruled them. Kept so a correction
+    #: can be explained, undone, and shown as *superseding* something rather
+    #: than as having appeared from nowhere.
+    old_value: Optional[str] = None
+    #: Where the correction came from: a chat sentence, a preview cell, a gap
+    #: answer. Different surfaces, one durable record.
+    source: str = "chat"
     when: datetime = Field(default_factory=datetime.now)
 
 
@@ -175,13 +198,28 @@ class KnowledgeBase(BaseModel):
         return self
 
     def record_value(self, value: UserValue) -> "KnowledgeBase":
-        """Remember one supplied value, replacing any earlier one for the field."""
-        self.user_values = [
+        """Remember one supplied value, replacing any earlier one for the field.
+
+        Matched on `(entity_type, label, field)`, not on `entity_id`: ids are
+        reassigned by every `standardize`, so keying on one meant a second
+        correction to the same field after a re-read appended a *new* row
+        instead of replacing the old one — leaving two live values for one field
+        and no way to tell which was current.
+
+        The replaced value's own `value` becomes the new one's `old_value` when
+        the caller did not supply one, so the chain of what superseded what
+        survives without every call site having to remember it.
+        """
+        superseded = [
             v for v in self.user_values
-            if not (v.entity_type == value.entity_type
-                    and v.entity_id == value.entity_id
-                    and v.field == value.field)
+            if v.entity_type == value.entity_type
+            and v.field == value.field
+            and (v.label or "") == (value.label or "")
         ]
+        if superseded and value.old_value is None:
+            value.old_value = _as_text(superseded[-1].value)
+
+        self.user_values = [v for v in self.user_values if v not in superseded]
         self.user_values.append(value)
         self.content_revision += 1
         return self

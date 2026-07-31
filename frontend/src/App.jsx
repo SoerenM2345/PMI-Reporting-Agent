@@ -76,12 +76,18 @@ export default function App() {
     try {
       return await fn();
     } catch (e) {
-      setError(e.message);
+      // A stopped turn is not an error. Showing the red banner for something
+      // the user deliberately did reads as a failure they have to act on.
+      if (!(e instanceof api.Aborted)) setError(e.message);
       return null;
     } finally {
       setBusy(false);
     }
   };
+
+  /** Stop the running turn. The fetch aborts, the server sees the disconnect
+   *  and stops between stages, and no partial file is offered as finished. */
+  const stop = () => api.abort();
 
   const refreshChats = async () => {
     const body = await api.listChats();
@@ -297,60 +303,56 @@ export default function App() {
       }
     });
 
-  // One turn = optional attachments + optional prompt. Files are uploaded first
-  // so `respond()` sees them on disk, then the prompt is sent as a single
-  // request — this is what lets a user drop the trackers and say what they want
-  // in the same message.
+  // One turn = optional attachments + optional prompt, in **one** request.
+  //
+  // It used to be two, files first. `/files` re-runs the whole analysis
+  // synchronously, so a failure there meant the message call never fired and
+  // the typed sentence was silently dropped — already cleared from the box. On
+  // success the optimistic bubble was re-appended *after* the upload's reply,
+  // so the user's own words visibly jumped below the answer to them.
   const send = (text, files = []) =>
     run(async () => {
       const trimmed = (text || "").trim();
       if (!trimmed && files.length === 0) return null;
 
-      const filesBubbleId = `local-files-${Date.now()}`;
-      const userMsgId = `local-user-${Date.now()}`;
-
-      // Show the user's turn immediately; the server assigns the real ids.
-      setMessages((prior) => [
-        ...prior,
-        ...(files.length
-          ? [
-              {
-                message_id: filesBubbleId,
-                role: "user",
-                kind: "files",
-                content: { files: files.map((f) => ({ name: f.name })) },
-              },
-            ]
-          : []),
-        ...(trimmed
-          ? [{ message_id: userMsgId, role: "user", kind: "text", content: { text: trimmed } }]
-          : []),
-      ]);
-
+      const localIds = [];
+      const optimistic = [];
       if (files.length) {
-        // Posted to the chat, not to the bare upload endpoint: the upload is a
-        // turn with an answer. It used to be a silent side effect, so the "N
-        // files ready" line was invented here and vanished on reopen, and
-        // nothing server-side re-read anything.
-        const body = await api.addChatFiles(chatId, files);
-        setMessages((prior) => [
-          ...prior.map((m) =>
-            m.message_id === filesBubbleId
-              ? { ...m, content: { files: (body.saved ?? []).map((n) => ({ name: n })) } }
-              : m,
-          ),
-          ...(body.messages ?? []),
-        ]);
+        const id = `local-files-${Date.now()}`;
+        localIds.push(id);
+        optimistic.push({
+          message_id: id,
+          role: "user",
+          kind: "files",
+          content: {
+            text: "",
+            files: files.map((f) => ({
+              filename: f.name,
+              name: f.name,
+              size: f.size,
+              status: "uploading",
+            })),
+          },
+        });
       }
-
       if (trimmed) {
-        const body = await api.sendMessage(chatId, trimmed);
-        // Swap the optimistic prose bubble for the server's stored turn(s).
-        setMessages((prior) => [
-          ...prior.filter((m) => m.message_id !== userMsgId),
-          ...body.messages,
-        ]);
+        const id = `local-user-${Date.now()}`;
+        localIds.push(id);
+        optimistic.push({
+          message_id: id,
+          role: "user",
+          kind: "text",
+          content: { text: trimmed },
+        });
       }
+      setMessages((prior) => [...prior, ...optimistic]);
+
+      const body = await api.sendTurn(chatId, trimmed, files);
+      // Swap every optimistic bubble for the server's stored turn, in order.
+      setMessages((prior) => [
+        ...prior.filter((m) => !localIds.includes(m.message_id)),
+        ...(body.messages ?? []),
+      ]);
 
       await refreshChats();
     });
@@ -373,21 +375,7 @@ export default function App() {
         const resolved = new Map(
           (analysis.conflicts ?? []).map((c) => [c.conflict_id, c]),
         );
-        setMessages((prior) =>
-          prior.map((m) =>
-            m.kind === "conflict"
-              ? {
-                  ...m,
-                  content: {
-                    ...m.content,
-                    conflicts: (m.content.conflicts ?? []).map(
-                      (c) => resolved.get(c.conflict_id) ?? c,
-                    ),
-                  },
-                }
-              : m,
-          ),
-        );
+        setMessages((prior) => prior.map((m) => withResolved(m, resolved)));
         return null;
       }
 
@@ -424,18 +412,30 @@ export default function App() {
 
       if (action.type === "generate") {
         const body = await api.generateAs(sessionId, action.format, true);
+        const unresolved = body.generated_with_unresolved_conflicts ?? [];
         setMessages((prior) => [
           ...prior,
           {
             message_id: `local-dl-${Date.now()}`,
             role: "agent",
-            kind: "downloads",
+            kind: "text",
             content: {
-              text: "Done.",
-              session_id: sessionId,
-              outputs: body.outputs ?? [],
-              summary: body.summary ?? [],
-              unresolved: body.generated_with_unresolved_conflicts ?? [],
+              format: "markdown",
+              content:
+                `Here is the ${action.format}.` +
+                (unresolved.length
+                  ? ` It carries ${unresolved.length} unresolved critical conflict(s), and says so.`
+                  : ""),
+              artifacts: (body.outputs ?? []).map((name) => ({
+                filename: name,
+                session_id: sessionId,
+                type: extensionOf(name),
+                title: name,
+                status: "ready",
+                download_url: api.downloadUrl(sessionId, name),
+              })),
+              actions: [],
+              status: "completed",
             },
           },
         ]);
@@ -606,6 +606,7 @@ export default function App() {
 
         <Composer
           onSend={send}
+          onStop={stop}
           busy={busy}
           disabled={!chatId}
         />
@@ -662,10 +663,17 @@ function agentSays(text, kind = "text") {
 // the table kept the old value and the edit read as "not saved". The whole
 // re-planned content comes back in the response, so refreshing the last preview
 // is both correct and can't disagree with the deck.
+/**
+ * An edit re-plans the whole report, so the newest draft offer has to point at
+ * the new version. Only the version moves: the panel fetches the document
+ * itself, which is what stops the chat and the artifact from disagreeing.
+ */
 function withRefreshedPreview(messages, body) {
   let target = -1;
   messages.forEach((message, index) => {
-    if (message.kind === "preview") target = index;
+    if ((message.content?.actions ?? []).some((a) => a.type === "open_preview")) {
+      target = index;
+    }
   });
   if (target === -1) return messages;
   return messages.map((message, index) =>
@@ -674,13 +682,42 @@ function withRefreshedPreview(messages, body) {
           ...message,
           content: {
             ...message.content,
-            version: body.version,
-            markdown: body.markdown,
-            sections: body.blocks,
+            actions: message.content.actions.map((a) =>
+              a.type === "open_preview" ? { ...a, version: body.version } : a,
+            ),
           },
         }
       : message,
   );
+}
+
+/** Fold a resolution back into whichever answer offered the choice. */
+function withResolved(message, resolved) {
+  const actions = message.content?.actions ?? [];
+  if (!actions.some((a) => a.type === "resolve_conflict")) return message;
+  return {
+    ...message,
+    content: {
+      ...message.content,
+      actions: actions.map((a) =>
+        a.type === "resolve_conflict"
+          ? {
+              ...a,
+              conflicts: (a.conflicts ?? []).map(
+                (c) => resolved.get(c.conflict_id) ?? c,
+              ),
+            }
+          : a,
+      ),
+    },
+  };
+}
+
+function extensionOf(name) {
+  const ext = String(name).split(".").pop()?.toLowerCase();
+  return ["pptx", "docx", "pdf", "xlsx", "html", "png", "md"].includes(ext)
+    ? ext
+    : "other";
 }
 
 function userSays(text) {

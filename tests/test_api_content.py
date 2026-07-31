@@ -51,8 +51,19 @@ def test_planning_returns_a_readable_report_before_anything_is_generated(client,
     assert body["markdown"].startswith("# ")
     # It reads as a report, not as a dump of the data model.
     assert "## " in body["markdown"]
-    assert [s["section_id"] for s in body["sections"]][0] == "summary.executive"
-    assert [s["section_id"] for s in body["sections"]][-1] == "quality.limitations"
+
+    # Section ids are the planner's, not a fixed table's — what is asserted is
+    # that the document opens by saying something and closes by disclosing what
+    # it could not say, in whatever order this request called for.
+    assert body["governing_message"]
+    sections = body["sections"]
+    assert sections and all(s["headline"] for s in sections)
+    assert body["governing_message"] in body["markdown"]
+    assert any("limitation" in s["headline"].lower()
+               or "not reported" in s["headline"].lower()
+               or "data quality" in s["headline"].lower()
+               for s in sections), \
+        f"nothing discloses the report's limits: {[s['headline'] for s in sections]}"
 
 
 def test_the_plan_is_versioned_and_the_history_is_listed(client, analyzed):
@@ -74,6 +85,46 @@ def test_reverting_appends_a_version_rather_than_erasing_one(client, analyzed):
 
     # Nothing was destroyed on the way.
     assert client.get(f"/api/content/{analyzed}?version=2").status_code == 200
+
+
+def test_a_revision_becomes_a_new_version_and_the_old_one_stays(client, analyzed):
+    """"Remove the X page" over HTTP. The previous version stays on disk, which
+    is what makes a revision safe to try."""
+    planned = client.post(f"/api/content/{analyzed}").json()
+    target = planned["sections"][-1]
+
+    body = client.post(f"/api/content/{analyzed}/revise",
+                       json={"instruction": f"remove the {target['headline']} page"}
+                       ).json()
+
+    if not body["changed"]:
+        # Refusing is a real outcome and must come back readable, not as a 4xx.
+        assert body["rejected"] or body["warnings"]
+        assert body["version"] == planned["version"]
+        return
+
+    assert body["version"] == planned["version"] + 1
+    assert target["section_id"] not in [s["section_id"] for s in body["sections"]]
+    assert client.get(f"/api/content/{analyzed}?version=1").status_code == 200
+
+
+def test_an_uninterpretable_revision_says_so_rather_than_erroring(client, analyzed):
+    client.post(f"/api/content/{analyzed}")
+
+    response = client.post(f"/api/content/{analyzed}/revise",
+                           json={"instruction": "make it pop"})
+    body = response.json()
+
+    assert response.status_code == 200, "a misunderstanding is not a server error"
+    assert body["changed"] is False
+    assert body["markdown"], "the unchanged report still comes back"
+
+
+def test_revising_before_planning_says_to_plan_first(client, analyzed):
+    response = client.post(f"/api/content/{analyzed}/revise",
+                           json={"instruction": "put risks first"})
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "no_content"
 
 
 def test_reverting_to_a_version_that_never_existed_is_a_404(client, analyzed):
@@ -185,32 +236,55 @@ def test_what_the_preview_says_is_what_the_deck_says(client, analyzed):
 
 
 # ================================================ editing the preview (item 3b)
-def _first_editable_cell(content):
-    """A `(block_id, row, column, cell)` the preview would let a user edit."""
-    for section in content.sections:
-        for block in section.blocks:
-            if block.kind != "table":
+def _planned(session_id):
+    """The stored `Deliverable` — the one object the preview and deck share."""
+    from app.deliverable import session as session_plan
+
+    return session_plan.load(session_id)
+
+
+def _cells(session_id):
+    """Every `(block_id, row, column, cell)` the preview exposes in a table.
+
+    A table's cells live on its `TableSpec`, reached through the element's
+    `spec_id`; the id the UI sends back is the *element's*, which is why the
+    walk goes element -> spec rather than assuming the two are the same.
+    """
+    from app.deliverable.model import TableElement
+
+    deliverable = _planned(session_id)
+    for page in deliverable.pages:
+        for element in page.elements:
+            if not isinstance(element, TableElement):
                 continue
-            for r, row in enumerate(block.rows):
+            spec = deliverable.specs.tables.get(element.spec_id)
+            if spec is None:
+                continue
+            for r, row in enumerate(spec.rows):
                 for c, cell in enumerate(row):
-                    if cell.ref is not None and cell.ref.field:
-                        return block.block_id, r, c, cell
+                    yield element.element_id, r, c, cell
+
+
+def _first_editable_cell(session_id):
+    """A `(block_id, row, column, cell)` the preview would let a user edit."""
+    for block_id, row, column, cell in _cells(session_id):
+        if cell.ref is not None and cell.ref.field:
+            return block_id, row, column, cell
     return None
 
 
 def test_a_preview_edit_is_written_into_the_data_model(client, analyzed):
-    """A preview edit must change the *data*, not just the stored content.
+    """A preview edit must change the *data*, not just the stored plan.
 
-    Patching `ReportContent` alone is one line and updates the preview
+    Patching the stored `Deliverable` alone is one line and updates the preview
     immediately — and produces a deck, a workbook and a document that disagree
     with the preview about a figure the user personally corrected. Everything is
     planned from `PMIDataModel`, so that is where the value has to land.
     """
-    from app.report import store as report_store
     from app.storage import json_store
 
     client.post(f"/api/content/{analyzed}")
-    found = _first_editable_cell(report_store.load(analyzed))
+    found = _first_editable_cell(analyzed)
     if found is None:
         pytest.skip("no editable cell in this plan")
     block_id, row, column, cell = found
@@ -245,10 +319,9 @@ def test_a_preview_edit_reaches_the_excel_output_too(client, analyzed):
     from openpyxl import load_workbook
 
     from app.config import get_settings
-    from app.report import store as report_store
 
     client.post(f"/api/content/{analyzed}")
-    found = _first_editable_cell(report_store.load(analyzed))
+    found = _first_editable_cell(analyzed)
     if found is None:
         pytest.skip("no editable cell in this plan")
     block_id, row, column, cell = found
@@ -284,27 +357,11 @@ def test_a_computed_cell_says_why_it_cannot_be_edited(client, analyzed):
     guarantees it does itself — so the cell carries no `ref` and the endpoint
     says what to correct instead.
     """
-    from app.report import store as report_store
-
     client.post(f"/api/content/{analyzed}")
-    content = report_store.load(analyzed)
 
-    target = None
-    for section in content.sections:
-        for block in section.blocks:
-            if block.kind != "table":
-                continue
-            for r, row in enumerate(block.rows):
-                for c, cell in enumerate(row):
-                    if cell.ref is None:
-                        target = (block.block_id, r, c)
-                        break
-                if target:
-                    break
-            if target:
-                break
-        if target:
-            break
+    target = next(((block_id, row, column)
+                   for block_id, row, column, cell in _cells(analyzed)
+                   if cell.ref is None or not cell.ref.field), None)
     if target is None:
         pytest.skip("every cell in this plan is editable")
 

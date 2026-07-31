@@ -60,11 +60,13 @@ def evaluate(draft: DraftRecord, knowledge: ProjectKnowledge) -> DraftRecord:
     uncertain = False
 
     for section in draft.sections:
-        if section.based_on_knowledge_version >= knowledge.version:
+        base_version = (section.based_on_knowledge_version
+                        or draft.based_on_knowledge_version)
+        if base_version >= knowledge.version:
             continue  # section is current — nothing to check
 
         changed_entities, changed_files = changes_since(
-            knowledge, section.based_on_knowledge_version)
+            knowledge, base_version)
         if not changed_entities and not changed_files:
             continue  # a metadata-only bump cannot stale content
 
@@ -80,6 +82,12 @@ def evaluate(draft: DraftRecord, knowledge: ProjectKnowledge) -> DraftRecord:
             uncertain = True
         # A section that declared nothing at all cannot be proven safe either.
         if deps.is_empty:
+            uncertain = True
+        # A newly added file can introduce a subject the old draft had no
+        # dependency for at all. Absence cannot be represented as an entity id,
+        # so a dependency intersection would incorrectly prove the old scope
+        # current when, for example, the first risk register is uploaded.
+        if changed_files:
             uncertain = True
 
     if resolvable_hit:

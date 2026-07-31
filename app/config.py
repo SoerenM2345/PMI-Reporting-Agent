@@ -92,8 +92,11 @@ class Settings(BaseSettings):
     llm_effort: Effort = "medium"
     #: Adaptive thinking. Off by default — the semantic tasks here are small.
     llm_thinking: bool = False
-    llm_timeout_s: float = 90.0
-    llm_max_retries: int = 2
+    #: Interactive work should fail over visibly instead of holding the UI for
+    #: several minutes. Schema and 4xx errors are never retried by the clients;
+    #: one retry remains for a transient connection/rate-limit failure.
+    llm_timeout_s: float = 45.0
+    llm_max_retries: int = 1
 
     # --------------------------------------------------- conflicts (§9)
     #: A = ask always, B = source priority always, C = hybrid (spec's recommended default).
@@ -116,6 +119,17 @@ class Settings(BaseSettings):
     # -------------------------------------------------- data quality (§5.6)
     #: Findings below this confidence are surfaced to the user for review.
     low_confidence_threshold: float = 0.6
+
+    # ------------------------------------------------------------ planning
+    #: How much packed evidence a planning call may see. Dense one-line records,
+    #: so ~40k characters is a few hundred records — comfortably inside every
+    #: model in MODEL_CATALOGUE once the prompt is added.
+    planning_evidence_budget_chars: int = 40_000
+    #: `llm_max_tokens` is a general *response* cap and far too small here: a
+    #: DocumentDesign for a twenty-page deck does not fit in 4096 tokens, and
+    #: the failure mode is a truncated JSON object that fails validation and
+    #: silently falls back to the unplanned layout.
+    llm_max_output_tokens_planning: int = 16384
     #: Claude downsamples above ~1568px on the long edge; larger just costs tokens.
     image_max_edge_px: int = 1568
     upload_max_mb: int = 25

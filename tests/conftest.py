@@ -122,3 +122,100 @@ def fake_vision():
     client = FakeVisionClient()
     llm.set_client(client)
     return client
+
+
+class ScriptedPlanningClient:
+    """Replays canned planning objects instead of calling a model.
+
+    The whole redesign is LLM-led, and `_no_live_provider` above means the suite
+    has no model. Without this the only testable path would be the deterministic
+    fallback — which would leave the actual product untested.
+
+    Follows `FakeVisionClient`'s discipline exactly: it answers the schemas its
+    scenario has a fixture for and **raises `NotConfigured` for everything
+    else**, on purpose. A test that exercises the storyline still gets the
+    deterministic path for chart planning unless it asked for both, so one
+    fixture cannot quietly paper over a gap somewhere else in the pipeline.
+
+    Re-record a scenario from a live model with:
+
+        ANTHROPIC_API_KEY=... python scripts/record_planning_fixture.py <scenario>
+    """
+
+    name = "scripted-planning"
+    supports_vision = True
+
+    def __init__(self, scenario: str = "steerco_status"):
+        self.scenario = scenario
+        self.calls: list[tuple[str, str]] = []
+        path = FIXTURES / "planning" / f"{scenario}.json"
+        if not path.is_file():
+            available = sorted(p.stem for p in (FIXTURES / "planning").glob("*.json"))
+            raise FileNotFoundError(
+                f"no planning scenario {scenario!r}; available: {available}")
+        self._queues: dict[str, list] = {}
+        for name, payload in json.loads(path.read_text()).items():
+            self._queues[name] = payload if isinstance(payload, list) else [payload]
+
+    def structured(self, *, output_model, system="", user="", **kwargs):
+        name = output_model.__name__
+        self.calls.append((name, user))
+        queue = self._queues.get(name)
+        if not queue and name == "CompleteReportPlan":
+            payload = self._complete_report_payload()
+            return output_model.model_validate(payload)
+        if not queue:
+            raise NotConfigured(
+                f"scenario {self.scenario!r} has no {name}; the deterministic "
+                f"fallback should handle it")
+        # A single entry is reused for repeated calls (per-page tasks); a list
+        # of several is consumed in order.
+        payload = queue.pop(0) if len(queue) > 1 else queue[0]
+        return output_model.model_validate(payload)
+
+    def _complete_report_payload(self):
+        """Compose old recorded stages into the new one-call response fixture."""
+        brief = self._queues["OutputBrief"][0]
+        story = self._queues["StorylinePlan"][0]
+        design = self._queues["DocumentDesign"][0]
+        pages = design.get("pages", [])
+        copies = self._queues.get("PageCopy") or [
+            {
+                "page_id": page.get("page_id", ""),
+                "message_title": page.get("message_title", ""),
+                "supporting_message": page.get("supporting_message", ""),
+            }
+            for page in pages
+        ]
+        titles_queue = self._queues.get("DocumentTitles")
+        titles = titles_queue[0] if titles_queue else {
+            "document_title": brief.get("title_proposal", ""),
+            "document_subtitle": "",
+            "titles": [
+                {
+                    "page_id": page.get("page_id", ""),
+                    "title": page.get("message_title", ""),
+                    "subtitle": page.get("supporting_message", ""),
+                }
+                for page in pages
+            ],
+        }
+        return {
+            "brief": brief,
+            "storyline": story,
+            "design": design,
+            "page_copy": copies,
+            "titles": titles,
+        }
+
+    def asked_for(self, schema_name: str) -> list[str]:
+        return [user for name, user in self.calls if name == schema_name]
+
+
+@pytest.fixture
+def scripted_planning(request):
+    """Usage: `@pytest.mark.parametrize("scripted_planning", ["one_pager"],
+    indirect=True)`, or plain for the default SteerCo scenario."""
+    client = ScriptedPlanningClient(getattr(request, "param", "steerco_status"))
+    llm.set_client(client)
+    return client

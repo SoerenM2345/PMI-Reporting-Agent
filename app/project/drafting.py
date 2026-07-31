@@ -5,11 +5,19 @@ directly, asks the agent to rewrite another, and only exports when they choose t
 It is planned once from project knowledge and then owned by the user — the system
 flags it when knowledge moves (Phase 1C) but never rewrites it.
 
-Reuse, not reinvention: the section structure, titles and figures come from
-`report/planner.py` (the same plan every format uses, so a draft cannot disagree
-with an eventual deck), rendered to Markdown by `report/render/markdown.py`. Each
-section records what it depended on, so a later change stales only the sections it
-touched, and a regenerate refreshes one section without disturbing the rest.
+A draft is derived from a planned `Deliverable` (`app/deliverable/engine.py`) and
+records which one, so an export renders *that* artifact rather than re-parsing the
+draft's Markdown back into a document model — a round trip that used to discard
+cell provenance, emphasis and column types on the way out.
+
+Where the user has edited a section, the edit wins: `exporting` overlays
+user-owned section text onto the deliverable before rendering. The draft is the
+text the user approved, and an export that quietly regenerated a different
+narrative would break that promise (Scenario 6).
+
+Each section records what it depended on, so a later knowledge change stales only
+the sections it touched, and a regenerate refreshes one section without
+disturbing the rest.
 
 Drafts are **audit, not knowledge** (correction #1): creating, editing and
 exporting a draft logs an `AuditEvent` and never alters the knowledge base. A
@@ -47,20 +55,31 @@ def _uid() -> str:
 def create_draft(project_id: str, *, audience: Optional[str] = None,
                  audience_label: str = "", title: Optional[str] = None,
                  draft_type: str = "custom", chat_id: Optional[str] = None,
+                 request_text: str = "", fmt: Optional[str] = None,
                  repos: Optional[Repositories] = None) -> DraftRecord:
-    """Plan a fresh draft from current project knowledge."""
+    """Plan a fresh draft from the project's context, knowledge and request.
+
+    `request_text` is what the user actually asked for. It used to be discarded:
+    the draft was planned from a per-audience table, so every draft of a given
+    audience was the same document whatever the user said.
+    """
     repos = repos or default_repositories()
     knowledge = repos.knowledge.current(project_id)
     if knowledge is None or knowledge.entity_count() == 0:
         raise DraftError("There is nothing to draft yet — add project files first.")
 
-    content = _plan(knowledge, audience, audience_label)
+    deliverable, context = _plan(project_id, request_text, audience,
+                                 audience_label, fmt, repos)
     draft = DraftRecord(
         draft_id=_uid(), project_id=project_id, chat_id=chat_id,
-        title=title or content.title, draft_type=draft_type,
-        audience=(audience or Audience.PMO.value), audience_label=audience_label,
+        title=title or deliverable.title, draft_type=draft_type,
+        target_format=(fmt or deliverable.primary_format),
+        audience=(audience or deliverable.audience_label or Audience.PMO.value),
+        audience_label=audience_label or deliverable.audience_label,
         based_on_knowledge_version=knowledge.version, created_by="assistant",
-        sections=_sections_from_content(content, knowledge),
+        deliverable_id=deliverable.deliverable_id,
+        deliverable_version=deliverable.version,
+        sections=_sections_from_deliverable(deliverable, context, knowledge),
     )
     draft.content = _assemble(draft)
     repos.drafts.commit(draft)
@@ -128,16 +147,17 @@ def regenerate_section(project_id: str, draft_id: str, section_id: str, *,
     if knowledge is None:
         raise DraftError("No project knowledge to regenerate from.")
 
-    content = _plan(knowledge, draft.audience, draft.audience_label)
-    planned = content.section(section_id)
-    if planned is None:
+    deliverable, context = _plan(project_id, "", draft.audience,
+                                 draft.audience_label, draft.target_format, repos)
+    page = deliverable.page(section_id)
+    if page is None:
         raise DraftError(
             f"Section “{section_id}” is not part of the current plan, so there is "
             f"nothing to regenerate it from.")
 
-    section.content = _render_section(planned, content)
-    section.heading = planned.headline
-    section.depends_on = _dependencies(planned, knowledge)
+    section.content = _render_page(page, deliverable)
+    section.heading = page.title
+    section.depends_on = _page_dependencies(page, context, knowledge)
     section.based_on_knowledge_version = knowledge.version
     section.stale = False
     section.origin = "assistant"
@@ -168,15 +188,29 @@ def restore_version(project_id: str, draft_id: str, version: int, *,
 
 
 # ------------------------------------------------------------------ helpers
-def _plan(knowledge: ProjectKnowledge, audience: Optional[str],
-          audience_label: str):
-    from app.report import planner
+def _plan(project_id: str, request_text: str, audience: Optional[str],
+          audience_label: str, fmt: Optional[str], repos: Repositories):
+    """Build the context, plan a deliverable, and store it."""
+    from app.context import builder
+    from app.deliverable import engine, store
 
-    aud = _audience(audience)
-    return planner.plan(
-        knowledge.data_model, aud, quality=knowledge.quality_report,
-        audience_label=audience_label,
-        fingerprint=f"pk:{knowledge.version}")
+    context = builder.build_for_project(
+        project_id, request_text, requested_format=fmt, repos=repos)
+    if audience and not context.audience:
+        context.audience = audience_label or audience
+
+    # `force`: a draft is explicitly not a final artifact, so an unresolved
+    # conflict is disclosed in it rather than blocking it. The export gate is
+    # where publication is held back.
+    deliverable = engine.build(context, force=True,
+                               knowledge_version=_version(repos, project_id))
+    store.save(deliverable)
+    return deliverable, context
+
+
+def _version(repos: Repositories, project_id: str) -> int:
+    knowledge = repos.knowledge.current(project_id)
+    return knowledge.version if knowledge is not None else 0
 
 
 def _audience(value: Optional[str]) -> Audience:
@@ -192,69 +226,50 @@ def _audience(value: Optional[str]) -> Audience:
     return Audience.PMO
 
 
-def _sections_from_content(content, knowledge: ProjectKnowledge) -> list[DraftSection]:
+def _sections_from_deliverable(deliverable, context,
+                               knowledge: ProjectKnowledge) -> list[DraftSection]:
+    """One editable section per page. The cover is furniture, not content."""
     return [
         DraftSection(
-            section_id=section.section_id,
-            heading=section.headline,
-            content=_render_section(section, content),
-            depends_on=_dependencies(section, knowledge),
+            section_id=page.page_id,
+            heading=page.title,
+            content=_render_page(page, deliverable),
+            depends_on=_page_dependencies(page, context, knowledge),
             based_on_knowledge_version=knowledge.version,
             origin="assistant",
         )
-        for section in content.narrative()
+        for page in deliverable.pages if page.purpose != "cover"
     ]
 
 
-def _render_section(section, content) -> str:
-    from app.report.render import markdown as md
+def _render_page(page, deliverable) -> str:
+    from app.renderers import markdown as md
 
-    return "\n".join(md._section(section, content, False)).rstrip()
+    return md.section_markdown(page, deliverable).rstrip()
 
 
-def _dependencies(section, knowledge: ProjectKnowledge) -> Dependencies:
-    """What this section was built from — entity content-keys and calc/fact keys.
+def _page_dependencies(page, context, knowledge: ProjectKnowledge) -> Dependencies:
+    """What this page was built from, as the change log identifies things.
 
-    Entity keys match the change log's `kind:label` identity (resolved from the
-    entity id), so a change to that entity stales exactly this section. Tile fact
-    keys are calculation dependencies, which the change log cannot verify — a
-    section carrying them is treated conservatively by `drafts.evaluate`.
+    Entity keys are `kind:label`, matching the change log, so a change to that
+    entity stales exactly the pages that used it. Computed facts are
+    calculation dependencies, which the change log cannot verify, so a page
+    carrying them is treated conservatively by `drafts.evaluate`.
     """
-    from app.agent.nl_updates import LABELS
-
-    model = knowledge.data_model
     entity_keys: set[str] = set()
     calc_keys: set[str] = set()
 
-    for block in section.blocks:
-        kind = getattr(block, "kind", None)
-        if kind == "table" and not getattr(block, "is_derived", False):
-            for row in block.rows:
-                for cell in row:
-                    ref = getattr(cell, "ref", None)
-                    if ref is None or not ref.entity_id:
-                        continue
-                    label = _label_of(model, ref.entity_type, ref.entity_id, LABELS)
-                    if label:
-                        entity_keys.add(f"{ref.entity_type}:{label}")
-        elif kind == "tiles":
-            for tile in block.tiles:
-                if getattr(tile, "fact_key", None):
-                    calc_keys.add(tile.fact_key)
+    for evidence_id in page.evidence_ids:
+        item = context.evidence.get(evidence_id)
+        if item is None:
+            continue
+        if item.kind in ("fact", "calculation"):
+            calc_keys.add(evidence_id.split(":", 2)[-1])
+        elif item.entity_type and item.label:
+            entity_keys.add(f"{item.entity_type}:{item.label}")
 
     return Dependencies(entity_ids=sorted(entity_keys),
                         calculation_ids=sorted(calc_keys))
-
-
-def _label_of(model, entity_type: str, entity_id: str, labels) -> Optional[str]:
-    entry = labels.get(entity_type)
-    if entry is None:
-        return None
-    coll, id_attr, label_attr = entry
-    for entity in getattr(model, coll, []) or []:
-        if getattr(entity, id_attr, None) == entity_id:
-            return str(getattr(entity, label_attr, "")) or None
-    return None
 
 
 def _assemble(draft: DraftRecord) -> str:

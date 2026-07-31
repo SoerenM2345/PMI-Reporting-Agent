@@ -137,8 +137,12 @@ def _handle_create(project_id, message, chat_id, repos, knowledge,
 
     audience = _audience_hint(message)
     try:
+        # The message *is* the brief. It used to be read for an audience hint and
+        # then discarded, so every draft for a given audience was the same
+        # document whatever the user had asked for.
         draft = drafting.create_draft(project_id, audience=audience,
-                                      chat_id=chat_id, repos=repos)
+                                      chat_id=chat_id, request_text=message,
+                                      repos=repos)
     except DraftError as exc:
         return ChatResponse(intent="create_report", message=str(exc),
                             conflict_state=conflict_state)
@@ -146,6 +150,7 @@ def _handle_create(project_id, message, chat_id, repos, knowledge,
     state = conflict_impact.assess(knowledge)
     body = [f"I've drafted **{draft.title}** — you can read and edit it directly, "
             f"and I'll keep it in step with the project as new information arrives."]
+    body.extend(_planning_notes(draft))
     if state.blocking_conflicts:
         body.append("")
         body.append(state.explain())
@@ -330,3 +335,34 @@ def _match_section(draft, message: str):
         if score > best_score:
             best, best_score = section, score
     return best if best_score >= 1 else None
+
+
+def _planning_notes(draft) -> list[str]:
+    """Anything about *how* the draft was planned that the user should know.
+
+    Chiefly whether a model shaped it. A draft assembled from the deterministic
+    fallback reads like a considered document and is not one, and the chat reply
+    is where a user is actually looking.
+    """
+    from app.deliverable import store
+
+    notes: list[str] = []
+    if not draft.deliverable_id:
+        return notes
+    deliverable = store.load(project_id=draft.project_id,
+                             version=draft.deliverable_version)
+    if deliverable is None:
+        return notes
+
+    if deliverable.planned_by == "fallback":
+        notes.append("")
+        notes.append("Note: no language model was available, so the sections "
+                     "follow your request and the available evidence rather "
+                     "than a reasoned argument. Every figure in it is validated.")
+    uncovered = [topic for topic, sections in deliverable.covered_sections.items()
+                 if not sections]
+    if uncovered:
+        notes.append("")
+        notes.append("I could not cover: " + ", ".join(uncovered[:4])
+                     + ". The draft says so where each belongs.")
+    return notes

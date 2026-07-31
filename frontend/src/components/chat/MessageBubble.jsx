@@ -1,66 +1,87 @@
 import { useState } from "react";
 
 import ConflictCard from "../ConflictCard";
-import Downloads from "../Downloads";
 import LowConfidencePanel from "../LowConfidencePanel";
-import IssuesPanel from "./IssuesPanel";
+import Attachments from "./Attachments";
+import Artifacts from "./Artifacts";
 import Markdown from "./Markdown";
-import PreviewBody from "./PreviewBody";
+import PreviewPanel from "./PreviewPanel";
 
 /**
  * One turn in the transcript.
  *
- * A chat message here is not always prose. The agent answers with conflict
- * cards, a report preview, a download set — the same components the wizard
- * used, now addressed by `kind`. That is the whole reason the backend stores a
- * kind alongside the content: a disagreement between two files rendered as a
- * paragraph would lose the thing that makes it actionable, which is *where*
- * each number came from and what it said.
+ * The agent's reply is **prose**. It used to be a card: the component switched
+ * on `kind` and rendered a conflict panel, a preview or a download set, which
+ * meant the assistant could only ever say something the card vocabulary had a
+ * slot for. Anything else — an explanation, a comparison, a plain answer to a
+ * plain question — had nowhere to go.
+ *
+ * What survives from the cards is the *affordances*. Resolving a conflict with
+ * one click is genuinely better than typing "use the 82 from the tracker", so
+ * the control stays; it just sits under the answer instead of being it. Same for
+ * the draft: the prose says what the report argues, and the panel opens on
+ * request.
  */
 export default function MessageBubble({ message, onAction, busy }) {
-  const { role, kind, content } = message;
+  const { role, content } = message;
 
   if (role === "user") {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-slate-900 px-4 py-2.5
-                        text-sm text-white">
-          {content.text}
-        </div>
+      <div className="flex flex-col items-end gap-1.5">
+        {content.text && (
+          <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-slate-900 px-4 py-2.5
+                          text-sm text-white">
+            {content.text}
+          </div>
+        )}
+        {/* The files went with *this* message. Rendering them from the stored
+            message rather than from local state is what makes them survive a
+            reload — and what stops an upload-only turn rendering as an empty
+            black pill, which is all the user used to see. */}
+        <Attachments files={content.files} />
       </div>
     );
   }
 
+  const failed = content.status === "failed";
+
   return (
     <div className="flex justify-start">
       <div className="w-full max-w-[95%] space-y-2">
-        {content.text && kind !== "notice" && (
-          <div className="rounded-2xl rounded-bl-sm bg-white px-4 py-2.5 text-sm
-                          text-slate-800 shadow-sm ring-1 ring-slate-200">
-            {/* Agent replies are composed as Markdown by `chat_format.py`.
-                Interpolating them as a raw string put the `**` on screen — the
-                formatting was written and then discarded at the last step. */}
-            <Markdown source={content.text} />
+        {content.content && (
+          <div
+            className={
+              failed
+                ? "rounded-2xl rounded-bl-sm border border-rag-amber/50 bg-amber-50/60 px-4 py-2.5 text-sm text-slate-800"
+                : "rounded-2xl rounded-bl-sm bg-white px-4 py-2.5 text-sm text-slate-800 shadow-sm ring-1 ring-slate-200"
+            }
+          >
+            <Markdown source={content.content} />
           </div>
         )}
 
-        <Body message={message} onAction={onAction} busy={busy} />
+        <Artifacts artifacts={content.artifacts} />
+
+        {(content.actions ?? []).map((action, index) => (
+          <ActionControl
+            key={`${action.type}-${index}`}
+            action={action}
+            onAction={onAction}
+            busy={busy}
+          />
+        ))}
       </div>
     </div>
   );
 }
 
-function Body({ message, onAction, busy }) {
-  const { kind, content } = message;
-
-  switch (kind) {
-    case "audience_choice":
-      return <AudienceChoice content={content} onAction={onAction} busy={busy} />;
-
-    case "conflict":
+/** An offer, never the answer. Each renders under the prose it belongs to. */
+function ActionControl({ action, onAction, busy }) {
+  switch (action.type) {
+    case "resolve_conflict":
       return (
         <div className="space-y-2">
-          {(content.conflicts ?? []).map((conflict) => (
+          {(action.conflicts ?? []).map((conflict) => (
             <ConflictCard
               key={conflict.conflict_id}
               conflict={conflict}
@@ -73,60 +94,14 @@ function Body({ message, onAction, busy }) {
         </div>
       );
 
-    case "low_confidence":
-      return <LowConfidencePanel items={content.items ?? []} />;
+    case "choose_audience":
+      return <AudienceChoice action={action} onAction={onAction} busy={busy} />;
 
-    case "issues":
-      return (
-        <IssuesPanel
-          content={content}
-          busy={busy}
-          onFill={(issueId, value) =>
-            onAction({ type: "fill", issueId, value })
-          }
-        />
-      );
+    case "review_low_confidence":
+      return <LowConfidencePanel items={action.items ?? []} />;
 
-    case "preview":
-      return <Preview content={content} onAction={onAction} busy={busy} />;
-
-    case "downloads":
-      return (
-        <Downloads
-          sessionId={content.session_id}
-          outputs={content.outputs ?? []}
-          summary={content.summary ?? []}
-          unresolved={content.unresolved ?? []}
-        />
-      );
-
-    case "notice":
-      return (
-        <div className="rounded-lg border border-rag-amber/50 bg-amber-50/60 p-3
-                        text-sm text-slate-700">
-          <p>{content.text}</p>
-          {(content.reasons ?? []).length > 0 && (
-            <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600">
-              {content.reasons.map((reason, index) => (
-                <li key={index}>{reason}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      );
-
-    case "files":
-      return (
-        <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm">
-          <ul className="space-y-1">
-            {(content.files ?? []).map((file) => (
-              <li key={file.name ?? file} className="text-slate-700">
-                📎 {file.name ?? file}
-              </li>
-            ))}
-          </ul>
-        </div>
-      );
+    case "open_preview":
+      return <PreviewPanel action={action} onAction={onAction} busy={busy} />;
 
     default:
       return null;
@@ -144,7 +119,7 @@ function Body({ message, onAction, busy }) {
  * The chips stay unselected until clicked: the agent is asking because it could
  * not infer, and a preselected default defeats the ask.
  */
-function AudienceChoice({ content, onAction, busy }) {
+function AudienceChoice({ action, onAction, busy }) {
   const [custom, setCustom] = useState("");
   const submit = () => {
     const value = custom.trim();
@@ -156,7 +131,7 @@ function AudienceChoice({ content, onAction, busy }) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
-        {(content.options ?? []).map((option) => (
+        {(action.options ?? []).map((option) => (
           <button
             key={option}
             type="button"
@@ -171,13 +146,13 @@ function AudienceChoice({ content, onAction, busy }) {
         ))}
       </div>
 
-      {content.free_text && (
+      {action.free_text && (
         <div className="flex gap-2">
           <input
             type="text"
             value={custom}
             disabled={busy}
-            placeholder={content.placeholder ?? "…or say who in your own words"}
+            placeholder={action.placeholder ?? "…or say who in your own words"}
             onChange={(event) => setCustom(event.target.value)}
             onKeyDown={(event) => event.key === "Enter" && submit()}
             className="flex-1 rounded border border-slate-300 px-3 py-1.5 text-sm
@@ -199,102 +174,3 @@ function AudienceChoice({ content, onAction, busy }) {
     </div>
   );
 }
-
-/**
- * The preview: what the report will say, before anything is generated.
- *
- * Format buttons sit under it rather than in a toolbar, because choosing a
- * format is the *consequence* of approving this text — and re-rendering into a
- * second format reuses the same approved content, so it cannot say anything
- * different.
- */
-function Preview({ content, onAction, busy }) {
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(content.markdown ?? "");
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access is denied outside a secure context. Saying nothing
-      // would leave the button looking like it worked.
-      setCopied(false);
-    }
-  };
-
-  return (
-    <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-      <div className="flex items-center justify-between border-b border-slate-100
-                      px-4 py-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
-          Draft — version {content.version}
-        </span>
-        <button
-          type="button"
-          onClick={copy}
-          className="rounded border border-slate-200 px-2 py-0.5 text-xs
-                     text-slate-500 hover:border-slate-400 hover:text-slate-700"
-        >
-          {copied ? "Copied" : "Copy"}
-        </button>
-      </div>
-
-      <div className="max-h-[28rem] overflow-y-auto px-4 py-3">
-        {/* Structured blocks when the backend sent them — they carry each
-            cell's origin, which is what makes a value editable. Markdown is
-            the fallback for a preview stored before that existed. */}
-        {content.sections?.length ? (
-          <PreviewBody
-            sections={content.sections}
-            busy={busy}
-            onEdit={(edit) => onAction({ type: "edit_cell", ...edit })}
-            onProseEdit={(edit) => onAction({ type: "edit_prose", ...edit })}
-          />
-        ) : (
-          <Markdown source={content.markdown} />
-        )}
-      </div>
-
-      {(content.rejected ?? []).length > 0 && (
-        <div className="border-t border-slate-100 bg-amber-50/60 px-4 py-2
-                        text-xs text-slate-600">
-          <p className="font-medium">Not applied:</p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4">
-            {content.rejected.map((reason, index) => (
-              <li key={index}>{reason}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 px-4 py-3">
-        <span className="mr-1 text-xs text-slate-500">Generate as</span>
-        {(content.formats ?? ["powerpoint"]).map((format) => (
-          <button
-            key={format}
-            type="button"
-            disabled={busy}
-            onClick={() => onAction({ type: "generate", format })}
-            className="rounded border border-slate-300 bg-white px-2.5 py-1 text-xs
-                       font-medium text-slate-700 hover:border-slate-500
-                       disabled:opacity-40"
-          >
-            {LABELS[format] ?? format}
-          </button>
-        ))}
-        <span className="ml-auto text-xs text-slate-400">
-          …or tell me what to change
-        </span>
-      </div>
-    </div>
-  );
-}
-
-const LABELS = {
-  powerpoint: "PowerPoint",
-  word: "Word",
-  pdf: "PDF",
-  html: "HTML",
-  excel: "Excel",
-};

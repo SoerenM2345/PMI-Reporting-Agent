@@ -1,14 +1,19 @@
-"""Export a saved draft to PowerPoint, Word, PDF, Excel, HTML or Markdown (Phase 4).
+"""Export a saved draft to PowerPoint, Word, PDF, HTML, Excel or Markdown.
 
-Every exporter consumes the `NormalizedDoc` parsed from the *saved draft*, never
-the knowledge base, so an export always matches the text the user approved and
-edited — it cannot "independently regenerate a different narrative" (Scenario 6).
-Markdown is the draft's own text, verbatim; the binary formats are built from the
-same parsed structure with the libraries the report renderers already use, so no
-new dependency is introduced.
+The rule that governs this file: **an export shows the text the user approved.**
+It never independently regenerates a different narrative (Scenario 6). Where a
+section has been hand-edited, that edit is overlaid onto the planned deliverable
+before rendering, and where a whole draft has been replaced the Markdown is
+written out verbatim.
 
-Exporting is an **audit** action (correction #1): it logs a `draft_export` event
-and never changes knowledge or the draft.
+What changed: the binary formats used to be built by re-parsing the draft's
+Markdown into a small document model, which discarded cell provenance, emphasis,
+column types and every chart on the way out — so a "chart" became the line
+`Chart: Workstream Progress`. They now render from the `Deliverable` the draft was
+planned from, via `app/renderers/`, so the exported deck is the designed artifact.
+
+Exporting is an **audit** action: it logs a `draft_export` event and never changes
+knowledge or the draft.
 """
 from __future__ import annotations
 
@@ -55,12 +60,16 @@ def export_draft(project_id: str, draft_id: str, fmt: str, *,
     stem = f"{_slug(draft.title)}_{draft.draft_id}_v{draft.version}"
     path = out_dir / f"{stem}{FORMATS[key]}"
 
-    if key == "markdown" or key == "md":
-        # The draft's own Markdown, byte for byte — the most faithful export there is.
+    if key in ("markdown", "md"):
+        # The draft's own Markdown, byte for byte — the most faithful export
+        # there is, and the only one the user can have edited directly.
         path.write_text(draft.content, encoding="utf-8")
+    elif key in ("excel", "xlsx"):
+        # The workbook is a data dump, not a designed document, so it is still
+        # built from the draft's own parsed structure.
+        _build_xlsx(docmodel.to_document(draft), path)
     else:
-        doc = docmodel.to_document(draft)
-        _BUILDERS[FORMATS[key]](doc, path)
+        _render(draft, project_id, key, path, repos)
 
     repos.audit.append(AuditEvent(
         event_id=f"aud_{uuid.uuid4().hex[:10]}", project_id=project_id,
@@ -73,240 +82,195 @@ def export_draft(project_id: str, draft_id: str, fmt: str, *,
     return path
 
 
-# --------------------------------------------------------------- HTML / MD
-def _build_html(doc: NormalizedDoc, path: Path) -> None:
-    from html import escape
-
-    parts = ["<!doctype html><meta charset='utf-8'>",
-             f"<title>{escape(doc.title)}</title>",
-             "<style>body{font-family:system-ui,sans-serif;max-width:52rem;"
-             "margin:2rem auto;padding:0 1rem;line-height:1.5}"
-             "table{border-collapse:collapse;width:100%;margin:1rem 0}"
-             "th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}"
-             "h2{margin-top:2rem}</style>",
-             f"<h1>{escape(doc.title)}</h1>"]
-    for section in doc.sections:
-        parts.append(f"<h2>{escape(section.heading)}</h2>")
-        for block in section.blocks:
-            if block.type == "paragraph" and block.text:
-                parts.append(f"<p>{escape(block.text)}</p>")
-            elif block.type == "note" or block.type == "chart":
-                parts.append(f"<blockquote>{escape(block.text)}</blockquote>")
-            elif block.type == "bullets":
-                parts.append("<ul>" + "".join(
-                    f"<li>{escape(i)}</li>" for i in block.items) + "</ul>")
-            elif block.type == "table":
-                head = "".join(f"<th>{escape(c)}</th>" for c in block.columns)
-                body = "".join(
-                    "<tr>" + "".join(f"<td>{escape(c)}</td>" for c in row) + "</tr>"
-                    for row in block.rows)
-                parts.append(f"<table><tr>{head}</tr>{body}</table>")
-    path.write_text("\n".join(parts), encoding="utf-8")
-
-
-# ------------------------------------------------------------------- DOCX
-def _build_docx(doc: NormalizedDoc, path: Path) -> None:
-    from docx import Document
-
-    document = Document()
-    document.add_heading(doc.title, level=0)
-    for section in doc.sections:
-        document.add_heading(section.heading or "", level=1)
-        for block in section.blocks:
-            if block.type == "paragraph" and block.text:
-                document.add_paragraph(block.text)
-            elif block.type in ("note", "chart") and block.text:
-                document.add_paragraph(block.text, style="Intense Quote")
-            elif block.type == "bullets":
-                for item in block.items:
-                    document.add_paragraph(item, style="List Bullet")
-            elif block.type == "table" and block.columns:
-                table = document.add_table(rows=1, cols=len(block.columns))
-                table.style = "Light Grid Accent 1"
-                for cell, header in zip(table.rows[0].cells, block.columns):
-                    cell.text = header
-                for row in block.rows:
-                    cells = table.add_row().cells
-                    for cell, value in zip(cells, row):
-                        cell.text = value
-    document.save(str(path))
-
-
-# ------------------------------------------------------------------- PPTX
-def _build_pptx(doc: NormalizedDoc, path: Path) -> None:
-    from pptx import Presentation
-    from pptx.util import Inches, Pt
-
-    prs = Presentation()
-    title_slide = prs.slides.add_slide(prs.slide_layouts[0])
-    title_slide.shapes.title.text = doc.title
-    if doc.subtitle:
-        title_slide.placeholders[1].text = doc.subtitle
-
-    for section in doc.sections:
-        slide = prs.slides.add_slide(prs.slide_layouts[5])  # title only
-        slide.shapes.title.text = section.heading or ""
-        table_block = next((b for b in section.blocks if b.type == "table"
-                            and b.columns), None)
-        if table_block is not None:
-            _pptx_table(slide, table_block, Inches, Pt)
-        else:
-            _pptx_bullets(slide, section, Inches, Pt)
-    prs.save(str(path))
-
-
-def _pptx_bullets(slide, section: DocSection, Inches, Pt) -> None:
-    box = slide.shapes.add_textbox(Inches(0.6), Inches(1.6),
-                                   Inches(8.8), Inches(5.2))
-    tf = box.text_frame
-    tf.word_wrap = True
-    first = True
-    for block in section.blocks:
-        lines = ([block.text] if block.type in ("paragraph", "note", "chart")
-                 and block.text else block.items if block.type == "bullets" else [])
-        for line in lines:
-            para = tf.paragraphs[0] if first else tf.add_paragraph()
-            para.text = line
-            para.font.size = Pt(16)
-            first = False
-    if first:
-        tf.paragraphs[0].text = "—"
-
-
-def _pptx_table(slide, block, Inches, Pt) -> None:
-    rows = min(len(block.rows) + 1, 12)
-    cols = len(block.columns)
-    shape = slide.shapes.add_table(rows, cols, Inches(0.5), Inches(1.6),
-                                   Inches(9.0), Inches(0.4 * rows))
-    table = shape.table
-    for c, header in enumerate(block.columns):
-        table.cell(0, c).text = header
-    for r, row in enumerate(block.rows[:rows - 1], start=1):
-        for c in range(cols):
-            table.cell(r, c).text = row[c] if c < len(row) else ""
-
-
-# ------------------------------------------------------------------- XLSX
-def _build_xlsx(doc: NormalizedDoc, path: Path) -> None:
-    import xlsxwriter
-
-    book = xlsxwriter.Workbook(str(path))
-    bold = book.add_format({"bold": True})
-    wrap = book.add_format({"text_wrap": True, "valign": "top"})
-
-    overview = book.add_worksheet("Report")
-    overview.set_column(0, 0, 100)
-    overview.write(0, 0, doc.title, bold)
-    row = 2
-    used_names: set[str] = set()
-
-    for section in doc.sections:
-        overview.write(row, 0, section.heading, bold)
-        row += 1
-        for block in section.blocks:
-            if block.type == "paragraph" and block.text:
-                overview.write(row, 0, block.text, wrap)
-                row += 1
-            elif block.type == "bullets":
-                for item in block.items:
-                    overview.write(row, 0, f"• {item}", wrap)
-                    row += 1
-            elif block.type == "table" and block.columns:
-                _xlsx_table_sheet(book, bold, section.heading, block, used_names)
-        row += 1
-    book.close()
-
-
-def _xlsx_table_sheet(book, bold, heading: str, block, used: set[str]) -> None:
-    name = _sheet_name(heading or "Table", used)
-    sheet = book.add_worksheet(name)
-    for c, header in enumerate(block.columns):
-        sheet.write(0, c, header, bold)
-        sheet.set_column(c, c, max(12, len(header) + 2))
-    for r, row in enumerate(block.rows, start=1):
-        for c, value in enumerate(row):
-            sheet.write(r, c, value)
-
-
-def _sheet_name(heading: str, used: set[str]) -> str:
-    # Excel sheet names: <=31 chars, no []:*?/\ , unique.
-    name = re.sub(r"[\[\]:*?/\\]", " ", heading).strip()[:31] or "Sheet"
-    base, n = name, 2
-    while name.lower() in used:
-        name = f"{base[:28]} {n}"
-        n += 1
-    used.add(name.lower())
-    return name
-
-
-# -------------------------------------------------------------------- PDF
-def _build_pdf(doc: NormalizedDoc, path: Path) -> None:
-    from fpdf import FPDF
-    from fpdf.enums import XPos, YPos
-
-    def line(pdf, height, text):
-        # Return the cursor to the left margin after each block, or the next
-        # `multi_cell` sees zero remaining width and raises.
-        pdf.multi_cell(0, height, text, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 18)
-    line(pdf, 9, _ascii(doc.title))
-    pdf.ln(2)
-
-    for section in doc.sections:
-        pdf.set_font("Helvetica", "B", 14)
-        line(pdf, 8, _ascii(section.heading))
-        pdf.set_font("Helvetica", size=11)
-        for block in section.blocks:
-            if block.type == "paragraph" and block.text:
-                line(pdf, 6, _ascii(block.text))
-            elif block.type in ("note", "chart") and block.text:
-                pdf.set_font("Helvetica", "I", 11)
-                line(pdf, 6, _ascii(block.text))
-                pdf.set_font("Helvetica", size=11)
-            elif block.type == "bullets":
-                for item in block.items:
-                    line(pdf, 6, _ascii(f"- {item}"))
-            elif block.type == "table" and block.columns:
-                _pdf_table(pdf, block)
-        pdf.ln(3)
-    pdf.output(str(path))
-
-
-def _pdf_table(pdf, block) -> None:
-    epw = pdf.w - 2 * pdf.l_margin
-    ncols = max(len(block.columns), 1)
-    width = epw / ncols
-    pdf.set_font("Helvetica", "B", 9)
-    for header in block.columns:
-        pdf.cell(width, 6, _ascii(header)[:22], border=1)
-    pdf.ln()
-    pdf.set_font("Helvetica", size=9)
-    for row in block.rows[:30]:
-        for c in range(ncols):
-            pdf.cell(width, 6, _ascii(row[c] if c < len(row) else "")[:22], border=1)
-        pdf.ln()
-
-
-def _ascii(text: str) -> str:
-    """FPDF's core fonts are Latin-1, and it cannot wrap a word wider than the page.
-
-    So we drop characters the font can't encode *and* break any over-long token (a
-    long citation or file path) with a space, or `multi_cell` raises "not enough
-    horizontal space to render a single character".
-    """
-    s = (text or "").encode("latin-1", "replace").decode("latin-1")
-    return re.sub(r"(\S{35})(?=\S)", r"\1 ", s)
-
-
+# ------------------------------------------------------------------ helpers
 def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", text or "report").strip("_")[:40] or "report"
 
 
-_BUILDERS = {
-    ".html": _build_html, ".docx": _build_docx, ".pptx": _build_pptx,
-    ".xlsx": _build_xlsx, ".pdf": _build_pdf,
-}
+def _render(draft: DraftRecord, project_id: str, key: str, path: Path,
+            repos: Repositories) -> None:
+    """Render the planned deliverable, with the user's edits applied.
+
+    Falls back to the Markdown-parsing path for a draft written before the
+    planning engine existed, or one whose deliverable can no longer be loaded —
+    an old draft must still export rather than 500.
+    """
+    from app.renderers import registry
+
+    deliverable, context = _load(draft, project_id, repos)
+    if deliverable is None or context is None:
+        _render_legacy(draft, key, path)
+        return
+
+    _apply_user_edits(deliverable, draft)
+    result = registry.render(deliverable, context, path.parent,
+                             registry.normalize(key))
+    if result.path != path:
+        result.path.replace(path)
+
+
+def _load(draft: DraftRecord, project_id: str, repos: Repositories):
+    """The deliverable this draft was planned from, and a context to render it."""
+    if not draft.deliverable_id:
+        return None, None
+    from app.context import builder
+    from app.deliverable import store
+
+    try:
+        deliverable = store.load(project_id=project_id,
+                                 version=draft.deliverable_version)
+        if deliverable is None or deliverable.deliverable_id != draft.deliverable_id:
+            deliverable = store.load(project_id=project_id)
+        if deliverable is None:
+            return None, None
+        context = builder.build_for_project(project_id, "", repos=repos)
+        return deliverable, context
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("could not load the deliverable for draft %s (%s); "
+                    "exporting from the draft text instead", draft.draft_id, exc)
+        return None, None
+
+
+def _apply_user_edits(deliverable, draft: DraftRecord) -> None:
+    """Overlay hand-edited section text onto the pages it belongs to.
+
+    The user's words replace the page's prose and its title, and the page's
+    charts and tables are kept — an edit to the commentary is not a request to
+    delete the chart it was commenting on.
+    """
+    from app.deliverable.model import TextElement
+
+    for section in draft.sections:
+        if section.origin != "user":
+            continue
+        page = deliverable.page(section.section_id)
+        if page is None:
+            continue
+
+        heading, body = _split_heading(section.content)
+        if heading:
+            page.title = heading
+        page.elements = [e for e in page.elements
+                         if e.role not in ("body", "bullets", "callout", "quote")]
+        if body:
+            page.elements.insert(0, TextElement(
+                element_id=f"{page.page_id}-user", role="body", text=body,
+                authored_by="user", evidence_ids=list(page.evidence_ids),
+                prominence="primary"))
+        page.warnings.append("This page carries the user's own wording.")
+
+
+def _split_heading(markdown: str) -> tuple[str, str]:
+    """A section's edited Markdown, as `(heading, body)`."""
+    lines = [line for line in (markdown or "").splitlines()]
+    heading = ""
+    body: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not heading and stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            continue
+        body.append(line)
+    return heading, "\n".join(body).strip()
+
+
+def _render_legacy(draft: DraftRecord, key: str, path: Path) -> None:
+    """The Markdown-parsing path, kept only for drafts with no deliverable.
+
+    Deliberately plain. A draft planned by the current engine never reaches
+    here, and one that does is being exported from text alone, so promising a
+    designed artifact would be a lie.
+    """
+    from app.renderers import registry
+    from app.deliverable.model import Deliverable, PageDesign, TextElement
+
+    doc = docmodel.to_document(draft)
+    deliverable = Deliverable(
+        deliverable_id=f"legacy_{draft.draft_id}", title=doc.title,
+        primary_format=registry.normalize(key), planned_by="fallback",
+        warnings=["This draft predates the planning engine, so it was exported "
+                  "from its text alone: it carries no charts, no validated "
+                  "figures and no source notes."],
+        pages=[PageDesign(
+            page_id=f"p{index}", index=index, title=section.heading,
+            purpose="content", elements=[TextElement(
+                element_id=f"p{index}-body", role="body", authored_by="user",
+                text=_flatten(section))])
+            for index, section in enumerate(doc.sections)])
+
+    context = _bare_context()
+    result = registry.render(deliverable, context, path.parent,
+                             registry.normalize(key))
+    if result.path != path:
+        result.path.replace(path)
+
+
+def _flatten(section) -> str:
+    parts: list[str] = []
+    for block in section.blocks:
+        if getattr(block, "text", ""):
+            parts.append(block.text)
+        for item in getattr(block, "items", []) or []:
+            parts.append(f"\u2022  {item}")
+        for row in getattr(block, "rows", []) or []:
+            parts.append("  ".join(str(cell) for cell in row))
+    return "\n".join(parts)
+
+
+def _bare_context():
+    from app.context.schemas import GenerationContext
+    from app.templates import template_registry
+
+    context = GenerationContext(scope="project")
+    context.template_reference = template_registry.default()
+    context.brand_system = context.template_reference.brand
+    return context
+
+
+def _build_xlsx(doc: NormalizedDoc, path: Path) -> None:
+    """A workbook of the draft's tables, one sheet per section that has one.
+
+    Kept on the parsed-Markdown path deliberately: a spreadsheet is a data dump
+    for someone who wants to pivot it, not a designed artifact, and the draft's
+    own tables are exactly what they asked for.
+    """
+    import xlsxwriter
+
+    book = xlsxwriter.Workbook(str(path), {"in_memory": True})
+    header = book.add_format({"bold": True, "bg_color": "#046A38",
+                              "font_color": "#FFFFFF", "border": 1})
+    cell = book.add_format({"border": 1, "valign": "top", "text_wrap": True})
+
+    wrote = False
+    for index, section in enumerate(doc.sections, start=1):
+        tables = [b for b in section.blocks if b.type == "table" and b.rows]
+        if not tables:
+            continue
+        sheet = book.add_worksheet(_sheet_name(section.heading, index))
+        row_index = 0
+        for table in tables:
+            for column_index, column in enumerate(table.columns):
+                sheet.write(row_index, column_index, column, header)
+            sheet.freeze_panes(row_index + 1, 0)
+            for row in table.rows:
+                row_index += 1
+                for column_index, value in enumerate(row):
+                    sheet.write(row_index, column_index, value, cell)
+            row_index += 2
+            sheet.set_column(0, max(len(table.columns) - 1, 0), 28)
+        wrote = True
+
+    if not wrote:
+        sheet = book.add_worksheet("Report")
+        sheet.write(0, 0, doc.title, header)
+        for index, section in enumerate(doc.sections, start=1):
+            sheet.write(index, 0, section.heading, cell)
+        sheet.set_column(0, 0, 60)
+    book.close()
+
+
+def _sheet_name(heading: str, index: int) -> str:
+    """Excel forbids []:*?/\\ and caps sheet names at 31 characters."""
+    cleaned = re.sub(r"[\[\]:*?/\\]", " ", heading or f"Section {index}").strip()
+    return (cleaned[:28] + f" {index}") if len(cleaned) > 28 else (
+        cleaned or f"Section {index}")

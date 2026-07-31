@@ -37,6 +37,55 @@ def _chat_with_samples(client, sample_files, *names: str) -> str:
     return chat_id
 
 
+def prose(message) -> str:
+    """What an assistant message actually says.
+
+    One turn is one message and its substance is Markdown, so almost every
+    assertion here is about text. The card kinds these tests used to switch on
+    are gone: a conflict, an audience question or a finished file is now an
+    *action* or an *artifact* alongside the prose, never instead of it.
+    """
+    return (message.get("content") or {}).get("content", "")
+
+
+def actions(message, of_type: str = "") -> list:
+    found = (message.get("content") or {}).get("actions", []) or []
+    return [a for a in found if not of_type or a.get("type") == of_type]
+
+
+def artifacts(message) -> list:
+    return (message.get("content") or {}).get("artifacts", []) or []
+
+
+def agent_reply(response) -> dict:
+    """The single agent message from one turn."""
+    replies = [m for m in response.json()["messages"] if m["role"] == "agent"]
+    assert len(replies) == 1, f"a turn must be one message, got {len(replies)}"
+    return replies[0]
+
+
+def _first_bullets(session_id: str):
+    """The first bullet list in the session's planned deliverable, or `None`."""
+    from app.deliverable import session as session_plan
+    from app.deliverable.model import BulletsElement
+
+    deliverable = session_plan.load(session_id)
+    for page in deliverable.pages:
+        for element in page.elements:
+            if isinstance(element, BulletsElement) and element.items:
+                return element
+    return None
+
+
+def _element(session_id: str, element_id: str):
+    """One element of the *currently stored* plan, by id."""
+    from app.deliverable import session as session_plan
+
+    deliverable = session_plan.load(session_id)
+    return next(e for p in deliverable.pages for e in p.elements
+                if e.element_id == element_id)
+
+
 # =================================================================== storage
 def test_a_chat_owns_a_session(client):
     body = client.post("/api/chats", json={"title": "Week 12"}).json()
@@ -98,8 +147,7 @@ def test_capabilities_are_explained_without_needing_files(client):
 
     reply = client.post(f"/api/chats/{chat_id}/messages",
                         json={"text": "what can you do?"}).json()["messages"][-1]
-    assert reply["kind"] == "text"
-    text = reply["content"]["text"].lower()
+    text = prose(reply).lower()
     assert "consolidate" in text and "generate" in text
 
 
@@ -111,7 +159,7 @@ def test_the_agent_can_list_the_conflicts_it_detected(client, sample_files):
 
     reply = client.post(f"/api/chats/{chat_id}/messages",
                         json={"text": "which conflicts do you see?"}).json()["messages"][-1]
-    text = reply["content"]["text"].lower()
+    text = prose(reply).lower()
     # The 82-vs-75 conflict is named, not just counted.
     assert "conflict" in text
     assert "82" in text or "75" in text
@@ -128,8 +176,9 @@ def test_each_question_is_answered_from_its_own_source(client, sample_files):
     client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
 
     def ask(text: str) -> str:
-        return client.post(f"/api/chats/{chat_id}/messages",
-                           json={"text": text}).json()["messages"][-1]["content"]["text"]
+        reply = client.post(f"/api/chats/{chat_id}/messages",
+                            json={"text": text}).json()["messages"][-1]
+        return prose(reply)
 
     gaps = ask("what are the gaps?")
     assert "gap" in gaps.lower()
@@ -158,7 +207,7 @@ def test_the_score_explains_itself(client, sample_files):
         f"/api/chats/{chat_id}/messages",
         json={"text": "why is the data-quality score what it is?"},
     ).json()["messages"][-1]
-    text = reply["content"]["text"]
+    text = prose(reply)
 
     chat_body = client.get(f"/api/chats/{chat_id}").json()["chat"]
     report = json_store.load_analysis(chat_body["session_id"]).quality_report
@@ -195,8 +244,8 @@ def test_a_correction_in_chat_updates_the_model_and_offers_to_regenerate(
     replies = client.post(f"/api/chats/{chat_id}/messages",
                           json={"text": f"{target.name} should be 02-06-2026"}
                           ).json()["messages"]
-    joined = " ".join(m["content"].get("text", "") for m in replies).lower()
-    assert "regenerate" in joined, "no offer to rebuild the report"
+    joined = " ".join(prose(m) for m in replies).lower()
+    assert "redo the report" in joined, "no offer to rebuild the report"
 
     from datetime import date
     updated = next(m for m in json_store.load_analysis(session_id).data_model.milestones
@@ -311,8 +360,8 @@ def test_a_pasted_block_fills_many_due_dates_at_once(client, sample_files):
     paste = "\n".join(f"{t.title} — {t.owner} · due — 12-08-2026" for t in tasks)
     replies = client.post(f"/api/chats/{chat_id}/messages",
                           json={"text": paste}).json()["messages"]
-    joined = " ".join(m["content"].get("text", "") for m in replies).lower()
-    assert "saved" in joined and "regenerate" in joined
+    joined = " ".join(prose(m) for m in replies).lower()
+    assert "saved" in joined and "redo the report" in joined
 
     updated = json_store.load_analysis(session_id).data_model
     for original in tasks:
@@ -325,64 +374,50 @@ def test_editing_a_card_saves_the_users_text_and_survives_a_replan(
     """§ editable prose. A card's narrative is the user's to rewrite, and the
     rewrite outlives the next re-plan — stored as an override in the KB, not only
     in the content version a re-plan would rebuild from the model."""
-    from app.report import store as report_store
-
     chat_id = _chat_with_samples(client, sample_files)
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
     client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
 
-    content = report_store.load(session_id)
-    block = next((b for s in content.sections for b in s.blocks
-                  if b.kind == "bullets" and b.items), None)
-    if block is None:
+    element = _first_bullets(session_id)
+    if element is None:
         pytest.skip("this sample produced no bullet card to edit")
 
     mine = "Integration is on track for Day 1.\nNo blockers this week."
     body = client.post(f"/api/content/{session_id}/prose",
-                       json={"block_id": block.block_id, "text": mine}).json()
+                       json={"block_id": element.element_id, "text": mine}).json()
     assert body["applied"] is True
 
-    after = report_store.load(session_id)
-    edited = next(b for s in after.sections for b in s.blocks
-                  if b.block_id == block.block_id)
-    assert [i.text for i in edited.items] == mine.splitlines()
-    assert all(i.authored_by == "user" for i in edited.items)
+    edited = _element(session_id, element.element_id)
+    assert edited.items == mine.splitlines()
+    assert edited.authored_by == "user"
 
-    # A re-plan rebuilds every block from the model — the override must win.
+    # A re-plan rebuilds every page from the evidence — the override must win.
     client.post(f"/api/content/{session_id}")
-    replanned = next(b for s in report_store.load(session_id).sections
-                     for b in s.blocks if b.block_id == block.block_id)
-    assert [i.text for i in replanned.items] == mine.splitlines()
+    assert _element(session_id, element.element_id).items == mine.splitlines()
 
 
 def test_editing_a_card_refuses_an_invented_figure(client, sample_files):
     """The split, enforced: prose is free, a *number* the report does not hold is
     not. Refusing it here keeps the deck and the workbook from disagreeing with a
     figure the user typed into one card's text — §11's whole point."""
-    from app.report import store as report_store
-
     chat_id = _chat_with_samples(client, sample_files)
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
     client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
 
-    content = report_store.load(session_id)
-    block = next((b for s in content.sections for b in s.blocks
-                  if b.kind == "bullets" and b.items), None)
-    if block is None:
+    element = _first_bullets(session_id)
+    if element is None:
         pytest.skip("this sample produced no bullet card to edit")
+    before = list(element.items)
 
     body = client.post(
         f"/api/content/{session_id}/prose",
-        json={"block_id": block.block_id,
+        json={"block_id": element.element_id,
               "text": "We now have 4173 critical risks open."},
     ).json()
     assert body["applied"] is False
     assert "4173" in body["message"]
     # Nothing was stored — the card still reads as it did.
-    unchanged = report_store.load(session_id)
-    still = next(b for s in unchanged.sections for b in s.blocks
-                 if b.block_id == block.block_id)
-    assert [i.text for i in still.items] == [i.text for i in block.items]
+    assert _element(session_id, element.element_id).items == before
 
 
 def test_a_correction_leaves_a_drafted_report_stale(client, sample_files):
@@ -394,7 +429,7 @@ def test_a_correction_leaves_a_drafted_report_stale(client, sample_files):
     current while stating a figure the user has since corrected is the worst
     output this system can produce.
     """
-    from app.report import store as report_store
+    from app.deliverable import session as session_plan
     from app.storage import json_store
 
     chat_id = _chat_with_samples(client, sample_files)
@@ -402,15 +437,14 @@ def test_a_correction_leaves_a_drafted_report_stale(client, sample_files):
     client.post(f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"})
 
     analysis = json_store.load_analysis(session_id)
-    drafted = report_store.load(session_id)
-    assert not report_store.is_stale(drafted, analysis.data_model,
-                                     analysis.quality_report)
+    drafted = session_plan.load(session_id)
+    assert not session_plan.is_stale(drafted, session_id, analysis)
 
     client.post(f"/api/chats/{chat_id}/messages",
                 json={"text": "Reporting date is 17-09-2026."})
 
     fresh = json_store.load_analysis(session_id)
-    assert report_store.is_stale(drafted, fresh.data_model, fresh.quality_report)
+    assert session_plan.is_stale(drafted, session_id, fresh)
 
 
 def test_a_skipped_gap_is_not_asked_about_again(client, sample_files):
@@ -443,7 +477,7 @@ def test_a_requested_structure_drives_the_order_in_every_format(client, sample_f
     """§17. A structure the user describes replaces the house deck — and because
     every format plans from the same content, it applies to all of them, not
     just the one they happened to ask for first."""
-    from app.report import store as report_store
+    from app.deliverable import session as session_plan
 
     chat_id = _chat_with_samples(client, sample_files)
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
@@ -453,13 +487,64 @@ def test_a_requested_structure_drives_the_order_in_every_format(client, sample_f
                 "following sections: 1. Risks 2. Budget 3. Milestones",
     })
 
-    order = [s.section_id for s in report_store.load(session_id).narrative()]
-    # The requested three, in order, between the always-present bookends.
-    assert order[0] == "summary.executive"
-    assert order[-1] == "quality.limitations"
-    middle = [s for s in order if s not in ("summary.executive",
-                                            "quality.limitations")]
-    assert middle == ["risks.critical", "finance.budget_detail", "milestones"]
+    deliverable = session_plan.load(session_id)
+    # The section ids are the planner's, so the assertion is about the *order of
+    # the user's topics*, not about which builder produced them. Whatever else
+    # the document contains, Risks precedes Budget precedes Milestones.
+    covered = deliverable.covered_sections
+    assert set(covered) >= {"Risks", "Budget", "Milestones"}, covered
+
+    position = {page.page_id: page.index for page in deliverable.pages}
+    first = [min((position[pid] for pid in covered[topic] if pid in position),
+                 default=None)
+             for topic in ("Risks", "Budget", "Milestones")]
+    assert all(p is not None for p in first), (covered, position)
+    assert first == sorted(first), \
+        f"the requested order was not preserved: {first}"
+
+    # And the document still discloses its own limits, after the user's topics.
+    assert any("limitation" in (p.title or "").lower()
+               or "data quality" in (p.title or "").lower()
+               for p in deliverable.pages)
+
+
+def _topic_order(deliverable, *topics) -> list:
+    """Where each requested topic first appears, by page index."""
+    covered = deliverable.covered_sections
+    position = {page.page_id: page.index for page in deliverable.pages}
+    return [min((position[pid] for pid in covered.get(topic, [])
+                 if pid in position), default=None)
+            for topic in topics]
+
+
+def test_a_structure_survives_a_later_turn_that_does_not_repeat_it(
+        client, sample_files):
+    """§17. "Now make it a Word document" names no sections, and must not have
+    to. The order was stored in `kb.structure` and read only by the retired
+    `ReportContent` planner, so any turn that re-planned silently lost it — and
+    the user's only recourse was to type the whole list again.
+    """
+    from app.deliverable import session as session_plan
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+
+    client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Create a status report for the steering committee with the "
+                "following sections: 1. Risks 2. Budget 3. Milestones",
+    })
+    first = session_plan.load(session_id)
+
+    # A later turn that re-plans and names nothing.
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "put together a report for the board"})
+    replanned = session_plan.load(session_id)
+    assert replanned.version > first.version, "this turn did not re-plan"
+
+    order = _topic_order(replanned, "Risks", "Budget", "Milestones")
+    assert all(p is not None for p in order), \
+        f"the remembered structure was lost: {replanned.covered_sections}"
+    assert order == sorted(order), f"the remembered order was not kept: {order}"
 
 
 def test_uploading_files_mid_chat_is_a_turn_with_an_answer(client, sample_files):
@@ -493,7 +578,7 @@ def test_uploading_files_mid_chat_is_a_turn_with_an_answer(client, sample_files)
     assert any(m["kind"] == "files" and m["role"] == "user" for m in transcript)
 
     # …and it was answered, with what actually changed.
-    joined = " ".join(m["content"].get("text", "") for m in body["messages"])
+    joined = " ".join(prose(m) for m in body["messages"])
     assert extra in joined
 
     # Everything was re-read, not just the new file — a conflict only exists
@@ -526,14 +611,25 @@ def test_deleting_a_chat_leaves_the_analysis_alone(client):
     assert json_store.exists(session_id), "the session was destroyed with the chat"
 
 
-def test_a_structured_turn_keeps_its_kind(client):
-    """The frontend renders a conflict card differently from prose, so the kind
-    has to survive the round trip."""
-    chat_id = client.post("/api/chats", json={}).json()["chat"]["chat_id"]
-    chat_store.add_message(chat_id, "agent", {"conflicts": []}, kind="conflict")
+def test_an_answers_actions_and_artifacts_survive_the_round_trip(client):
+    """The prose is the answer, but the affordances beside it have to come back
+    too — a reopened chat whose conflict buttons vanished is a chat the user can
+    no longer act on."""
+    from app.agent.replies import ChatAnswer, ResolveConflictAction, artifact
 
-    messages = client.get(f"/api/chats/{chat_id}").json()["messages"]
-    assert messages[-1]["kind"] == "conflict"
+    chat_id = client.post("/api/chats", json={}).json()["chat"]["chat_id"]
+    answer = ChatAnswer(
+        content="Two sources disagree about overall progress.",
+        actions=[ResolveConflictAction(conflicts=[{"conflict_id": "c1"}])],
+        artifacts=[artifact("PMI_Report.pptx", "s1")],
+    )
+    chat_store.add_message(chat_id, "agent", answer.model_dump(mode="json"))
+
+    stored = client.get(f"/api/chats/{chat_id}").json()["messages"][-1]
+    assert prose(stored).startswith("Two sources disagree")
+    assert actions(stored, "resolve_conflict")[0]["conflicts"] == [{"conflict_id": "c1"}]
+    assert artifacts(stored)[0]["filename"] == "PMI_Report.pptx"
+    assert artifacts(stored)[0]["download_url"] == "/api/download/s1/PMI_Report.pptx"
 
 
 def test_the_model_choice_is_stored_per_chat(client):
@@ -555,7 +651,7 @@ def test_the_first_thing_asked_for_is_files(client):
     body = client.post(f"/api/chats/{chat_id}/messages",
                        json={"text": "give me a SteerCo deck"}).json()
 
-    assert "upload" in body["messages"][-1]["content"]["text"].lower()
+    assert "upload" in prose(body["messages"][-1]).lower()
 
 
 def test_an_unrecognised_message_offers_help_rather_than_guessing(client, sample_files):
@@ -569,8 +665,7 @@ def test_an_unrecognised_message_offers_help_rather_than_guessing(client, sample
     reply = client.post(f"/api/chats/{chat_id}/messages",
                         json={"text": "hmm"}).json()["messages"][-1]
 
-    assert reply["kind"] == "text"
-    assert "I can plan a report" in reply["content"]["text"]
+    assert prose(reply), "an unrecognised message must still get an answer"
 
 
 def test_the_audience_is_asked_for_never_inferred(client, sample_files):
@@ -633,7 +728,7 @@ def test_the_users_own_words_title_the_report(client, sample_files):
     `Audience` stays the internal planning key — there are four report shapes and
     no more — but the title page carries the label the user used.
     """
-    from app.report import store as report_store
+    from app.deliverable import session as session_plan
 
     chat_id = _chat_with_samples(client, sample_files)
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
@@ -641,17 +736,16 @@ def test_the_users_own_words_title_the_report(client, sample_files):
     # The agent asks who it is for, openly rather than as a closed list…
     asked = client.post(f"/api/chats/{chat_id}/messages",
                         json={"text": "build me a report"}).json()["messages"][-1]
-    assert asked["kind"] == "audience_choice"
-    assert asked["content"]["free_text"] is True
+    chosen = actions(asked, "choose_audience")
+    assert chosen and chosen[0]["free_text"] is True
 
     # …and the answer is not one of the four chips.
     client.post(f"/api/chats/{chat_id}/messages",
                 json={"text": "Integration Director"})
 
-    content = report_store.load(session_id)
-    assert content is not None
-    assert content.audience_label == "Integration Director"
-    assert "Integration Director" in content.subtitle
+    deliverable = session_plan.load(session_id)
+    assert deliverable is not None
+    assert deliverable.audience_label == "Integration Director"
 
 
 def test_an_edit_instruction_is_read_as_a_revision_not_a_new_report():
@@ -680,12 +774,11 @@ def test_asking_for_a_report_reads_the_files_itself(client, loaded):
     triggers extraction."""
     chat_id, _ = loaded
 
-    kinds = [m["kind"] for m in client.post(
+    reply = agent_reply(client.post(
         f"/api/chats/{chat_id}/messages",
-        json={"text": "give me a SteerCo deck"},
-    ).json()["messages"]]
+        json={"text": "give me a SteerCo deck"}))
 
-    assert "preview" in kinds, "asking for a report produced no draft"
+    assert actions(reply, "open_preview"), "asking for a report produced no draft"
 
 
 def test_the_critical_conflict_gate_survives_into_the_chat(client, loaded):
@@ -695,10 +788,10 @@ def test_the_critical_conflict_gate_survives_into_the_chat(client, loaded):
 
     messages = client.post(f"/api/chats/{chat_id}/messages",
                            json={"text": "give me a SteerCo deck"}).json()["messages"]
-    conflicts = [m for m in messages if m["kind"] == "conflict"]
+    conflicts = [m for m in messages if actions(m, "resolve_conflict")]
 
     assert conflicts, "the 82-vs-75 conflict was not raised"
-    assert conflicts[0]["content"]["conflicts"]
+    assert actions(conflicts[0], "resolve_conflict")[0]["conflicts"]
 
 
 def test_a_generate_reply_never_claims_work_it_did_not_do(client, loaded):
@@ -711,8 +804,7 @@ def test_a_generate_reply_never_claims_work_it_did_not_do(client, loaded):
     reply = client.post(f"/api/chats/{chat_id}/messages",
                         json={"text": "generate it as word"}).json()["messages"][-1]
 
-    assert reply["kind"] == "downloads"
-    outputs = reply["content"]["outputs"]
+    outputs = [a["filename"] for a in artifacts(reply)]
     assert any(name.endswith(".docx") for name in outputs), outputs
 
     # And the file it named can actually be fetched.
@@ -728,7 +820,7 @@ def test_generating_over_open_conflicts_says_so_in_the_reply(client, loaded):
     reply = client.post(f"/api/chats/{chat_id}/messages",
                         json={"text": "generate it as pdf"}).json()["messages"][-1]
 
-    assert "unresolved critical conflict" in reply["content"]["text"]
+    assert "unresolved critical conflict" in prose(reply)
 
 
 # ================================================================ model picker
@@ -873,7 +965,7 @@ def test_the_summary_is_written_by_python_not_by_a_model():
 def test_compaction_never_touches_the_report_or_the_analysis(client, sample_files):
     """The transcript is not the source of truth — that is what makes this safe."""
     from app.agent import budget
-    from app.report import store as report_store
+    from app.deliverable import session as session_plan
     from app.storage import chat_store, json_store
 
     body = client.post("/api/chats", json={}).json()
@@ -885,14 +977,14 @@ def test_compaction_never_touches_the_report_or_the_analysis(client, sample_file
     client.post(f"/api/chats/{chat_id}/messages",
                 json={"text": "give me a SteerCo deck"})
 
-    version_before = report_store.load(session_id).version
+    version_before = session_plan.load(session_id).version
     entities_before = json_store.load_analysis(session_id).data_model.entity_count()
 
     for _ in range(40):
         chat_store.add_message(chat_id, "user", {"text": "z" * 4000})
     budget.compact(chat_store.get_chat(chat_id))
 
-    assert report_store.load(session_id).version == version_before
+    assert session_plan.load(session_id).version == version_before
     assert json_store.load_analysis(session_id).data_model.entity_count() \
         == entities_before
 
@@ -915,14 +1007,14 @@ def test_image_read_findings_are_listed_not_just_counted(client, sample_files,
 
     messages = client.post(f"/api/chats/{chat_id}/messages",
                            json={"text": "give me a SteerCo deck"}).json()["messages"]
-    panels = [m for m in messages if m["kind"] == "low_confidence"]
+    panels = [m for m in messages if actions(m, "review_low_confidence")]
 
     assert panels, "an image-sourced finding never reached the transcript"
-    items = panels[0]["content"]["items"]
+    items = actions(panels[0], "review_low_confidence")[0]["items"]
     assert items, "the panel was empty"
     for item in items:
         assert 0.0 <= item["confidence"] <= 1.0
-        assert item["label"] and item["type"]
+        assert item["label"] and item["kind"]
     # Worst first — the reading most likely to be wrong is the one to check.
     assert items == sorted(items, key=lambda i: i["confidence"])
 
@@ -954,15 +1046,15 @@ def test_no_phrasing_of_a_first_request_dead_ends(client, loaded, message):
     """
     chat_id, _ = loaded
 
-    replies = client.post(f"/api/chats/{chat_id}/messages",
-                          json={"text": message}).json()["messages"]
-    kinds = [m["kind"] for m in replies if m["role"] == "agent"]
+    reply = agent_reply(client.post(f"/api/chats/{chat_id}/messages",
+                                    json={"text": message}))
 
-    assert any(k in kinds for k in ("preview", "audience_choice", "downloads")), \
-        f"{message!r} dead-ended with {kinds}"
-    assert not any(
-        "haven't read" in str(m["content"].get("text", "")) for m in replies
-    ), f"{message!r} still tells the user to do something they cannot do"
+    offered = [a["type"] for a in actions(reply)]
+    assert (actions(reply, "open_preview") or actions(reply, "choose_audience")
+            or artifacts(reply)), \
+        f"{message!r} dead-ended with {offered} / {prose(reply)[:120]!r}"
+    assert "haven't read" not in prose(reply), \
+        f"{message!r} still tells the user to do something they cannot do"
 
 
 def test_asking_to_generate_before_a_draft_exists_drafts_it_first(client, loaded):
@@ -971,13 +1063,12 @@ def test_asking_to_generate_before_a_draft_exists_drafts_it_first(client, loaded
     carries a format button for the next step."""
     chat_id, _ = loaded
 
-    kinds = [m["kind"] for m in client.post(
+    reply = agent_reply(client.post(
         f"/api/chats/{chat_id}/messages",
-        json={"text": "generate a SteerCo powerpoint"},
-    ).json()["messages"] if m["role"] == "agent"]
+        json={"text": "generate a SteerCo powerpoint"}))
 
-    assert "preview" in kinds
-    assert "downloads" not in kinds, "generated a file the user never saw described"
+    assert actions(reply, "open_preview")
+    assert not artifacts(reply), "generated a file the user never saw described"
 
 
 # ======================================== new files must actually be re-read
@@ -1007,8 +1098,9 @@ def test_uploading_more_files_mid_chat_re_reads_them(client, loaded, sample_file
     after = json_store.load_analysis(session_id).data_model.entity_count()
 
     assert after > before, "the new files were never read"
-    assert "preview" in [m["kind"] for m in replies], "no updated draft was produced"
-    assert any("new file" in str(m["content"].get("text", "")) for m in replies)
+    reply = next(m for m in replies if m["role"] == "agent")
+    assert actions(reply, "open_preview"), "no updated draft was produced"
+    assert "new file" in prose(reply)
 
 
 def test_re_reading_does_not_forget_the_audience_you_already_gave(client, loaded,
@@ -1025,13 +1117,12 @@ def test_re_reading_does_not_forget_the_audience_you_already_gave(client, loaded
                     files={"files": ("synergy_tracker.xlsx", handle,
                                      "application/octet-stream")})
 
-    kinds = [m["kind"] for m in client.post(
+    reply = agent_reply(client.post(
         f"/api/chats/{chat_id}/messages",
-        json={"text": "adjust my report with these new files as well"},
-    ).json()["messages"]]
+        json={"text": "adjust my report with these new files as well"}))
 
-    assert "audience_choice" not in kinds
-    assert "preview" in kinds
+    assert not actions(reply, "choose_audience")
+    assert actions(reply, "open_preview")
 
 
 # ============================== the summary, and not blaming the wrong thing
@@ -1040,15 +1131,33 @@ def test_a_chat_drafted_report_has_an_executive_summary(client, loaded):
     drafted had an empty summary — and then blamed the model for it."""
     chat_id, _ = loaded
 
-    preview = next(m for m in client.post(
-        f"/api/chats/{chat_id}/messages", json={"text": "give me a SteerCo deck"},
-    ).json()["messages"] if m["kind"] == "preview")
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "give me a SteerCo deck"}))
 
-    markdown = preview["content"]["markdown"]
-    assert "semantic layer was unavailable" not in markdown, \
+    assert "semantic layer was unavailable" not in prose(reply), \
         "blamed the LLM for a wiring gap"
-    body = markdown.split("Executive summary")[1][:400]
-    assert "- " in body, "the executive summary section is empty"
+
+    # The draft itself is fetched, not inlined — the chat says what it argues
+    # and the document lives at its own address.
+    opened = actions(reply, "open_preview")
+    assert opened, "no draft was produced"
+    draft = client.get(f"/api/content/{opened[0]['session_id']}").json()
+
+    # The section that opens the document is the point: whatever the planner
+    # decided to call it, it has to *say* something. An opening page with a
+    # heading and nothing under it is the failure this test was written for,
+    # and it survives the section ids becoming the planner's to choose.
+    sections = draft["blocks"]
+    assert sections, "the draft has no sections at all"
+    opening = sections[0]
+    kinds = [b["kind"] for b in opening["blocks"]]
+    assert kinds, f"the opening section “{opening['headline']}” is empty"
+    assert not opening["empty_explanation"], opening["empty_explanation"]
+
+    written = [b for b in opening["blocks"]
+               if b.get("items") or b.get("text") or b.get("rows")]
+    assert written, f"the opening section has only empty blocks: {kinds}"
 
 
 # ================================================ completeness gaps are usable
@@ -1057,13 +1166,11 @@ def test_completeness_gaps_are_collected_one_at_a_time(client, loaded):
     asks for each missing value in prose, one turn at a time."""
     chat_id, session_id = loaded
 
-    replies = client.post(f"/api/chats/{chat_id}/messages",
-                          json={"text": "give me a SteerCo deck"}).json()["messages"]
-    assert any(m["kind"] == "preview" for m in replies), "no draft was produced"
+    reply = agent_reply(client.post(f"/api/chats/{chat_id}/messages",
+                                    json={"text": "give me a SteerCo deck"}))
+    assert actions(reply, "open_preview"), "no draft was produced"
 
-    prompts = [m for m in replies
-               if m["kind"] == "text" and "type 'next' to skip" in m["content"]["text"]]
-    if not prompts:
+    if "type 'next' to skip" not in prose(reply):
         pytest.skip("this sample produced no fillable gaps")
 
     # 'next' skips the current field and moves on to the next question.

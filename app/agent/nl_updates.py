@@ -98,9 +98,33 @@ _BARE_FIELD_WORDS = {
 }
 
 
+#: How people signal that they are overriding something they or the files said
+#: earlier. Mirrors `app/project/classify.py::_CORRECTION`, which has had this
+#: vocabulary all along on the other stack.
+_CORRECTION_PREFIX = re.compile(
+    r"^\s*(?:correction|to be clear|just to be clear|actually|in fact|"
+    r"i meant|i said|sorry|no)\s*[,:—-]?\s+", re.I)
+
+
+def strip_correction_prefix(text: str) -> tuple[str, bool]:
+    """`(sentence, was_a_correction)`.
+
+    "Correction: the target is HealthSystems AG" used to reach nothing at all.
+    `match_project_field` compares the *whole* left-hand side and strips only a
+    leading article, so the target read as `"correction: the target"` and
+    matched no field — and because `apply` still returned a non-`None` result,
+    the turn dead-ended at an apology instead of falling through to anything
+    else. The most natural way to signal an override was the one phrasing that
+    guaranteed it would be ignored.
+    """
+    stripped = _CORRECTION_PREFIX.sub("", text or "", count=1)
+    return stripped, stripped != (text or "")
+
+
 def parse(text: str) -> Optional[Update]:
     """The sentence as an intended update, or `None` if it is not one."""
-    stripped = (text or "").strip().rstrip(".!")
+    stripped, _ = strip_correction_prefix(text)
+    stripped = stripped.strip().rstrip(".!")
     if not stripped:
         return None
 
@@ -169,10 +193,17 @@ def expand_number(value: str) -> Optional[float]:
 
 
 def is_name(value: str) -> bool:
-    """A person's name or a short label — one to four capitalised-ish words."""
+    """A person's name or a short label.
+
+    Six words rather than four, and `&`/`,` allowed: company names are the
+    common case here and they are longer than people's. "Health Systems
+    Deutschland Holding AG" and "Müller, Weber & Partner" are ordinary target
+    names, and at four bare-word tokens both failed `looks_like_value` — so the
+    sentence was not read as an update at all and the correction was lost.
+    """
     words = value.split()
-    return 1 <= len(words) <= 4 and all(
-        re.fullmatch(r"[\w.'’-]+", word) for word in words
+    return 1 <= len(words) <= 6 and all(
+        re.fullmatch(r"[\w.'’&,/-]+", word) for word in words
     )
 
 
@@ -277,6 +308,64 @@ def apply_project_field(analysis, field: str, raw_value: str) -> Applied:
         applied=True, scope="project", field=field, value=str(value),
         label=label,
         message=f"Set the {label} to {_display(value)}.",
+    )
+
+
+# ================================================================= audience
+_AUDIENCE_WORDS = {"audience", "reader", "readers", "recipient", "recipients",
+                   "report audience", "target audience", "intended audience",
+                   "this is for", "it is for", "report is for"}
+
+
+def _names_audience(target: str) -> bool:
+    cleaned = re.sub(r"^(the|our|its|this)\s+", "", target.strip().lower())
+    return re.sub(r"\s+", " ", cleaned).strip() in _AUDIENCE_WORDS
+
+
+def apply_audience(analysis, raw_value: str) -> Applied:
+    """"This is for the CFO, not the SteerCo."
+
+    Two things are written, deliberately. `Audience` is the planning key —
+    there are four report shapes and no more — and the *label* is what the user
+    actually said, which is what goes on the title page. Storing only the key
+    would put "pmo" in front of someone who asked for the Integration Director.
+    """
+    from app.agent.conversation import _match_audience
+    from app.agent.knowledge import load as load_kb
+    from app.agent.knowledge import save as save_kb
+    from app.storage import json_store
+
+    label = " ".join((raw_value or "").split()).strip(" .")
+    if not label:
+        return Applied(applied=False, scope="project", field="audience",
+                       message="Say who the report is for.")
+
+    shape = _match_audience(label.lower())
+    if shape is None:
+        # Refused rather than guessed: §4's whole point is that the audience is
+        # asked for when it cannot be inferred, and picking the nearest shape
+        # silently would undo that.
+        return Applied(
+            applied=False, scope="project", field="audience",
+            message=(f"I don't know which report shape “{label}” maps to. "
+                     f"Say whether it is closest to a Steering Committee, an "
+                     f"IMO/PMO, Finance, or a single workstream."))
+
+    analysis.audience = shape
+    analysis.audience_label = label
+    json_store.save_analysis(analysis)
+
+    kb = load_kb(analysis.session_id)
+    kb.audience = shape
+    kb.audience_label = label
+    # The audience reshapes the document, so any existing draft is stale.
+    kb.content_revision += 1
+    save_kb(kb)
+
+    return Applied(
+        applied=True, scope="project", field="audience", value=label,
+        label="audience",
+        message=f"Noted — I'll write it for {label} from now on.",
     )
 
 
@@ -542,7 +631,14 @@ def apply(analysis, text: str, focus=None) -> Optional[Applied]:
     if update is None:
         return None
 
-    # Project-level first — a reporting date is not on any entity, and letting
+    # Who it is for reshapes the whole report, and it was the one thing the
+    # user could not correct: it is on no entity and in no `PROJECT_FIELDS`
+    # entry, so "the audience is the CFO" fell through to the entity matcher and
+    # failed there.
+    if _names_audience(update.target):
+        return apply_audience(analysis, update.value)
+
+    # Project-level next — a reporting date is not on any entity, and letting
     # the entity matcher fuzzy-match "reporting date" onto a KPI named "Date"
     # would write it in the wrong place entirely.
     field = match_project_field(update.target)
@@ -552,10 +648,18 @@ def apply(analysis, text: str, focus=None) -> Optional[Applied]:
     model = analysis.data_model
     issue = locate(model, update.target, update.value, focus=focus)
     if issue is None:
+        candidates = candidates_for(model, update.target)
+        if not candidates:
+            # Nothing in the model is even close, so this was probably never a
+            # data edit — "the summary is too long" parses as `summary is too
+            # long` and means nothing of the kind. Returning `None` lets the
+            # router answer it instead of apologising for failing to do
+            # something the user did not ask for.
+            return None
         return Applied(
             applied=False,
             message=(f"I couldn't tell what “{update.target}” refers to."),
-            candidates=candidates_for(model, update.target),
+            candidates=candidates,
         )
 
     from app.agent.corrections import apply_and_persist

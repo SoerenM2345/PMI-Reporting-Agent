@@ -95,6 +95,13 @@ def ensure_analysis(
     if result.get("needs_audience"):
         return None, True
 
+    model = result["data_model"]
+    # Re-extraction builds a brand-new model from the files, so anything the
+    # user corrected is back to whatever the file said unless it is put back.
+    # See `replay_user_values` — this is the single most consequential line in
+    # this function.
+    replayed = replay_user_values(model, kb, reporting_date=_reporting_date(model))
+
     analysis = SessionAnalysis(
         session_id=session_id,
         request_text=text,
@@ -103,11 +110,15 @@ def ensure_analysis(
         audience=result.get("audience"),
         audience_label=label,
         needs_audience=False,
-        data_model=result["data_model"],
+        data_model=model,
         quality_report=result.get("quality_report"),
         errors=result.get("errors", []),
         warnings=result.get("warnings", []),
     )
+    if replayed:
+        analysis.warnings = [*analysis.warnings,
+                             f"Re-applied {len(replayed)} value(s) you supplied "
+                             f"earlier, over what the files say."]
     json_store.save_analysis(analysis)
 
     # Remember the audience that was settled, so a later turn — or a later
@@ -118,6 +129,79 @@ def ensure_analysis(
     log.info("analysed %s: %d entities from %d file(s)", session_id,
              analysis.data_model.entity_count(), len(files))
     return analysis, False
+
+
+def replay_user_values(model, kb, *, reporting_date=None) -> list[str]:
+    """Put the user's corrections back after a re-read. Returns what landed.
+
+    The bug this exists for: `covers()` is false the moment one new file
+    appears, so an upload forces `force=True` and `standardize` builds a fresh
+    `PMIDataModel` straight from the extractors. Nothing replayed
+    `kb.user_values`, so correcting a milestone date and then uploading a file
+    silently reverted the date — and the report looked current while stating a
+    figure the user had personally overruled.
+
+    Project-header corrections already survived, because the stored `PMIProject`
+    is passed into the graph. Entity corrections had no such path.
+
+    Matching is by `(type, label)`, never by `entity_id`: **ids are reassigned by
+    every standardize**, which is why the project stack's
+    `rebuild._apply_confirmed_values` uses the same rule. The stored `raw` is
+    re-coerced against the live field each time, so a value written before a
+    schema change still lands validated.
+    """
+    from app.agent.calculations import recompute_derived
+    from app.agent.corrections import _coerce
+    from app.agent.nl_updates import LABELS
+
+    applied: list[str] = []
+    for supplied in getattr(kb, "user_values", []) or []:
+        entry = LABELS.get(supplied.entity_type or "")
+        if entry is None or not supplied.field:
+            continue
+        collection, _id_attr, label_attr = entry
+        entity = next(
+            (e for e in getattr(model, collection, []) or []
+             if str(getattr(e, label_attr, "")) == (supplied.label or "")),
+            None)
+        if entity is None or supplied.field not in type(entity).model_fields:
+            continue
+        raw = supplied.raw or _text_of(supplied.value)
+        if not raw:
+            continue
+        try:
+            setattr(entity, supplied.field, _coerce(entity, supplied.field, raw))
+        except (ValueError, TypeError) as exc:                 # noqa: PERF203
+            log.warning("could not re-apply %s.%s=%r: %s",
+                        supplied.entity_type, supplied.field, raw, exc)
+            continue
+        applied.append(f"{supplied.label or supplied.entity_type}.{supplied.field}")
+
+    if applied:
+        # Overdue flags, delays and variances are all computed *from* the values
+        # just restored, so leaving them derived from the file's figures would
+        # produce a model that disagrees with itself.
+        note = "value(s) supplied by the user were re-applied after re-reading"
+        if note not in model.notes:
+            model.notes.append(note)
+        recompute_derived(model, reporting_date)
+        log.info("re-applied %d user value(s) after re-extraction: %s",
+                 len(applied), ", ".join(applied[:5]))
+    return applied
+
+
+def _reporting_date(model):
+    return getattr(getattr(model, "project", None), "reporting_date", None)
+
+
+def _text_of(value) -> str:
+    from datetime import date as _date
+
+    if value is None:
+        return ""
+    if isinstance(value, _date):
+        return f"{value:%d-%m-%Y}"
+    return str(value)
 
 
 def added_files(analysis: Optional[SessionAnalysis], uploaded: list[str]) -> list[str]:
