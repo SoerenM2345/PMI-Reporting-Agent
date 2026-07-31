@@ -885,6 +885,7 @@ async def post_chat_message(chat_id: str, req: ChatMessageRequest,
     # The turn is stored either way. A stopped turn that vanished would leave
     # the user staring at their own message with no sign anything happened.
     stored = [_store_answer(chat_id, answer)]
+    _auto_name_chat(chat_id, req.text, answer)
 
     # Keep the conversation inside the chosen model's window. Done after the
     # turn rather than before it, so the reply the user is waiting for is never
@@ -937,6 +938,24 @@ def _store_answer(chat_id: str, answer) -> Any:
     return chat_store.add_message(
         chat_id, "agent", answer.model_dump(mode="json"),
         kind="notice" if answer.status == "failed" else "text")
+
+
+def _auto_name_chat(chat_id: str, user_text: str, answer) -> None:
+    """Name the first real exchange without ever replacing a chosen title."""
+    from app.agent import chat_titles
+    from app.config import get_settings
+    from app.llm import use_selection
+
+    chat = chat_store.get_chat(chat_id)
+    if chat is None or not chat_titles.is_default(chat.title):
+        return
+    selection = get_settings().models_for(chat.provider, chat.model)
+    with use_selection(selection):
+        title = chat_titles.summarize(user_text, answer.content or "")
+    # Re-read before writing so a concurrent/manual rename always wins.
+    current = chat_store.get_chat(chat_id)
+    if current is not None and chat_titles.is_default(current.title):
+        chat_store.rename_chat(chat_id, title)
 
 
 class CellEditRequest(BaseModel):
@@ -1183,6 +1202,8 @@ async def post_chat_turn(chat_id: str, request: Request,
             answer = ingested.answer.then(answer)
         if not answer.is_empty:
             stored.append(_store_answer(chat_id, answer))
+        if message and not answer.is_empty:
+            _auto_name_chat(chat_id, message, answer)
 
         return {
             "saved": ingested.saved if ingested else [],
