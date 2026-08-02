@@ -1224,7 +1224,8 @@ async def post_chat_turn(chat_id: str, request: Request,
         watch = asyncio.create_task(_watch_for_disconnect(request, token))
 
         if files:
-            ingested = await _ingest_into_chat(chat, files, token)
+            ingested = await _ingest_into_chat(
+                chat, files, token, has_message=bool(message))
 
         answer = ChatAnswer()
         if message:
@@ -1322,7 +1323,8 @@ class _Ingested(BaseModel):
     answer: Any = None
 
 
-async def _ingest_into_chat(chat, files, token) -> "_Ingested":
+async def _ingest_into_chat(chat, files, token, *,
+                            has_message: bool = False) -> "_Ingested":
     """Store the files, record the turn, re-read everything."""
     from starlette.concurrency import run_in_threadpool
 
@@ -1351,8 +1353,9 @@ async def _ingest_into_chat(chat, files, token) -> "_Ingested":
         kind="files")
 
     check(token, "reading the files")
-    answer = await run_in_threadpool(_merge_uploaded, chat, before, names,
-                                     saved.get("rejected", []))
+    answer = await run_in_threadpool(
+        _merge_uploaded, chat, before, names, saved.get("rejected", []),
+        has_message)
     return _Ingested(saved=names, rejected=saved.get("rejected", []),
                      message=message, answer=answer)
 
@@ -1413,7 +1416,8 @@ def _session_snapshot(session_id: str) -> dict:
     }
 
 
-def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
+def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict],
+                    has_message: bool = False):
     """Re-read everything and say what moved."""
     from app.agent import knowledge
     from app.agent.conversation import _analyse, _found
@@ -1433,13 +1437,37 @@ def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
             if answer.is_empty else answer
 
     if not before:
-        # Nothing had been read yet: this is the first upload, and the useful
-        # answer is "what do you need?", not a diff against nothing.
-        return answer.then(say(chat_fmt.reply(
+        ready = say(chat_fmt.reply(
             f"{chat_fmt.count(len(added), 'file')} ready",
             body=chat_fmt.bullets(added),
-            action="Reading your files and analyzing the data now",
-        )))
+            action=("Using these files with your request" if has_message else
+                    "Reading your files and analyzing the data now"),
+        ))
+        answer = answer.then(ready)
+
+        pending = json_store.load_pending(chat.session_id)
+        waiting = pending if pending and pending.get("mode") == "awaiting_files" \
+            else None
+        if has_message:
+            # A message sent with the files supersedes an older request that was
+            # waiting for them; `post_chat_turn` routes that current message next.
+            if waiting:
+                json_store.clear_pending(chat.session_id)
+            return answer
+        if waiting and waiting.get("request_text"):
+            # Resume the original user turn. It is already in the transcript, so
+            # only its work and answer are repeated—not a duplicate user bubble.
+            from app.agent.conversation import respond
+
+            request_text = str(waiting["request_text"])
+            json_store.clear_pending(chat.session_id)
+            return answer.then(respond(chat, request_text))
+
+        # Do not claim analysis is running when there was no request to guide it.
+        return answer.then(say(
+            "The files are ready. Tell me what report or analysis you want from "
+            "them, including the audience if you know it."
+        ))
 
     kb = knowledge.load(chat.session_id)
     prior = json_store.load_analysis(chat.session_id)

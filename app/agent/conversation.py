@@ -183,6 +183,17 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
 
     uploaded = _uploaded_files(chat)
     if not uploaded:
+        # A report request can arrive before its evidence. Keep the request as
+        # durable workflow state so an upload-only next turn can resume it; the
+        # transcript is intentionally not the source of truth because old turns
+        # may be compacted. Without this pointer the upload handler printed
+        # "Reading…" and then forgot what it was supposed to build.
+        waiting = _classify_by_keyword(text)
+        if waiting.intent in NEEDS_ANALYSIS:
+            json_store.save_pending(chat.session_id, {
+                "mode": "awaiting_files",
+                "request_text": text,
+            })
         return say(
             "Upload the week's files first — trackers, SteerCo decks, minutes, "
             "exports, or screenshots of dashboards. I'll read them and tell you "
@@ -834,6 +845,7 @@ def _match_audience(lowered: str) -> Optional[Audience]:
     """
     from app.llm.fallbacks import _AUDIENCE_HINTS
 
+    lowered = (lowered or "").casefold()
     for aud, keywords in _AUDIENCE_HINTS.items():
         if any(re.search(rf"\b{re.escape(k)}\b", lowered) for k in keywords):
             return aud

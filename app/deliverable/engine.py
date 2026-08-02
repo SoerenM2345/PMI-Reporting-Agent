@@ -50,13 +50,12 @@ log = logging.getLogger("pmi.deliverable.engine")
 #: from a fallback and looks analysed is the failure the whole warning
 #: machinery exists to prevent, so the disclosure goes in the artifact, not only
 #: in a log the reader will never see.
-"""
 UNPLANNED_NOTICE = (
     "Assembled without a language model: the sections, their order and the "
     "wording follow the request and the available evidence rather than a "
     "reasoned argument. Every figure shown is validated; the emphasis and the "
     "conclusions are not."
-)"""
+)
 
 #: What each planning stage contributes, so a partial fallback can say what it
 #: actually lost instead of claiming the whole document is unplanned.
