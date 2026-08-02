@@ -599,27 +599,29 @@ export default function App() {
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between gap-4 border-b
                            border-slate-200 bg-white px-6 py-3">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 items-center">
             <h1 className="max-w-72 truncate text-sm font-semibold text-slate-900">
               {chat?.title || "New chat"}
             </h1>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
             <ChatProjectPicker
               chat={chat}
               projects={projects}
               busy={busy}
               onChange={(projectId) => moveChatToProject(chatId, projectId)}
             />
+            <ModelPicker
+              chat={chat}
+              busy={busy}
+              onChange={(choice) =>
+                run(async () => {
+                  const body = await api.patchChat(chatId, choice);
+                  setChat(body.chat);
+                })
+              }
+            />
           </div>
-          <ModelPicker
-            chat={chat}
-            busy={busy}
-            onChange={(choice) =>
-              run(async () => {
-                const body = await api.patchChat(chatId, choice);
-                setChat(body.chat);
-              })
-            }
-          />
         </header>
 
         {error && (

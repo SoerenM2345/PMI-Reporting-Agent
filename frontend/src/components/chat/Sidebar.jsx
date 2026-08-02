@@ -136,6 +136,11 @@ export default function Sidebar({
   };
 
   const startChatDrag = (event, chatId) => {
+    const chat = chats.find((candidate) => candidate.chat_id === chatId);
+    if (!chat || chat.project_id) {
+      event.preventDefault();
+      return;
+    }
     setDraggingChatId(chatId);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", chatId);
@@ -147,7 +152,10 @@ export default function Sidebar({
   };
 
   const allowChatDrop = (event, target) => {
-    if (busy) return;
+    const draggedId =
+      event.dataTransfer.getData("text/plain") || draggingChatId;
+    const dragged = chats.find((candidate) => candidate.chat_id === draggedId);
+    if (busy || !target || !dragged || dragged.project_id) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     setDropTarget(target);
@@ -164,10 +172,10 @@ export default function Sidebar({
     const draggedId =
       event.dataTransfer.getData("text/plain") || draggingChatId;
     const dragged = chats.find((candidate) => candidate.chat_id === draggedId);
-    if (dragged && (dragged.project_id || null) !== projectId) {
+    // Filing is one-time: only an unassigned chat can enter a project. This
+    // guard also rejects synthetic drag events for already-assigned chats.
+    if (dragged && !dragged.project_id && projectId) {
       onMoveChat?.(draggedId, projectId);
-    }
-    if (projectId) {
       setExpandedProjects((current) => ({ ...current, [projectId]: true }));
     }
     finishChatDrag();
@@ -321,24 +329,12 @@ export default function Sidebar({
 
           <div className="my-4 border-t border-slate-100" />
 
-          <div
-            aria-label="Chats outside projects drop area"
-            onDragOver={(event) => allowChatDrop(event, "unfiled")}
-            onDragLeave={(event) => leaveChatDrop(event, "unfiled")}
-            onDrop={(event) => dropChat(event, null)}
-            className={`rounded-xl border p-1 transition ${
-              dropTarget === "unfiled"
-                ? "border-blue-400 bg-blue-50 ring-2 ring-blue-100"
-                : "border-transparent"
-            }`}
-          >
+          <div className="rounded-xl border border-transparent p-1">
             <SidebarSectionTitle>Chats</SidebarSectionTitle>
 
             {chatsWithoutProject.length === 0 ? (
               <p className="px-3 py-4 text-center text-xs text-slate-400">
-                {draggingChatId
-                  ? "Drop here to remove the chat from its project."
-                  : "No chats outside projects."}
+                No chats outside projects.
               </p>
             ) : (
               <div className="space-y-1">
@@ -350,6 +346,7 @@ export default function Sidebar({
                     editing={editingChatId === chat.chat_id}
                     draft={chatDraft}
                     busy={busy}
+                    movable
                     dragging={draggingChatId === chat.chat_id}
                     onDragStart={startChatDrag}
                     onDragEnd={finishChatDrag}
@@ -622,6 +619,7 @@ function ChatItem({
   draft,
   compact = false,
   busy = false,
+  movable = false,
   dragging = false,
   onDragStart,
   onDragEnd,
@@ -634,8 +632,10 @@ function ChatItem({
 }) {
   return (
     <div
-      draggable={!editing && !busy}
-      onDragStart={(event) => onDragStart?.(event, chat.chat_id)}
+      draggable={movable && !editing && !busy}
+      onDragStart={(event) => {
+        if (movable) onDragStart?.(event, chat.chat_id);
+      }}
       onDragEnd={onDragEnd}
       aria-label={`Chat: ${chat.title}`}
       className={`group rounded-lg transition ${

@@ -907,6 +907,30 @@ def test_completed_gap_questions_do_not_restart_after_a_new_draft(client, loaded
     assert "please provide the" not in prose(replanned).lower()
 
 
+def test_stopping_gap_questions_declines_the_remaining_questions(client, loaded):
+    """'Stop' promises to leave the rest blank, so it must survive the next
+    draft rather than restarting at the same mitigation-owner question."""
+    chat_id, _ = loaded
+    first = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "give me a SteerCo deck"},
+    ))
+    if "type 'next' to skip" not in prose(first):
+        pytest.skip("this sample produced no fillable gaps")
+
+    stopped = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "stop"}))
+    assert "leave the rest blank" in prose(stopped).lower()
+
+    replanned = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "update the SteerCo status report"},
+    ))
+    assert actions(replanned, "open_preview")
+    assert "value(s) weren't in the files" not in prose(replanned)
+    assert "please provide the" not in prose(replanned).lower()
+
+
 def test_asking_for_a_report_reads_the_files_itself(client, loaded):
     """There is no "Analyse" button in a chat. Telling the user to go and press
     one that does not exist is a dead end — asking for a report is what
