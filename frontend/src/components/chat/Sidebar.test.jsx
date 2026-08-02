@@ -43,7 +43,7 @@ describe("sidebar chat filing", () => {
     expect(onMoveChat).toHaveBeenCalledWith("outside", "finance");
   });
 
-  it("drops a project chat back into the unfiled chat list", () => {
+  it("does not allow an assigned chat to move to another project", () => {
     const onMoveChat = vi.fn();
     render(
       <Sidebar chats={chats} projects={projects} onMoveChat={onMoveChat} />,
@@ -53,10 +53,13 @@ describe("sidebar chat filing", () => {
     fireEvent.dragStart(screen.getByLabelText("Chat: People risks"), {
       dataTransfer,
     });
-    const target = screen.getByLabelText("Chats outside projects drop area");
+    expect(screen.getByLabelText("Chat: People risks"))
+      .toHaveAttribute("draggable", "false");
+
+    const target = screen.getByLabelText("Project drop area: Finance Integration");
     fireEvent.dragOver(target, { dataTransfer });
     fireEvent.drop(target, { dataTransfer });
 
-    expect(onMoveChat).toHaveBeenCalledWith("inside", null);
+    expect(onMoveChat).not.toHaveBeenCalled();
   });
 });

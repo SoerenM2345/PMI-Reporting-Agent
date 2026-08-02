@@ -24,17 +24,14 @@ describe("chat project picker", () => {
     expect(onChange).toHaveBeenCalledWith("finance");
   });
 
-  it("can remove the open chat from its project", async () => {
-    const onChange = vi.fn();
+  it("is hidden once the chat belongs to a project", () => {
     render(
       <ChatProjectPicker
         chat={{ chat_id: "chat-1", project_id: "finance" }}
         projects={projects}
-        onChange={onChange}
       />,
     );
 
-    await userEvent.selectOptions(screen.getByLabelText("Chat project"), "");
-    expect(onChange).toHaveBeenCalledWith(null);
+    expect(screen.queryByLabelText("Chat project")).not.toBeInTheDocument();
   });
 });
