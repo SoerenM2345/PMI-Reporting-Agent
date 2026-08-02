@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.pmi import Audience
 
@@ -67,47 +67,72 @@ class VisionRegion(BaseModel):
     """Where in the image a value was read from (§5.6 step 9)."""
 
     description: str = Field(
+        default="",
         description=(
             "Where this sits in the image, in words a person could follow — "
             "e.g. 'red cell at Probability=High / Impact=High', 'third bar from the left'."
         )
     )
-    x: Optional[int] = Field(
-        default=None, description="Left edge in pixels, if you can locate it."
+    box: list[int] = Field(
+        default_factory=list,
+        min_length=0,
+        max_length=4,
+        description=(
+            "Empty if exact coordinates are unknown; otherwise exactly "
+            "[left, top, width, height] in pixels."
+        ),
     )
-    y: Optional[int] = Field(default=None, description="Top edge in pixels.")
-    width: Optional[int] = Field(default=None, description="Box width in pixels.")
-    height: Optional[int] = Field(default=None, description="Box height in pixels.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_coordinates(cls, value):
+        if isinstance(value, dict) and "box" not in value:
+            coordinates = [
+                value.get("x"), value.get("y"),
+                value.get("width"), value.get("height"),
+            ]
+            value = {k: v for k, v in value.items()
+                     if k not in {"x", "y", "width", "height"}}
+            if None not in coordinates:
+                value["box"] = coordinates
+        return value
+
+    @property
+    def x(self) -> Optional[int]:
+        return self.box[0] if len(self.box) == 4 else None
+
+    @property
+    def y(self) -> Optional[int]:
+        return self.box[1] if len(self.box) == 4 else None
+
+    @property
+    def width(self) -> Optional[int]:
+        return self.box[2] if len(self.box) == 4 else None
+
+    @property
+    def height(self) -> Optional[int]:
+        return self.box[3] if len(self.box) == 4 else None
 
 
-class ImageFields(BaseModel):
-    """Closed image attributes, compatible with strict structured outputs.
+ImageFieldName = Literal[
+    "owner", "status", "due_date", "workstream", "probability", "impact",
+    "severity", "mitigation", "category", "planned", "actual", "forecast",
+    "target", "value", "unit", "description",
+]
 
-    OpenAI does not support a free-form ``dict[str, str]`` inside a strict
-    response schema. Keeping the known extractor vocabulary as nullable fields
-    also prevents a model from inventing attribute names the standardizer could
-    never consume.
+
+class ImageAttribute(BaseModel):
+    """One closed PMI attribute read from an image.
+
+    A list of name/value pairs is intentionally used instead of sixteen nullable
+    object properties. Anthropic has a finite structured-output grammar budget;
+    the previous shape exceeded it and returned HTTP 400 before reading the
+    image. The enum remains closed, so unknown fields still cannot enter the
+    standardizer.
     """
 
-    owner: Optional[str] = None
-    status: Optional[str] = None
-    due_date: Optional[str] = None
-    workstream: Optional[str] = None
-    probability: Optional[str] = None
-    impact: Optional[str] = None
-    severity: Optional[str] = None
-    mitigation: Optional[str] = None
-    category: Optional[str] = None
-    planned: Optional[str] = None
-    actual: Optional[str] = None
-    forecast: Optional[str] = None
-    target: Optional[str] = None
-    value: Optional[str] = None
-    unit: Optional[str] = None
-    description: Optional[str] = None
-
-    def items(self):
-        return self.model_dump(exclude_none=True).items()
+    name: ImageFieldName
+    value: str
 
 
 class ExtractedImageItem(BaseModel):
@@ -115,20 +140,35 @@ class ExtractedImageItem(BaseModel):
 
     type: RecordType = Field(description="Which PMI entity this is.")
     title: str = Field(description="The item's name, exactly as written in the image.")
-    fields: ImageFields = Field(
-        default_factory=ImageFields,
+    fields: list[ImageAttribute] = Field(
+        default_factory=list,
         description=(
-            "Other attributes you can read, as flat key/value strings. Use these keys "
+            "Other attributes you can read, as name/value pairs. Use these names "
             "where they apply: owner, status, due_date, workstream, probability, impact, "
             "severity, mitigation, category, planned, actual, forecast, target, value, "
             "unit, description. Omit anything the image does not state — do not guess."
         ),
     )
-    original_value: Optional[str] = Field(
-        default=None,
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def _accept_legacy_field_object(cls, value):
+        """Keep stored readings made with the former ``{name: value}`` shape readable."""
+        if isinstance(value, dict):
+            return [
+                {"name": name, "value": str(raw)}
+                for name, raw in value.items()
+                if raw not in (None, "")
+            ]
+        return value
+    original_value: str = Field(
+        default="",
         description="The raw text as it literally appears in the image, before any tidying.",
     )
-    region: Optional[VisionRegion] = None
+    region: VisionRegion = Field(
+        default_factory=VisionRegion,
+        description="Where the item appears; leave description and box empty if unknown.",
+    )
     model_confidence: float = Field(
         ge=0.0, le=1.0,
         description=(

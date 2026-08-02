@@ -167,6 +167,29 @@ def test_image_extraction_reads_the_dashboard(sample_files, fake_vision):
     assert gdpr["impact"] == "5"
 
 
+def test_image_interpretation_has_a_short_timeout_and_no_retry(sample_files):
+    """An optional screenshot cannot hold the whole conversational reply open."""
+    from app.config import get_settings
+    from app.llm.schemas import ImageExtraction
+
+    seen = {}
+
+    class RecordingVision:
+        name = "recording"
+        supports_vision = True
+
+        def structured(self, **kwargs):
+            seen.update(kwargs)
+            return ImageExtraction(legibility="good")
+
+    llm.set_client(RecordingVision())
+    image_extractor._interpret(prepare(sample_files / "risk_dashboard.png"))
+
+    settings = get_settings()
+    assert seen["timeout_s"] == settings.vision_timeout_s
+    assert seen["max_retries"] == 0
+
+
 def test_image_confidence_is_capped_below_a_spreadsheet_read(sample_files, fake_vision):
     """§21.14: 'Treat image extraction as lower confidence unless confirmed.'
 

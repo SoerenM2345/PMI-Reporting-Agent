@@ -202,8 +202,7 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 _figure(document, chart_render.to_png(spec, brand, assets,
                                                       size_in=(9.0, 4.6)),
-                        spec.caption, figure_number, brand,
-                        editable_note=spec.is_native_pptx)
+                        "", figure_number, brand)
                 boxes.append(_box(page, "chart", spec.caption))
 
         elif isinstance(element, DiagramElement):
@@ -211,7 +210,7 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 _figure(document, diagram_render.to_png(spec, brand, assets,
                                                         size_in=(9.0, 3.8)),
-                        spec.caption, figure_number, brand)
+                        "", figure_number, brand)
                 boxes.append(_box(page, "diagram", spec.caption))
 
         elif isinstance(element, TableElement):
@@ -358,7 +357,7 @@ def _appendix(document, deliverable: Deliverable, context: GenerationContext,
     files = context.evidence.projected_from_files
     if files:
         for name in files:
-            _para(document, name, styles.BULLET, bullet=True)
+            _para(document, name, styles.SOURCE_NOTE)
     else:
         _para(document, "No files were read for this document.", styles.BODY)
 

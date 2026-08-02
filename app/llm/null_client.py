@@ -30,6 +30,8 @@ class NullClient:
         output_model: type[T],
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        timeout_s: Optional[float] = None,
+        max_retries: Optional[int] = None,
         images: Sequence[ImagePart] = (),
         documents: Sequence[DocumentPart] = (),
     ) -> T:

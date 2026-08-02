@@ -62,6 +62,17 @@ def respond(project_id: str, message: str, *, chat_id: Optional[str] = None,
             provider: Optional[str] = None, model: Optional[str] = None,
             repos: Optional[Repositories] = None) -> ChatResponse:
     repos = repos or default_repositories()
+    from app.project.chat_context import save_rule, standing_rule
+
+    rule = standing_rule(message)
+    if rule:
+        saved = save_rule(project_id, rule)
+        return ChatResponse(
+            intent="instruction",
+            message=("## Project rule saved\n\n"
+                     f"- {saved}\n\nThis rule now applies to every project chat "
+                     "and generated report."),
+        )
     knowledge = repos.knowledge.current(project_id)
     conflict_state = (conflict_impact.assess(knowledge).model_dump()
                       if knowledge is not None else None)

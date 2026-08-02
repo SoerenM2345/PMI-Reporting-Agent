@@ -195,8 +195,7 @@ def _appendix(deliverable: Deliverable,
     parts = ["## Sources and methodology"]
     files = context.evidence.projected_from_files if context else []
     if files:
-        parts.append("**Sources read**\n"
-                     + "\n".join(f"- {name}" for name in files))
+        parts.append("<sub>Sources read: " + "; ".join(files) + "</sub>")
     conflicts = context.unresolved_critical_conflicts if context else []
     if conflicts:
         claims = "\n".join(

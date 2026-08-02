@@ -21,6 +21,7 @@ from app.extractors.base import make_source
 from app.models.pmi import (
     KPI,
     BudgetItem,
+    Conflict,
     ConflictEvidence,
     Decision,
     Milestone,
@@ -342,6 +343,29 @@ def test_an_image_never_outranks_a_spreadsheet():
     resolve_conflicts(model.conflicts, strategy="priority")
 
     assert model.conflicts[0].resolved_from == "tracker.xlsx"
+
+
+def test_a_resolved_duplicate_is_reported_once_from_the_selected_source():
+    model = PMIDataModel(kpis=[
+        KPI(kpi_id="K1", name="Overall Progress", current_value=82,
+            source_references=[ref("tracker.xlsx", XLSX)]),
+        KPI(kpi_id="K2", name="Overall Progress", current_value=75,
+            source_references=[ref("steerco.pptx", PPTX)]),
+    ])
+    conflict = Conflict(
+        entity_type="kpi", entity_key="Overall Progress", field="current_value",
+        evidence=[
+            ConflictEvidence(source_reference=ref("tracker.xlsx", XLSX), value="82"),
+            ConflictEvidence(source_reference=ref("steerco.pptx", PPTX), value="75"),
+        ], resolved_value="82", resolved_from="tracker.xlsx", resolution="user",
+    )
+    model.conflicts = [conflict]
+
+    apply_resolutions(model)
+
+    assert len(model.kpis) == 1
+    assert model.kpis[0].current_value == 82
+    assert model.kpis[0].source_files == ["tracker.xlsx"]
 
 
 # ---------------------------------------------------------------- data quality

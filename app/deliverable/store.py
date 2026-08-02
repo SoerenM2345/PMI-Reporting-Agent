@@ -30,8 +30,9 @@ def _dir(*, project_id: Optional[str] = None,
 
     base = Path(get_settings().storage_dir)
     # A project chat carries both ids, but its conversational preview is still
-    # a session draft. Preview and revision endpoints load it by session id.
-    # Project-level builds have no session id and use the project shelf below.
+    # a session draft. All preview and revision endpoints load it by session.
+    # Project-level builds have no session id and continue to use the project
+    # directory below.
     if session_id:
         return base / session_id / "deliverables"
     if project_id:

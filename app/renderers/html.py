@@ -182,16 +182,14 @@ def _element(element, deliverable: Deliverable, brand: BrandSystem) -> str:
         if spec is None:
             return ""
         svg = chart_render.to_svg(spec, brand)
-        return (f'<figure class="chart">{svg}'
-                f"<figcaption>{escape(spec.caption)}</figcaption></figure>")
+        return f'<figure class="chart">{svg}</figure>'
 
     if isinstance(element, DiagramElement):
         spec = deliverable.specs.diagrams.get(element.spec_id)
         if spec is None:
             return ""
         svg = diagram_render.to_svg(spec, brand)
-        return (f'<figure class="diagram">{svg}'
-                f"<figcaption>{escape(spec.caption)}</figcaption></figure>")
+        return f'<figure class="diagram">{svg}</figure>'
 
     if isinstance(element, TableElement):
         spec = deliverable.specs.tables.get(element.spec_id)
@@ -264,7 +262,7 @@ def _methodology(deliverable: Deliverable, context: GenerationContext) -> str:
         f"{escape('; '.join(f'{k} says {v}' for k, v in conflict.values.items()))}"
         f"</li>" for conflict in context.unresolved_critical_conflicts)
 
-    sections = [f"<h3>Sources</h3><ul>{rows}</ul>"]
+    sections = [f'<h3>Sources</h3><ul class="source-files">{rows}</ul>']
     if conflicts:
         sections.append("<h3>Unresolved disagreements between sources</h3>"
                         f"<ul>{conflicts}</ul>")
@@ -412,11 +410,14 @@ td.good { color: var(--brand-rag-green); }
 td.muted { color: var(--brand-muted); }
 tr.emphasis td { background: var(--brand-surface-alt); }
 .note { margin: .4rem 0 0; font-size: .8rem; color: var(--brand-muted); }
-.sources, .methodology { margin-top: 1.2rem; font-size: .86rem; }
-.sources summary, .methodology summary { cursor: pointer; color: var(--brand-muted); }
+.sources { margin-top: .8rem; font-size: .68rem; color: #a3a3a3; }
+.sources summary { cursor: pointer; color: #a3a3a3; }
+.methodology { margin-top: 1.2rem; font-size: .86rem; }
+.methodology summary { cursor: pointer; color: var(--brand-muted); }
 .methodology { padding: 1.6rem 0 0; }
 .methodology h3 { margin: 1rem 0 .35rem; font-size: .95rem; }
 .methodology ul { margin: 0; padding-left: 1.15rem; }
+.methodology .source-files { font-size: .68rem; color: #a3a3a3; }
 footer { padding: 1.4rem clamp(1rem, 4vw, 3.5rem) 2.4rem; color: var(--brand-muted);
   font-size: .82rem; border-top: 1px solid var(--brand-rule); }
 #tooltip {

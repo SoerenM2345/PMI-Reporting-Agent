@@ -159,6 +159,20 @@ def test_sections_are_also_read_from_an_inline_list(model):
                                           "next steps"]
 
 
+def test_slides_on_preserves_the_cfo_outline_verbatim(model):
+    context = build(
+        model,
+        "Create a Finance Status Report for the CFO based on the uploaded PMI "
+        "documents. Create slides on Budget Overview, Synergy Realization, "
+        "Cost Tracking, Financial Risks, Forecast vs. Actuals, and Key "
+        "Financial Decisions.",
+    )
+    assert context.requested_sections == [
+        "Budget Overview", "Synergy Realization", "Cost Tracking",
+        "Financial Risks", "Forecast vs. Actuals", "Key Financial Decisions",
+    ]
+
+
 def test_prose_does_not_get_mined_for_imaginary_sections(model):
     """Guessing sections out of a sentence invents structure the user did not
     ask for — the exact failure this redesign exists to end."""

@@ -440,6 +440,11 @@ def _project_conflicts(index: EvidenceIndex,
     is disputed" beside the figure.
     """
     for conflict in conflicts:
+        conflict_sources = [e.source_reference for e in conflict.evidence]
+        if conflict.is_resolved:
+            selected = [e.source_reference for e in conflict.evidence
+                        if e.file_name == conflict.resolved_from]
+            conflict_sources = selected[:1]
         item = EvidenceItem(
             evidence_id=f"ev:conflict:{conflict.conflict_id}",
             kind="conflict",
@@ -450,7 +455,7 @@ def _project_conflicts(index: EvidenceIndex,
             entity_type=conflict.entity_type,
             severity=_s(conflict.severity),
             status="resolved" if conflict.is_resolved else "open",
-            sources=[e.source_reference for e in conflict.evidence],
+            sources=conflict_sources,
             payload={
                 **conflict.model_dump(mode="json"),
                 "requires_user_input": conflict.requires_user_input,
@@ -467,13 +472,12 @@ def _project_conflicts(index: EvidenceIndex,
 
 
 def _conflict_statement(conflict: Conflict) -> str:
+    if conflict.is_resolved:
+        return (f"Resolved to {conflict.resolved_value}: "
+                f"{conflict.entity_key} ({conflict.field})"
+                + (f" from {conflict.resolved_from}." if conflict.resolved_from else "."))
     claims = "; ".join(f"{name} says {value}"
                        for name, value in conflict.values.items())
-    if conflict.is_resolved:
-        return (f"Sources disagreed about {conflict.entity_key} "
-                f"({conflict.field}): {claims}. Resolved to "
-                f"{conflict.resolved_value}"
-                + (f" from {conflict.resolved_from}." if conflict.resolved_from else "."))
     return (f"Sources disagree about {conflict.entity_key} ({conflict.field}): "
             f"{claims}. This is unresolved.")
 

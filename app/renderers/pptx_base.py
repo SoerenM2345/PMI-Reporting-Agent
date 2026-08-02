@@ -281,9 +281,10 @@ def draw_source_note(slide, brand: BrandSystem, text: str, *,
     frame.word_wrap = True
     paragraph = frame.paragraphs[0]
     paragraph.text = text
-    paragraph.font.size = Pt(brand.font("caption").size_pt)
+    paragraph.font.size = Pt(6)
     paragraph.font.italic = True
-    paragraph.font.color.rgb = brand.pptx_rgb("muted")
+    from pptx.dml.color import RGBColor
+    paragraph.font.color.rgb = RGBColor(0xA6, 0xA6, 0xA6)
 
 
 def draw_kpi_row(slide, brand: BrandSystem, tiles: Sequence, box: Box) -> None:

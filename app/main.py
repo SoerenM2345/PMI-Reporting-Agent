@@ -484,6 +484,13 @@ class PatchChatRequest(BaseModel):
     archived: Optional[bool] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    #: Filing is also an import into project context. Explicit null removes the
+    #: chat from its folder; omission leaves the current project unchanged.
+    project_id: Optional[str] = None
+
+
+class ProjectRuleRequest(BaseModel):
+    rule: str
 
 
 class ChatMessageRequest(BaseModel):
@@ -543,6 +550,18 @@ def patch_project(project_id: str, req: PatchProjectRequest) -> dict:
         project_id, name=req.name, icon=req.icon, knowledge=req.knowledge,
     )
     return {"project": project.model_dump()}
+
+
+@app.post("/api/projects/{project_id}/rules")
+def add_project_rule(project_id: str, req: ProjectRuleRequest) -> dict:
+    _project_or_404(project_id)
+    from app.project.chat_context import save_rule
+
+    try:
+        rule = save_rule(project_id, req.rule)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    return {"project": _project_or_404(project_id).model_dump(), "rule": rule}
 
 
 @app.delete("/api/projects/{project_id}")
@@ -821,6 +840,19 @@ def patch_chat(chat_id: str, req: PatchChatRequest) -> dict:
         chat = chat_store.archive_chat(chat_id, req.archived)
     if req.provider is not None or req.model is not None:
         chat = chat_store.set_model(chat_id, provider=req.provider, model=req.model)
+    if "project_id" in req.model_fields_set:
+        if req.project_id is None:
+            chat = chat_store.set_chat_project(chat_id, None)
+        else:
+            _project_or_404(req.project_id)
+            from app.project.chat_context import attach
+
+            try:
+                attach(chat_id, req.project_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400,
+                                    detail={"error": str(exc)}) from exc
+            chat = chat_store.get_chat(chat_id)
     return {"chat": chat.model_dump()}
 
 
@@ -886,6 +918,7 @@ async def post_chat_message(chat_id: str, req: ChatMessageRequest,
     # the user staring at their own message with no sign anything happened.
     stored = [_store_answer(chat_id, answer)]
     _auto_name_chat(chat_id, req.text, answer)
+    _sync_chat_project(chat)
 
     # Keep the conversation inside the chosen model's window. Done after the
     # turn rather than before it, so the reply the user is waiting for is never
@@ -951,7 +984,11 @@ def _auto_name_chat(chat_id: str, user_text: str, answer) -> None:
         return
     selection = get_settings().models_for(chat.provider, chat.model)
     with use_selection(selection):
-        title = chat_titles.summarize(user_text, answer.content or "")
+        # Naming is UI housekeeping and must not add a second provider round
+        # trip to the first visible reply. The user's own words make a stable,
+        # useful title immediately.
+        title = chat_titles.summarize(user_text, answer.content or "",
+                                      use_model=False)
     # Re-read before writing so a concurrent/manual rename always wins.
     current = chat_store.get_chat(chat_id)
     if current is not None and chat_titles.is_default(current.title):
@@ -1204,6 +1241,7 @@ async def post_chat_turn(chat_id: str, request: Request,
             stored.append(_store_answer(chat_id, answer))
         if message and not answer.is_empty:
             _auto_name_chat(chat_id, message, answer)
+        _sync_chat_project(chat)
 
         return {
             "saved": ingested.saved if ingested else [],
@@ -1255,6 +1293,24 @@ async def _answer_in_thread(chat, text: str, token):
     from app.agent.conversation import respond
 
     return await run_in_threadpool(respond, chat, text, cancel=token)
+
+
+def _sync_chat_project(chat) -> None:
+    """Promote durable chat state after each turn for chats already filed.
+
+    Synchronisation is deliberately best-effort here: the session turn has
+    already succeeded and must not be changed into a failure because project
+    indexing needs attention. The next turn or an explicit re-attach retries it.
+    """
+    if not chat.project_id:
+        return
+    try:
+        from app.project.chat_context import attach
+
+        attach(chat.chat_id, chat.project_id)
+    except Exception as exc:                                  # noqa: BLE001
+        log.exception("could not sync chat %s into project %s: %s",
+                      chat.chat_id, chat.project_id, exc)
 
 
 class _Ingested(BaseModel):

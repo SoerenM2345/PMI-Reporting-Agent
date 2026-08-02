@@ -74,16 +74,28 @@ def enforce_coverage(plan: StorylinePlan, brief: OutputBrief,
     if not brief.scope_topics:
         return warnings
 
+    requested_sections: list[SectionIntent] = []
+    claimed: set[str] = set()
     for topic in brief.scope_topics:
-        if any(topic in section.covers_requested for section in plan.sections):
-            continue
-        match = _best_match(topic, plan.sections)
+        # A named section is an output contract. The planner remains free to
+        # decide its message and composition, but it may not merge two requested
+        # slides into one or retitle them beyond recognition.
+        match = next((section for section in plan.sections
+                      if topic in section.covers_requested
+                      and section.section_id not in claimed), None)
+        match = match or _best_match(
+            topic, [section for section in plan.sections
+                    if section.section_id not in claimed])
         if match is not None:
-            match.covers_requested.append(topic)
+            if topic not in match.covers_requested:
+                match.covers_requested.append(topic)
+            match.working_title = topic
+            requested_sections.append(match)
+            claimed.add(match.section_id)
             continue
 
         ids = _absence_or_search(topic, evidence)
-        plan.sections.append(SectionIntent(
+        restored = SectionIntent(
             section_id=_unique(_slug(topic), {s.section_id for s in plan.sections}),
             working_title=topic,
             management_question=f"What is the position on {topic.lower()}?",
@@ -91,11 +103,20 @@ def enforce_coverage(plan: StorylinePlan, brief: OutputBrief,
             evidence_ids=ids,
             depth="summary",
             covers_requested=[topic],
-        ))
+        )
+        plan.sections.append(restored)
+        requested_sections.append(restored)
+        claimed.add(restored.section_id)
         warnings.append(
             f"The plan did not cover the requested topic {topic!r}; it was added "
             f"as its own section" + (" with no supporting evidence."
                                      if not ids else "."))
+
+    # Preserve the order the user supplied. Additional editorial sections still
+    # follow, and the mandatory limitations page is appended by the next stage.
+    remaining = [section for section in plan.sections
+                 if section.section_id not in claimed]
+    plan.sections = requested_sections + remaining
     return warnings
 
 

@@ -20,7 +20,8 @@ def is_default(title: str) -> bool:
     return (title or "").strip().casefold() in DEFAULT_TITLES
 
 
-def summarize(user_text: str, assistant_text: str = "") -> str:
+def summarize(user_text: str, assistant_text: str = "", *,
+              use_model: bool = True) -> str:
     """Return a compact topic label, with an honest keyless fallback.
 
     The model sees the completed first exchange, as ChatGPT-style naming does.
@@ -28,6 +29,8 @@ def summarize(user_text: str, assistant_text: str = "") -> str:
     words still produce a useful, deterministic name.
     """
     fallback = _fallback(user_text)
+    if not use_model:
+        return fallback
     try:
         result = get_client().structured(
             system=(

@@ -88,6 +88,25 @@ def ids(content) -> list[str]:
 
 
 # ======================================================= user-defined structure
+def test_a_saved_structure_can_be_edited_without_repeating_it():
+    from app.report.structure import SectionSpec, StructureSpec, revise
+
+    existing = StructureSpec(sections=[
+        SectionSpec(title="Integration status"),
+        SectionSpec(title="All workstreams"),
+        SectionSpec(title="Milestones"),
+    ]).model_dump(mode="json")
+
+    updated = revise(
+        existing,
+        "Please add also 4. Budget and eliminate all workstreams part",
+    )
+
+    assert [section.title for section in updated.sections] == [
+        "Integration status", "Milestones", "Budget",
+    ]
+
+
 def test_a_requested_structure_replaces_the_house_deck(model):
     """§17. `DECKS` is a good default and used to be the only possible answer.
 

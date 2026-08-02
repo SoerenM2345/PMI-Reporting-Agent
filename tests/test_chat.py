@@ -124,6 +124,45 @@ def test_a_chat_can_be_renamed_and_closed_and_reopened(client):
     assert chat_id in [c["chat_id"] for c in client.get("/api/chats").json()["chats"]]
 
 
+def test_an_existing_chat_can_be_added_to_a_project_with_its_context(client):
+    project = client.post("/api/projects", json={"name": "Aurora"}).json()["project"]
+    chat = client.post("/api/chats", json={"title": "Budget discussion"}).json()["chat"]
+    client.post(f"/api/chats/{chat['chat_id']}/messages",
+                json={"text": "What is the Phoenix budget position?"})
+
+    moved = client.patch(
+        f"/api/chats/{chat['chat_id']}",
+        json={"project_id": project["project_id"]},
+    )
+
+    assert moved.status_code == 200
+    assert moved.json()["chat"]["project_id"] == project["project_id"]
+    from app.context import builder
+    context = builder.build_for_project(project["project_id"], "Phoenix budget")
+    assert any("Phoenix budget" in item.text
+               for item in context.relevant_chat_messages)
+
+
+def test_a_rule_written_in_chat_becomes_project_context(client):
+    project = client.post("/api/projects", json={"name": "Aurora"}).json()["project"]
+    chat = client.post("/api/chats", json={
+        "title": "Rules", "project_id": project["project_id"],
+    }).json()["chat"]
+
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat['chat_id']}/messages",
+        json={"text": "From now on never repeat a chart's numbers in prose"},
+    ))
+
+    assert "project rule saved" in prose(reply).lower()
+    saved = client.get(f"/api/projects/{project['project_id']}").json()["project"]
+    assert "Never repeat a chart's numbers in prose" in saved["knowledge"]
+    from app.context import builder
+    context = builder.build_for_project(project["project_id"], "create a report")
+    assert any(constraint.source == "project_knowledge"
+               for constraint in context.user_constraints)
+
+
 def test_the_first_exchange_automatically_names_a_default_chat(client):
     chat_id = client.post("/api/chats", json={}).json()["chat"]["chat_id"]
 
@@ -174,6 +213,15 @@ def test_capabilities_are_explained_without_needing_files(client):
                         json={"text": "what can you do?"}).json()["messages"][-1]
     text = prose(reply).lower()
     assert "consolidate" in text and "generate" in text
+
+
+def test_a_greeting_gets_a_friendly_reply_without_needing_files(client):
+    chat_id = client.post("/api/chats", json={}).json()["chat"]["chat_id"]
+
+    reply = client.post(f"/api/chats/{chat_id}/messages",
+                        json={"text": "Hello!"}).json()["messages"][-1]
+    text = prose(reply).lower()
+    assert "hello" in text and "upload" in text and "sections" in text
 
 
 def test_the_agent_can_list_the_conflicts_it_detected(client, sample_files):
@@ -794,8 +842,9 @@ def loaded(client, sample_files):
 
 
 def test_a_project_chat_keeps_its_draft_and_accepts_a_rename(client, sample_files):
-    """The preview and its follow-up edits belong to the chat session even
-    when that chat is attached to a project."""
+    """A project chat carries both ids. Its preview still belongs to the chat
+    session; otherwise the preview opens, but the next edit claims no draft
+    exists because revision looks in the session directory."""
     from app.deliverable import session as session_plan
 
     project = client.post("/api/projects", json={"name": "GlobalMed x MediTexh"}
@@ -822,6 +871,7 @@ def test_a_project_chat_keeps_its_draft_and_accepts_a_rename(client, sample_file
         json={"text": "rename Recommended Next Steps into Next Steps for "
                       "GlobalMed x MediTexh"},
     ))
+
     assert "nothing drafted" not in prose(revised).lower()
     assert prose(revised).startswith("Done —")
     assert actions(revised, "open_preview")
@@ -829,9 +879,9 @@ def test_a_project_chat_keeps_its_draft_and_accepts_a_rename(client, sample_file
                for page in session_plan.load(session_id).pages)
 
 
-def test_stopping_gap_questions_prevents_them_restarting(client, loaded):
-    """'Stop' promises to leave all remaining values blank, so the next draft
-    must not restart the same questionnaire."""
+def test_completed_gap_questions_do_not_restart_after_a_new_draft(client, loaded):
+    """After every current gap was handled, a new report version must not
+    announce the old count and ask the first question again."""
     chat_id, _ = loaded
     first = agent_reply(client.post(
         f"/api/chats/{chat_id}/messages",
@@ -840,9 +890,13 @@ def test_stopping_gap_questions_prevents_them_restarting(client, loaded):
     if "type 'next' to skip" not in prose(first):
         pytest.skip("this sample produced no fillable gaps")
 
-    stopped = agent_reply(client.post(
-        f"/api/chats/{chat_id}/messages", json={"text": "stop"}))
-    assert "leave the rest blank" in prose(stopped).lower()
+    for _ in range(50):
+        reply = agent_reply(client.post(
+            f"/api/chats/{chat_id}/messages", json={"text": "next"}))
+        if "every value" in prose(reply).lower():
+            break
+    else:
+        pytest.fail("the missing-value questionnaire did not finish")
 
     replanned = agent_reply(client.post(
         f"/api/chats/{chat_id}/messages",
@@ -864,6 +918,21 @@ def test_asking_for_a_report_reads_the_files_itself(client, loaded):
         json={"text": "give me a SteerCo deck"}))
 
     assert actions(reply, "open_preview"), "asking for a report produced no draft"
+
+
+def test_first_data_reply_lists_the_problems_not_only_their_count(client, loaded):
+    chat_id, _ = loaded
+
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "give me a SteerCo deck"},
+    ))
+    text = prose(reply)
+
+    assert "## Data review" in text
+    assert "### Problems found" in text
+    assert "### First problems to review" in text
+    assert "Overall Progress" in text or "overall progress" in text
 
 
 def test_the_critical_conflict_gate_survives_into_the_chat(client, loaded):

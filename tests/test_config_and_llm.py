@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import re
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
@@ -107,6 +109,108 @@ def test_use_selection_routes_client_and_models_for_the_whole_run():
         assert seen["model"] == "gpt-4o"
     # Outside the block the selection is gone — fall back to settings.
     assert llm.current_selection() is None
+
+
+def test_project_message_classification_uses_the_fast_model():
+    from app.project import classify
+
+    seen = {}
+
+    class RecordingClient:
+        name = "anthropic"
+        supports_vision = True
+
+        def structured(self, *, output_model, model=None, max_tokens=None, **kw):
+            seen.update(model=model, max_tokens=max_tokens)
+            return output_model(contribution="instruction")
+
+    llm.set_client(RecordingClient())
+    result = classify.classify_message(
+        "Aurora governance has materially changed", provider="anthropic",
+        model="selected-reasoning-model",
+    )
+
+    assert result.contribution == "instruction"
+    assert seen["model"] == Settings(_env_file=None).models_for("anthropic").fast
+    assert seen["max_tokens"] < 512
+
+
+def test_anthropic_request_timeout_is_not_retried(monkeypatch):
+    """A request that already spent its whole timeout budget must fall back now,
+    not repeat the same 45-second wait as the reported production trace did."""
+    from app.llm.anthropic_client import AnthropicClient
+
+    class Timeout(Exception):
+        pass
+
+    class Errors:
+        APITimeoutError = Timeout
+        APIConnectionError = type("Connection", (Exception,), {})
+        InternalServerError = type("Internal", (Exception,), {})
+        RateLimitError = type("RateLimit", (Exception,), {})
+        APIStatusError = type("Status", (Exception,), {})
+
+    calls = 0
+
+    class Messages:
+        def parse(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise Timeout("slow upstream")
+
+    client = AnthropicClient.__new__(AnthropicClient)
+    client._anthropic = Errors
+    client._client = SimpleNamespace(messages=Messages())
+
+    with pytest.raises(LLMError, match="request timed out"):
+        client._with_retries({}, max_retries=3)
+    assert calls == 1
+
+
+def test_anthropic_forwards_a_task_specific_timeout():
+    from app.llm.anthropic_client import AnthropicClient
+
+    seen = {}
+
+    class Errors:
+        APITimeoutError = type("Timeout", (Exception,), {})
+        APIConnectionError = type("Connection", (Exception,), {})
+        InternalServerError = type("Internal", (Exception,), {})
+        RateLimitError = type("RateLimit", (Exception,), {})
+        APIStatusError = type("Status", (Exception,), {})
+
+    class Messages:
+        def parse(self, **kwargs):
+            seen.update(kwargs)
+            return SimpleNamespace(
+                parsed_output=SummaryBullets(bullets=["Grounded"]),
+                stop_reason="end_turn",
+            )
+
+    client = AnthropicClient.__new__(AnthropicClient)
+    client._anthropic = Errors
+    client._client = SimpleNamespace(messages=Messages())
+    result = client.structured(
+        system="system",
+        user="user",
+        output_model=SummaryBullets,
+        timeout_s=15,
+        max_retries=0,
+    )
+
+    assert result.bullets == ["Grounded"]
+    assert seen["timeout"] == 15
+
+
+def test_anthropic_vision_schema_stays_within_the_compact_contract():
+    """The former sixteen-nullable-property object was rejected by Anthropic as
+    'Schema is too complex'. The replacement has no union grammar at all."""
+    from app.llm.schemas import ImageExtraction
+
+    schema = json.dumps(ImageExtraction.model_json_schema())
+    assert '"anyOf"' not in schema
+    assert "ImageFields" not in schema
+    assert len(schema) < 5_000
 
 
 def test_images_rank_lowest_in_source_priority():

@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     #: one retry remains for a transient connection/rate-limit failure.
     llm_timeout_s: float = 45.0
     llm_max_retries: int = 1
+    #: Images are optional evidence, not permission to hold the whole chat open.
+    #: Vision has its own tighter budget and does not retry: with several images,
+    #: the old 45s x two-attempt policy could add minutes before honest OCR/
+    #: unreadable fallbacks ran. Both remain environment-overridable.
+    vision_timeout_s: float = 15.0
+    vision_max_retries: int = 0
 
     # --------------------------------------------------- conflicts (§9)
     #: A = ask always, B = source priority always, C = hybrid (spec's recommended default).

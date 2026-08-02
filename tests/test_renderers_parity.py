@@ -286,6 +286,25 @@ def test_word_repeats_table_headers_and_numbers_figures(built):
         "footers need page numbers"
 
 
+def test_generated_chart_text_is_not_repeated_beside_the_chart():
+    from app.deliverable.engine import _remove_redundant_visual_text
+    from app.deliverable.model import ChartElement, PageDesign, TextElement
+
+    page = PageDesign(page_id="status", elements=[
+        ChartElement(element_id="chart", spec_id="chart-spec",
+                     evidence_ids=["ev:kpi:1"]),
+        TextElement(element_id="body", role="body",
+                    text="The KPI is shown in the chart.",
+                    evidence_ids=["ev:kpi:1"], authored_by="llm"),
+        TextElement(element_id="extra", role="body",
+                    text="Management needs to decide the recovery owner.",
+                    evidence_ids=["ev:decision:1"], authored_by="llm"),
+    ])
+
+    _remove_redundant_visual_text(page)
+
+    assert [element.element_id for element in page.elements] == ["chart", "extra"]
+
 def test_word_keeps_headings_with_what_follows(built):
     import docx
 

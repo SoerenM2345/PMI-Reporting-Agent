@@ -287,7 +287,7 @@ def _state_of_play(context: GenerationContext) -> str:
     return " ".join(lines)
 
 
-def summarize_plan(deliverable, *, limit: int = 8) -> str:
+def summarize_plan(deliverable, *, limit: int | None = None) -> str:
     """Say what a drafted report contains, in prose rather than as a card."""
     titles = [page.title for page in deliverable.pages
               if page.purpose not in ("cover", "divider") and page.title]
@@ -295,9 +295,9 @@ def summarize_plan(deliverable, *, limit: int = 8) -> str:
     if deliverable.governing_message:
         lines.append(deliverable.governing_message)
     if titles:
-        shown = titles[:limit]
-        lines.append("It covers:\n"
+        shown = titles if limit is None else titles[:limit]
+        lines.append("The report will generate these sections:\n"
                      + "\n".join(f"- {title}" for title in shown)
                      + (f"\n- …and {len(titles) - limit} more"
-                        if len(titles) > limit else ""))
+                        if limit is not None and len(titles) > limit else ""))
     return "\n\n".join(lines)

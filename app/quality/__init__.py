@@ -176,13 +176,12 @@ def _drop(page, item: Finding) -> bool:
         page.elements = [e for e in page.elements if e.role != "chart"]
     return len(page.elements) < before
 
-"""
 def _disclose(deliverable: Deliverable, reviewed: ArtifactReview) -> None:
-     Put unfixed blocking findings in the artifact, on page one.
+    """Put unfixed blocking findings in the artifact, on page one.
 
     A document that failed review and does not say so is worse than one that
     fails visibly: the reader has no way to know.
-    
+    """
     blocking = [f for f in reviewed.blocking]
     if not blocking or not deliverable.pages:
         return
@@ -196,4 +195,4 @@ def _disclose(deliverable: Deliverable, reviewed: ArtifactReview) -> None:
     first.elements.insert(0, TextElement(
         element_id=f"{first.page_id}-review",
         role="callout", text=notice, emphasis="bad", authored_by="python",
-        prominence="aside"))"""
+        prominence="aside"))

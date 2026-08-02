@@ -389,7 +389,7 @@ def keyword_ops(instruction: str, deliverable: Deliverable
     no ops, which the caller reports as "I did not understand that" rather than
     guessing. A revision engine that guesses is worse than one that declines.
     """
-    # Preserve casing because a replacement title is the user's wording.
+    # Preserve casing: a replacement title is user-authored wording.
     text = (instruction or "").strip()
     if not text:
         return DeliverableRevision(ops=[], rationale="no instruction given")
@@ -398,9 +398,9 @@ def keyword_ops(instruction: str, deliverable: Deliverable
     if renamed is not None:
         return renamed
 
-    text = text.lower()
+    lowered = text.lower()
     for rule in (_kw_drop, _kw_restore, _kw_move_first, _kw_row_limit):
-        revision = rule(text, deliverable)
+        revision = rule(lowered, deliverable)
         if revision is not None:
             return revision
 
@@ -426,6 +426,8 @@ def _kw_rename(text: str, deliverable: Deliverable
     new = match.group("new").strip(" \t\"'“”‘’.,;:!?-")
     if not old or not new:
         return None
+    # Match only the old wording. The new wording often shares words with it,
+    # and must not influence which page is selected.
     page = _match_page(old, deliverable.pages)
     if page is None:
         return None
@@ -437,7 +439,7 @@ def _kw_rename(text: str, deliverable: Deliverable
 
 def _kw_drop(text: str, deliverable: Deliverable
              ) -> Optional[DeliverableRevision]:
-    if not re.search(r"\b(remove|drop|delete|take out|hide)\b", text):
+    if not re.search(r"\b(remove|drop|delete|take out|hide|exclude|omit|leave out)\b", text):
         return None
     page = _match_page(text, deliverable.pages)
     if page is None:
