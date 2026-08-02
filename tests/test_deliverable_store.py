@@ -124,6 +124,14 @@ def test_the_two_stacks_do_not_share_a_shelf():
     assert store.head(session_id="sess") == 1
 
 
+def test_a_chat_draft_with_both_ids_is_stored_on_its_session_shelf():
+    stored = store.save(a_deliverable(session_id="chat-session"))
+
+    assert store.load(session_id="chat-session").deliverable_id == \
+        stored.deliverable_id
+    assert store.load(project_id="proj") is None
+
+
 def test_an_absent_deliverable_reads_as_none():
     assert store.load(project_id="nobody") is None
     assert store.head(project_id="nobody") is None

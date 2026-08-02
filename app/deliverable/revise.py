@@ -389,10 +389,16 @@ def keyword_ops(instruction: str, deliverable: Deliverable
     no ops, which the caller reports as "I did not understand that" rather than
     guessing. A revision engine that guesses is worse than one that declines.
     """
-    text = (instruction or "").strip().lower()
+    # Preserve casing because a replacement title is the user's wording.
+    text = (instruction or "").strip()
     if not text:
         return DeliverableRevision(ops=[], rationale="no instruction given")
 
+    renamed = _kw_rename(text, deliverable)
+    if renamed is not None:
+        return renamed
+
+    text = text.lower()
     for rule in (_kw_drop, _kw_restore, _kw_move_first, _kw_row_limit):
         revision = rule(text, deliverable)
         if revision is not None:
@@ -403,6 +409,29 @@ def keyword_ops(instruction: str, deliverable: Deliverable
         rationale=("Could not interpret that without a language model. Try "
                    "“remove the dependencies page”, “put risks first”, or "
                    "“show 5 rows on milestones”."),
+    )
+
+
+def _kw_rename(text: str, deliverable: Deliverable
+               ) -> Optional[DeliverableRevision]:
+    """Recognise ``rename X to/into/as Y`` without a model."""
+    match = re.search(
+        r"\b(?:rename|retitle)\s+(?:the\s+)?(?P<old>.+?)\s+"
+        r"(?:to|as|into)\s+(?P<new>.+?)\s*[.!?]?\s*$",
+        text, re.I,
+    )
+    if not match:
+        return None
+    old = match.group("old").strip(" \t\"'“”‘’")
+    new = match.group("new").strip(" \t\"'“”‘’.,;:!?-")
+    if not old or not new:
+        return None
+    page = _match_page(old, deliverable.pages)
+    if page is None:
+        return None
+    return DeliverableRevision(
+        ops=[PageOp(op="rewrite_title", page_id=page.page_id, text=new)],
+        rationale=f"rename “{_label(page)}” to “{new}”",
     )
 
 

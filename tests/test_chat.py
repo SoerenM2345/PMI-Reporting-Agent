@@ -793,6 +793,66 @@ def loaded(client, sample_files):
     return body["chat"]["chat_id"], body["session_id"]
 
 
+def test_a_project_chat_keeps_its_draft_and_accepts_a_rename(client, sample_files):
+    """The preview and its follow-up edits belong to the chat session even
+    when that chat is attached to a project."""
+    from app.deliverable import session as session_plan
+
+    project = client.post("/api/projects", json={"name": "GlobalMed x MediTexh"}
+                          ).json()["project"]
+    body = client.post("/api/chats", json={
+        "project_id": project["project_id"],
+    }).json()
+    chat_id, session_id = body["chat"]["chat_id"], body["session_id"]
+    for name in ("integration_tracker.xlsx", "weekly_update.pptx"):
+        with open(sample_files / name, "rb") as handle:
+            client.post(f"/api/upload?session_id={session_id}", files={
+                "files": (name, handle, "application/octet-stream"),
+            })
+
+    drafted = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "Create a SteerCo status report"},
+    ))
+    assert actions(drafted, "open_preview")
+    assert session_plan.load(session_id) is not None
+
+    revised = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "rename Recommended Next Steps into Next Steps for "
+                      "GlobalMed x MediTexh"},
+    ))
+    assert "nothing drafted" not in prose(revised).lower()
+    assert prose(revised).startswith("Done —")
+    assert actions(revised, "open_preview")
+    assert any(page.title == "Next Steps for GlobalMed x MediTexh"
+               for page in session_plan.load(session_id).pages)
+
+
+def test_stopping_gap_questions_prevents_them_restarting(client, loaded):
+    """'Stop' promises to leave all remaining values blank, so the next draft
+    must not restart the same questionnaire."""
+    chat_id, _ = loaded
+    first = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "give me a SteerCo deck"},
+    ))
+    if "type 'next' to skip" not in prose(first):
+        pytest.skip("this sample produced no fillable gaps")
+
+    stopped = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "stop"}))
+    assert "leave the rest blank" in prose(stopped).lower()
+
+    replanned = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "update the SteerCo status report"},
+    ))
+    assert actions(replanned, "open_preview")
+    assert "value(s) weren't in the files" not in prose(replanned)
+    assert "please provide the" not in prose(replanned).lower()
+
+
 def test_asking_for_a_report_reads_the_files_itself(client, loaded):
     """There is no "Analyse" button in a chat. Telling the user to go and press
     one that does not exist is a dead end — asking for a report is what

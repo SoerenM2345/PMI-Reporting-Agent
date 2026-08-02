@@ -911,6 +911,13 @@ def _handle_pending(chat: Chat, analysis, pending: dict, text: str):
     current_key = pending.get("current_key")
 
     if lowered in _STOP_WORDS:
+        # "Leave the rest blank" is durable. Clearing only pending.json caused
+        # the same questions to restart after the next draft.
+        kb = knowledge.load(chat.session_id)
+        for gap in _open_gaps(model, chat.session_id, skipped):
+            kb.decline_gap(_gap_key(gap))
+        kb.set_focus(None)
+        knowledge.save(kb)
         json_store.clear_pending(chat.session_id)
         return say("Okay — I'll leave the rest blank (they'll show as \"Not "
                    "Reported\"). Ask me to build the report whenever you're ready.")
@@ -1140,4 +1147,3 @@ def _audience_label(text: str) -> str:
     if _match_audience(stripped.lower()) is None:
         return ""
     return stripped
-

@@ -169,11 +169,22 @@ def test_an_applied_revision_becomes_the_next_version(deliverable):
     ("remove the budget page", "drop_page"),
     ("put risks first", "reorder"),
     ("show 5 rows on the budget page", "set_row_limit"),
+    ("rename Budget position into Next Steps for GlobalMed x MediTexh",
+     "rewrite_title"),
 ])
 def test_the_common_instructions_are_understood_without_a_model(
         deliverable, instruction, expected):
     revision = keyword_ops(instruction, deliverable)
     assert [op.op for op in revision.ops] == [expected]
+
+
+def test_a_keyless_rename_preserves_the_users_casing(deliverable):
+    revision = keyword_ops(
+        "rename Budget position into Next Steps for GlobalMed x MediTexh",
+        deliverable,
+    )
+    assert revision.ops[0].page_id == "spend"
+    assert revision.ops[0].text == "Next Steps for GlobalMed x MediTexh"
 
 
 def test_an_instruction_it_cannot_read_is_declined_not_guessed(deliverable):
