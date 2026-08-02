@@ -313,6 +313,10 @@ class ProjectKnowledge(BaseModel):
     assumptions: list[Assumption] = Field(default_factory=list)
     open_questions: list[OpenQuestion] = Field(default_factory=list)
     user_decisions: list[UserDecision] = Field(default_factory=list)
+    #: A report outline imported from or set in any project chat.  It is typed
+    #: data because generation must enforce it; leaving it only in a transcript
+    #: would make compaction able to forget the user's requested structure.
+    requested_structure: list[str] = Field(default_factory=list)
 
     #: One entry per active contributing source (file today, events in 1B).
     source_index: list[dict[str, Any]] = Field(default_factory=list)

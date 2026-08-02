@@ -45,6 +45,8 @@ class AnthropicClient:
         output_model: type[T],
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        timeout_s: Optional[float] = None,
+        max_retries: Optional[int] = None,
         images: Sequence[ImagePart] = (),
         documents: Sequence[DocumentPart] = (),
     ) -> T:
@@ -74,26 +76,38 @@ class AnthropicClient:
             )
         content.append({"type": "text", "text": user})
 
-        kwargs: dict = {
-            "model": model or s.llm_model,
-            "max_tokens": max_tokens or s.llm_max_tokens,
-            # Cached: the extraction/interpretation prompts are long and reused
-            # for every file in a session.
-            "system": [
+        # Anthropic prompt caching has a minimum useful prefix and a cache write
+        # on the first request.  Marking every tiny classifier system prompt as
+        # cacheable made interactive replies pay that setup cost without a
+        # reusable payload.  Long extraction/planning instructions still get
+        # cached; short routing prompts go as ordinary strings.
+        system_payload: object = system
+        if len(system) >= 4096:
+            system_payload = [
                 {
                     "type": "text",
                     "text": system,
                     "cache_control": {"type": "ephemeral"},
                 }
-            ],
+            ]
+
+        kwargs: dict = {
+            "model": model or s.llm_model,
+            "max_tokens": max_tokens or s.llm_max_tokens,
+            "system": system_payload,
             "messages": [{"role": "user", "content": content}],
             "output_format": output_model,
+            "service_tier": "auto",
         }
+        if timeout_s is not None:
+            # Per-task override. Vision uses this to fail fast without changing
+            # the more tolerant timeout for report prose and planning.
+            kwargs["timeout"] = timeout_s
         if s.llm_thinking:
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": s.llm_effort}
 
-        response = self._with_retries(kwargs)
+        response = self._with_retries(kwargs, max_retries=max_retries)
 
         parsed = response.parsed_output
         if parsed is None:
@@ -104,20 +118,26 @@ class AnthropicClient:
         return parsed
 
     # ----------------------------------------------------------------- private
-    def _with_retries(self, kwargs: dict):
+    def _with_retries(self, kwargs: dict, *, max_retries: Optional[int] = None):
         """Retry transient failures only. A 4xx is a bug in our request — surfacing
         it immediately is more useful than retrying it twice and then falling back."""
         s = get_settings()
         A = self._anthropic
         last: Exception | None = None
 
-        for attempt in range(s.llm_max_retries + 1):
+        retries = s.llm_max_retries if max_retries is None else max(0, max_retries)
+        for attempt in range(retries + 1):
             try:
                 return self._client.messages.parse(**kwargs)
             except A.RateLimitError as exc:
                 last = exc
                 delay = self._retry_after(exc, default=2.0 * (2**attempt))
                 log.warning("rate limited; retrying in %.1fs", delay)
+            except A.APITimeoutError as exc:
+                # A full request already consumed its entire latency budget.
+                # Repeating it is what turned one 45-second miss into 90+ seconds
+                # in the chat path; fall back immediately instead.
+                raise LLMError(f"request timed out: {exc}") from exc
             except (A.APIConnectionError, A.InternalServerError) as exc:
                 last = exc
                 delay = 1.0 * (2**attempt)
@@ -129,10 +149,10 @@ class AnthropicClient:
             except A.APIStatusError as exc:
                 raise LLMError(f"{type(exc).__name__}: {exc}") from exc
 
-            if attempt < s.llm_max_retries:
+            if attempt < retries:
                 time.sleep(delay)
 
-        raise LLMError(f"giving up after {s.llm_max_retries + 1} attempts: {last}")
+        raise LLMError(f"giving up after {retries + 1} attempts: {last}")
 
     @staticmethod
     def _retry_after(exc: Exception, default: float) -> float:

@@ -312,7 +312,7 @@ def _styles(brand: BrandSystem, regular: str, bold: str) -> dict:
                        colour="deep", font=bold, space_before=16,
                        space_after=16, left_indent=10, border="emphasis",
                        leading_ratio=1.2),
-        "source": style("PMISource", brand.font("label").size_pt, colour="muted",
+        "source": style("PMISource", 6.0, colour="#A6A6A6",
                         italic=True, space_before=3, space_after=12),
         "cell": style("PMICell", brand.font("small").size_pt, space_after=0,
                       leading_ratio=1.2),
@@ -411,8 +411,7 @@ def _section(story: list, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 path = chart_render.to_png(spec, brand, assets,
                                            size_in=(9.0, 4.6))
-                story.append(_figure(path, spec.caption, figure_number, sheet,
-                                     editable=spec.is_native_pptx))
+                story.append(_figure(path, "", figure_number, sheet))
                 boxes.append(MeasuredBox(page_id=page.page_id, name="chart",
                                          text=spec.caption))
 
@@ -421,7 +420,7 @@ def _section(story: list, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 path = diagram_render.to_png(spec, brand, assets,
                                              size_in=(9.0, 3.8))
-                story.append(_figure(path, spec.caption, figure_number, sheet))
+                story.append(_figure(path, "", figure_number, sheet))
                 boxes.append(MeasuredBox(page_id=page.page_id, name="diagram",
                                          text=spec.caption))
 
@@ -447,6 +446,8 @@ def _section(story: list, page: PageDesign, deliverable: Deliverable,
 def _figure(path: Path, caption: str, figure_number: list[int], sheet: dict, *,
             editable: bool = False) -> KeepTogether:
     """A figure and its caption, which platypus will not separate."""
+    if not caption and not editable:
+        return KeepTogether([_scaled(path)])
     figure_number[0] += 1
     text = caption
     if editable:
@@ -559,7 +560,7 @@ def _appendix(story: list, deliverable: Deliverable,
     if files:
         for name in files:
             story.append(Paragraph(f"&bull;&nbsp;&nbsp;{_x(name)}",
-                                   sheet["bullet"]))
+                                   sheet["source"]))
     else:
         story.append(Paragraph("No files were read for this document.",
                                sheet["body"]))

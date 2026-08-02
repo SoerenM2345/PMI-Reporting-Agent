@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import * as api from "./api";
+import ChatProjectPicker from "./components/chat/ChatProjectPicker";
 import Composer from "./components/chat/Composer";
 import MessageBubble from "./components/chat/MessageBubble";
 import ModelPicker from "./components/chat/ModelPicker";
@@ -286,6 +287,32 @@ export default function App() {
       return body.project;
     });
 
+  const addProjectRule = (id, rule) =>
+    run(async () => {
+      const body = await api.addProjectRule(id, rule);
+      await refreshProjects();
+      setActiveProject(body.project);
+      return body.project;
+    });
+
+  const moveChatToProject = (existingChatId, projectId) =>
+    run(async () => {
+      const moved = await api.patchChat(existingChatId, { project_id: projectId });
+      if (existingChatId === chatId) setChat(moved.chat);
+      await refreshChats();
+      await refreshProjects();
+      // If the user is looking at a project, keep its counts, knowledge and
+      // workspace current whether a chat was moved into or out of it.
+      if (activeProject) {
+        const body = await api.getProject(activeProject.project_id);
+        setActiveProject(body.project);
+        await loadWorkspace(activeProject.project_id);
+      }
+    });
+
+  const addExistingChat = (projectId, existingChatId) =>
+    moveChatToProject(existingChatId, projectId);
+
   const deleteProject = (id, name) =>
     run(async () => {
       // Deleting a project keeps its chats — they fall back to the top level.
@@ -495,6 +522,7 @@ export default function App() {
         onRenameProject={renameProject}
         onChangeProjectIcon={changeProjectIcon}
         onDeleteProject={deleteProject}
+        onMoveChat={moveChatToProject}
         busy={busy}
       />
 
@@ -547,11 +575,18 @@ export default function App() {
             <ProjectPanel
               project={activeProject}
               chats={chats.filter((c) => c.project_id === activeProject.project_id)}
+              availableChats={chats.filter((c) => !c.project_id)}
               busy={busy}
               onSaveKnowledge={(text) =>
                 saveProjectKnowledge(activeProject.project_id, text)
               }
               onNewChat={() => newChat(activeProject.project_id)}
+              onAddExistingChat={(existingChatId) =>
+                addExistingChat(activeProject.project_id, existingChatId)
+              }
+              onAddRule={(rule) =>
+                addProjectRule(activeProject.project_id, rule)
+              }
               onOpenChat={openChat}
               onChangeIcon={(icon) =>
                 changeProjectIcon(activeProject.project_id, icon)
@@ -562,13 +597,18 @@ export default function App() {
         </div>
       ) : (
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b
+        <header className="flex items-center justify-between gap-4 border-b
                            border-slate-200 bg-white px-6 py-3">
-          <div>
-            <h1 className="text-sm font-semibold text-slate-900">
-              
+          <div className="flex min-w-0 items-center gap-3">
+            <h1 className="max-w-72 truncate text-sm font-semibold text-slate-900">
+              {chat?.title || "New chat"}
             </h1>
-
+            <ChatProjectPicker
+              chat={chat}
+              projects={projects}
+              busy={busy}
+              onChange={(projectId) => moveChatToProject(chatId, projectId)}
+            />
           </div>
           <ModelPicker
             chat={chat}

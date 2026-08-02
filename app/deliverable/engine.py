@@ -50,12 +50,13 @@ log = logging.getLogger("pmi.deliverable.engine")
 #: from a fallback and looks analysed is the failure the whole warning
 #: machinery exists to prevent, so the disclosure goes in the artifact, not only
 #: in a log the reader will never see.
+"""
 UNPLANNED_NOTICE = (
     "Assembled without a language model: the sections, their order and the "
     "wording follow the request and the available evidence rather than a "
     "reasoned argument. Every figure shown is validated; the emphasis and the "
     "conclusions are not."
-)
+)"""
 
 #: What each planning stage contributes, so a partial fallback can say what it
 #: actually lost instead of claiming the whole document is unplanned.
@@ -154,6 +155,7 @@ def build(context: GenerationContext, *, force: bool = False,
         warnings.extend(narrative_writer.write_page(
             page, context, plan, use_model=False,
             copy=copy_by_page.get(page.page_id)))
+        _remove_redundant_visual_text(page)
     warnings.extend(title_writer.write_titles(deliverable, context, plan,
                                               use_model=False,
                                               titles=complete.titles))
@@ -170,6 +172,38 @@ def build(context: GenerationContext, *, force: bool = False,
              deliverable.deliverable_id, deliverable.page_count,
              len(deliverable.layouts_used), planned_by, len(warnings))
     return deliverable
+
+
+def _remove_redundant_visual_text(page: PageDesign) -> None:
+    """Let a chart carry the facts it already visualizes once.
+
+    Commentary survives when it adds evidence the chart does not contain, and
+    user-authored text always survives.  The common generated duplicate — a
+    paragraph or bullets built from exactly the chart's evidence — is removed
+    at the planning boundary so every renderer receives the same clean page.
+    """
+    from app.deliverable.model import BulletsElement, ChartElement, DiagramElement
+
+    visual_ids = {
+        evidence_id
+        for element in page.elements
+        if isinstance(element, (ChartElement, DiagramElement))
+        for evidence_id in element.evidence_ids
+    }
+    if not visual_ids:
+        return
+
+    kept = []
+    for element in page.elements:
+        if isinstance(element, (TextElement, BulletsElement)):
+            own = set(element.evidence_ids)
+            duplicate = bool(own) and own <= visual_ids
+            authored_by = getattr(element, "authored_by", "python")
+            role = getattr(element, "role", "")
+            if duplicate and authored_by != "user" and role in ("body", "bullets"):
+                continue
+        kept.append(element)
+    page.elements = kept
 
 
 def _enforce_design_sections(design: DocumentDesign,

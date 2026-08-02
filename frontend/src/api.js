@@ -181,6 +181,13 @@ export function patchProject(projectId, patch) {
   });
 }
 
+export function addProjectRule(projectId, rule) {
+  return call(`/api/projects/${projectId}/rules`, {
+    method: "POST",
+    body: JSON.stringify({ rule }),
+  });
+}
+
 export function deleteProject(projectId) {
   return call(`/api/projects/${projectId}`, { method: "DELETE" });
 }

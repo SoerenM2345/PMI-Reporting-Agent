@@ -42,6 +42,8 @@ class OpenAIClient:
         output_model: type[T],
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        timeout_s: Optional[float] = None,
+        max_retries: Optional[int] = None,
         images: Sequence[ImagePart] = (),
         documents: Sequence[DocumentPart] = (),
     ) -> T:
@@ -79,21 +81,26 @@ class OpenAIClient:
             ],
             "response_format": output_model,
         }
+        if timeout_s is not None:
+            kwargs["timeout"] = timeout_s
 
-        response = self._with_retries(kwargs)
+        response = self._with_retries(kwargs, max_retries=max_retries)
         parsed = response.choices[0].message.parsed
         if parsed is None:
             raise LLMError(f"model returned no parseable {output_model.__name__}")
         return parsed
 
-    def _with_retries(self, kwargs: dict):
+    def _with_retries(self, kwargs: dict, *, max_retries: Optional[int] = None):
         s = get_settings()
         O = self._openai
         last: Exception | None = None
 
-        for attempt in range(s.llm_max_retries + 1):
+        retries = s.llm_max_retries if max_retries is None else max(0, max_retries)
+        for attempt in range(retries + 1):
             try:
                 return self._client.chat.completions.parse(**kwargs)
+            except O.APITimeoutError as exc:
+                raise LLMError(f"request timed out: {exc}") from exc
             except (O.RateLimitError, O.APIConnectionError, O.InternalServerError) as exc:
                 last = exc
                 delay = 1.0 * (2**attempt)
@@ -104,7 +111,7 @@ class OpenAIClient:
             except O.APIStatusError as exc:
                 raise LLMError(f"{type(exc).__name__}: {exc}") from exc
 
-            if attempt < s.llm_max_retries:
+            if attempt < retries:
                 time.sleep(delay)
 
-        raise LLMError(f"giving up after {s.llm_max_retries + 1} attempts: {last}")
+        raise LLMError(f"giving up after {retries + 1} attempts: {last}")

@@ -389,12 +389,18 @@ def keyword_ops(instruction: str, deliverable: Deliverable
     no ops, which the caller reports as "I did not understand that" rather than
     guessing. A revision engine that guesses is worse than one that declines.
     """
-    text = (instruction or "").strip().lower()
+    # Preserve casing: a replacement title is user-authored wording.
+    text = (instruction or "").strip()
     if not text:
         return DeliverableRevision(ops=[], rationale="no instruction given")
 
+    renamed = _kw_rename(text, deliverable)
+    if renamed is not None:
+        return renamed
+
+    lowered = text.lower()
     for rule in (_kw_drop, _kw_restore, _kw_move_first, _kw_row_limit):
-        revision = rule(text, deliverable)
+        revision = rule(lowered, deliverable)
         if revision is not None:
             return revision
 
@@ -406,9 +412,34 @@ def keyword_ops(instruction: str, deliverable: Deliverable
     )
 
 
+def _kw_rename(text: str, deliverable: Deliverable
+               ) -> Optional[DeliverableRevision]:
+    """Recognise ``rename X to/into/as Y`` without a model."""
+    match = re.search(
+        r"\b(?:rename|retitle)\s+(?:the\s+)?(?P<old>.+?)\s+"
+        r"(?:to|as|into)\s+(?P<new>.+?)\s*[.!?]?\s*$",
+        text, re.I,
+    )
+    if not match:
+        return None
+    old = match.group("old").strip(" \t\"'“”‘’")
+    new = match.group("new").strip(" \t\"'“”‘’.,;:!?-")
+    if not old or not new:
+        return None
+    # Match only the old wording. The new wording often shares words with it,
+    # and must not influence which page is selected.
+    page = _match_page(old, deliverable.pages)
+    if page is None:
+        return None
+    return DeliverableRevision(
+        ops=[PageOp(op="rewrite_title", page_id=page.page_id, text=new)],
+        rationale=f"rename “{_label(page)}” to “{new}”",
+    )
+
+
 def _kw_drop(text: str, deliverable: Deliverable
              ) -> Optional[DeliverableRevision]:
-    if not re.search(r"\b(remove|drop|delete|take out|hide)\b", text):
+    if not re.search(r"\b(remove|drop|delete|take out|hide|exclude|omit|leave out)\b", text):
         return None
     page = _match_page(text, deliverable.pages)
     if page is None:

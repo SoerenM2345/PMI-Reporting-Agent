@@ -1193,7 +1193,8 @@ def _sheet_data_quality(model, quality) -> Section:
                       emphasis="bad" if not c.is_resolved else "none"),
                  Cell(text=c.field.replace("_", " ")),
                  Cell(text=c.severity.value.title()),
-                 Cell(text="; ".join(f"{f}: {v}" for f, v in c.values.items())),
+                 Cell(text=("Resolved" if c.is_resolved else
+                            "; ".join(f"{f}: {v}" for f, v in c.values.items()))),
                  Cell(text=c.resolved_value or "UNRESOLVED"),
                  Cell(text=c.resolved_from or "—"),
                  Cell(text=c.resolution or "awaiting user")]

@@ -130,7 +130,68 @@ def apply_resolutions(model: PMIDataModel) -> PMIDataModel:
                 log.warning("could not apply %s to %s: %s",
                             conflict.conflict_id, conflict.entity_key, exc)
 
+    _collapse_resolved_duplicates(model)
     return model
+
+
+def _collapse_resolved_duplicates(model: PMIDataModel) -> None:
+    """Keep one canonical entity and one provenance after a disagreement.
+
+    Standardization intentionally keeps each source's row until conflicts have
+    been detected.  Once a person has selected the truth, retaining all of those
+    rows makes a report print the same corrected figure two or three times and
+    cite every losing file.  Collapse only fully resolved groups, after every
+    chosen value has been applied; complementary non-conflicting fields are
+    copied onto the canonical row before the duplicates are removed.
+    """
+    from app.extractors.base import normalize_status, parse_date, parse_number
+
+    collections = {
+        "task": ("tasks", "title"), "milestone": ("milestones", "name"),
+        "risk": ("risks", "title"), "issue": ("issues", "title"),
+        "budget": ("budget", "category"), "synergy": ("synergies", "title"),
+        "kpi": ("kpis", "name"), "dependency": ("dependencies", "description"),
+        "decision": ("decisions", "title"), "workstream": ("workstreams", "name"),
+    }
+    grouped: dict[tuple[str, str], list[Conflict]] = {}
+    for conflict in model.conflicts:
+        if conflict.is_resolved and conflict.entity_type in collections:
+            key = (conflict.entity_type, conflict.entity_key.casefold().strip())
+            grouped.setdefault(key, []).append(conflict)
+
+    for (entity_type, key), conflicts in grouped.items():
+        attr, label_attr = collections[entity_type]
+        collection = getattr(model, attr)
+        matches = [item for item in collection
+                   if str(getattr(item, label_attr, "")).casefold().strip() == key]
+        if len(matches) < 2:
+            continue
+
+        winning_file = next((c.resolved_from for c in conflicts
+                             if c.resolved_from and c.resolved_from != "user"), None)
+        canonical = next((item for item in matches
+                          if winning_file in item.source_files), matches[0])
+        for conflict in conflicts:
+            value = _coerce(conflict.field, conflict.resolved_value,
+                            normalize_status, parse_date, parse_number)
+            if value is not None:
+                setattr(canonical, conflict.field, value)
+
+        for other in matches:
+            if other is canonical:
+                continue
+            for field in type(canonical).model_fields:
+                if field.endswith("_id") or field == "source_references":
+                    continue
+                if getattr(canonical, field, None) is None:
+                    setattr(canonical, field, getattr(other, field, None))
+
+        winner_ref = next((e.source_reference for c in conflicts for e in c.evidence
+                           if e.file_name == winning_file), None)
+        canonical.source_references = [winner_ref] if winner_ref is not None else []
+        duplicate_ids = {id(item) for item in matches if item is not canonical}
+        setattr(model, attr, [item for item in collection
+                              if id(item) not in duplicate_ids])
 
 
 def _targets(model: PMIDataModel, conflict: Conflict) -> list:

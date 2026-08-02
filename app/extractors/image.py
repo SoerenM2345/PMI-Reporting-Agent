@@ -26,6 +26,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from app.config import get_settings
 from app.extractors.base import make_source
 from app.llm import ImagePart, LLMError, get_client, vision_model
 from app.llm.prompts import load as load_prompt
@@ -91,6 +92,7 @@ def _interpret(prepared: PreparedImage) -> ImageExtraction:
     would cost a round trip to learn something the model works out anyway while
     interpreting.
     """
+    settings = get_settings()
     return get_client().structured(
         system=load_prompt("interpret_pmi_image"),
         user=(
@@ -99,6 +101,8 @@ def _interpret(prepared: PreparedImage) -> ImageExtraction:
         ),
         output_model=ImageExtraction,
         model=vision_model(),
+        timeout_s=settings.vision_timeout_s,
+        max_retries=settings.vision_max_retries,
         images=[ImagePart(b64=prepared.b64, media_type=prepared.media_type)],
     )
 
@@ -138,7 +142,11 @@ def records_from_extraction(
         record["title"] = item.title
         # Field values are strings from the model; standardize.py parses and
         # validates them like any other source's. Nothing bypasses that.
-        record.update({k: v for k, v in item.fields.items() if v not in (None, "")})
+        record.update({
+            attribute.name: attribute.value
+            for attribute in item.fields
+            if attribute.value not in (None, "")
+        })
 
         records.append(record)
 
@@ -189,7 +197,7 @@ def _score(
 
 
 def _region(item: ExtractedImageItem, quality) -> Optional[ImageRegion]:
-    if item.region is None:
+    if not item.region.description and len(item.region.box) != 4:
         return None
 
     box = None

@@ -127,6 +127,7 @@ def _interpret_scanned(path: Path, pages: list[int]) -> list[dict]:
     that is the difference between "there was nothing in it" and "we could not open
     it", and only one of those is honest (§21.17).
     """
+    from app.config import get_settings
     from app.llm import DocumentPart, LLMError, get_client, vision_model
     from app.llm.prompts import load as load_prompt
     from app.llm.schemas import ImageExtraction
@@ -152,6 +153,7 @@ def _interpret_scanned(path: Path, pages: list[int]) -> list[dict]:
 
     try:
         b64 = base64.standard_b64encode(path.read_bytes()).decode()
+        settings = get_settings()
         result = client.structured(
             system=load_prompt("interpret_pmi_image"),
             user=(
@@ -160,6 +162,8 @@ def _interpret_scanned(path: Path, pages: list[int]) -> list[dict]:
             ),
             output_model=ImageExtraction,
             model=vision_model(),
+            timeout_s=settings.vision_timeout_s,
+            max_retries=settings.vision_max_retries,
             documents=[DocumentPart(b64=b64)],
         )
     except (LLMError, Exception) as exc:

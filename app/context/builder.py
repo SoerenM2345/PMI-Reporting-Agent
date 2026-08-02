@@ -61,7 +61,10 @@ def build_for_project(project_id: str, request_text: str, *,
     record = chat_store.get_project(project_id)
 
     digest = _project_digest(knowledge, record)
-    messages = chat_store.list_messages(chat_id) if chat_id else []
+    # Every filed chat contributes retrieval context.  Canonical facts still
+    # come only from ProjectKnowledge; this transcript layer supplies the
+    # conversational history without treating questions as facts.
+    messages = chat_store.list_project_messages(project_id)
 
     return _assemble(
         scope="project", project_id=project_id, chat_id=chat_id,
@@ -105,8 +108,11 @@ def build_for_session(session_id: str, request_text: str, *,
         _session_digest(kb_store.load(session_id)),
     )
     active_chat_id = chat.chat_id if chat is not None else chat_id
-    messages = (chat_store.list_messages(active_chat_id)
-                if active_chat_id else [])
+    messages = (
+        chat_store.list_project_messages(linked_project_id)
+        if linked_project_id
+        else (chat_store.list_messages(active_chat_id) if active_chat_id else [])
+    )
 
     context = _assemble(
         scope="session", project_id=linked_project_id, chat_id=active_chat_id,
@@ -347,7 +353,8 @@ def _transaction(header: PMIProject) -> TransactionContext:
 # ============================================== what the user explicitly asked
 _SECTION_PREAMBLE = re.compile(
     r"\b(?:sections?|chapters?|slides?|topics?|cover(?:ing|s)?|"
-    r"includ(?:e|ing|es)|containing|contains|with|comprising)\b\s*[:\-]", re.I)
+    r"includ(?:e|ing|es)|containing|contains|with|comprising)\b\s*"
+    r"(?::|\-|\bon\b|\babout\b)", re.I)
 _NUMBERED = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+(?P<text>.+?)\s*[.;]?$", re.M)
 _INLINE_NUMBERED = re.compile(
     r"(?:(?<=\s)|^)\d{1,2}[.)]\s*(?P<text>.+?)(?=\s+\d{1,2}[.)]\s|\s*$)")
@@ -386,7 +393,10 @@ def requested_sections(request: str) -> list[str]:
 
     if match:
         tail = request[match.end():]
-        tail = re.split(r"(?:\.\s+[A-Z])|\n\n", tail, maxsplit=1)[0]
+        # Stop at the next sentence, but not at the period in a section title
+        # such as "Forecast vs. Actuals".
+        tail = re.split(r"(?:(?<!vs)(?<!Vs)(?<!VS)\.\s+(?=[A-Z]))|\n\n",
+                        tail, maxsplit=1)[0]
         parts = [_clean_section(p) for p in re.split(r"[;,]|\band\b", tail)]
         parts = [p for p in parts if p and not _STOP_SECTION.match(p)]
         if len(parts) >= 2:
@@ -562,6 +572,7 @@ def _project_digest(knowledge, record) -> KnowledgeDigest:
     digest.open_questions = [q.text for q in knowledge.open_questions if q.text]
     digest.decisions = [_decision_text(d) for d in knowledge.user_decisions]
     digest.decisions = [d for d in digest.decisions if d]
+    digest.requested_structure = list(knowledge.requested_structure)
     return digest
 
 

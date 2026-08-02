@@ -29,10 +29,14 @@ def _dir(*, project_id: Optional[str] = None,
     from app.config import get_settings
 
     base = Path(get_settings().storage_dir)
-    if project_id:
-        return base / "projects" / project_id / "deliverables"
+    # A project chat carries both ids, but its conversational preview is still
+    # a session draft. All preview and revision endpoints load it by session.
+    # Project-level builds have no session id and continue to use the project
+    # directory below.
     if session_id:
         return base / session_id / "deliverables"
+    if project_id:
+        return base / "projects" / project_id / "deliverables"
     raise ValueError("a deliverable needs either a project_id or a session_id")
 
 

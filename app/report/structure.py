@@ -141,6 +141,80 @@ def _detect_deterministically(text: str) -> Optional[StructureSpec]:
     return StructureSpec(sections=[SectionSpec(title=t) for t in titles])
 
 
+# A later turn often edits a structure rather than restating it: “add Budget and
+# remove Workstreams”.  This is deliberately deterministic.  The stored titles
+# are the user's exact contract, so a language model must not silently rename or
+# retain a topic the user explicitly removed.
+_REMOVE = re.compile(
+    r"\b(?:remove|drop|delete|exclude|omit|eliminate|leave out)\s+(?:the\s+)?"
+    r"(?P<title>.+?)(?=\s+(?:and|but)\s+(?:add|include|remove|drop|delete|"
+    r"exclude|omit|eliminate|leave out)\b|[,;]|$)", re.I)
+_ADD = re.compile(
+    r"\b(?:add|include)\s+(?:also\s+)?(?:the\s+)?(?P<title>.+?)"
+    r"(?=\s+(?:and|but)\s+(?:add|include|remove|drop|delete|exclude|omit|"
+    r"eliminate|leave out)\b|[,;]|$)", re.I)
+_RENAME = re.compile(
+    r"\b(?:rename|retitle)\s+(?:the\s+)?(?P<old>.+?)\s+"
+    r"(?:to|as|into)\s+(?P<new>.+?)\s*[.!?]?\s*$", re.I)
+
+
+def revise(existing: Optional[dict], instruction: str) -> Optional[StructureSpec]:
+    """Apply explicit add/remove/rename instructions to a stored structure."""
+    if not isinstance(existing, dict):
+        return None
+    try:
+        current = StructureSpec.model_validate(existing)
+    except (TypeError, ValueError):
+        return None
+
+    rename = _RENAME.search(instruction)
+    if rename:
+        old = _clean_edit(rename.group("old"))
+        new = _clean_edit(rename.group("new"))
+        changed = False
+        sections: list[SectionSpec] = []
+        for section in current.sections:
+            if not changed and old and new and _same_topic(section.title, old):
+                sections.append(section.model_copy(update={"title": new}))
+                changed = True
+            else:
+                sections.append(section)
+        return StructureSpec(sections=sections) if changed else None
+
+    removals = [_clean_edit(m.group("title")) for m in _REMOVE.finditer(instruction)]
+    additions = [_clean_edit(m.group("title")) for m in _ADD.finditer(instruction)]
+    removals = [value for value in removals if value]
+    additions = [value for value in additions if value]
+    if not removals and not additions:
+        return None
+
+    kept = [section for section in current.sections
+            if not any(_same_topic(section.title, removed) for removed in removals)]
+    for title in additions:
+        if not any(_same_topic(section.title, title) for section in kept):
+            kept.append(SectionSpec(title=title))
+    return StructureSpec(sections=kept) if kept else None
+
+
+def _clean_edit(value: str) -> str:
+    value = re.sub(r"^\s*\d+[.)]\s*", "", value)
+    value = re.sub(r"\b(?:part|section|slide|topic)s?\b\s*$", "", value,
+                   flags=re.I)
+    value = re.sub(r"^(?:all|any)\s+", "", value.strip(), flags=re.I)
+    return value.strip(" .,:;-")
+
+
+def _same_topic(left: str, right: str) -> bool:
+    a, b = _normalise(left), _normalise(right)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    left_id = match(left, set(ALIASES))
+    right_id = match(right, set(ALIASES))
+    return bool(left_id and left_id == right_id)
+
+
 def _multiline_titles(text: str) -> list[str]:
     titles: list[str] = []
     for line in text.splitlines():

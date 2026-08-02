@@ -473,6 +473,21 @@ def list_messages(chat_id: str, *, include_superseded: bool = True) -> list[Mess
     return [_message(row) for row in rows]
 
 
+def list_project_messages(project_id: str, *, include_superseded: bool = False
+                          ) -> list[Message]:
+    """Conversation context across every live chat filed in a project."""
+    superseded = "" if include_superseded else "AND m.superseded = 0"
+    with _connect() as connection:
+        rows = connection.execute(
+            f"""SELECT m.* FROM messages m
+                JOIN chats c ON c.chat_id = m.chat_id
+                WHERE c.project_id = ? AND c.archived_at IS NULL {superseded}
+                ORDER BY m.created_at, m.rowid""",
+            (project_id,),
+        ).fetchall()
+    return [_message(row) for row in rows]
+
+
 def supersede(message_ids: list[str]) -> int:
     """Mark turns as compacted away. They stay readable in the transcript."""
     if not message_ids:

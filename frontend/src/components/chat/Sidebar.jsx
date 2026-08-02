@@ -49,6 +49,7 @@ export default function Sidebar({
   onChangeProjectIcon,
   onDeleteProject,
   onOpenProject,
+  onMoveChat,
 
   busy = false,
 }) {
@@ -66,6 +67,8 @@ export default function Sidebar({
   const [newProjectIcon, setNewProjectIcon] = useState("📁");
 
   const [iconPickerProjectId, setIconPickerProjectId] = useState(null);
+  const [draggingChatId, setDraggingChatId] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null);
 
   const chatsWithoutProject = chats.filter((chat) => !chat.project_id);
 
@@ -130,6 +133,44 @@ export default function Sidebar({
       ...current,
       [projectId]: true,
     }));
+  };
+
+  const startChatDrag = (event, chatId) => {
+    setDraggingChatId(chatId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", chatId);
+  };
+
+  const finishChatDrag = () => {
+    setDraggingChatId(null);
+    setDropTarget(null);
+  };
+
+  const allowChatDrop = (event, target) => {
+    if (busy) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropTarget(target);
+  };
+
+  const leaveChatDrop = (event, target) => {
+    if (event.currentTarget.contains(event.relatedTarget)) return;
+    setDropTarget((current) => (current === target ? null : current));
+  };
+
+  const dropChat = (event, projectId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const draggedId =
+      event.dataTransfer.getData("text/plain") || draggingChatId;
+    const dragged = chats.find((candidate) => candidate.chat_id === draggedId);
+    if (dragged && (dragged.project_id || null) !== projectId) {
+      onMoveChat?.(draggedId, projectId);
+    }
+    if (projectId) {
+      setExpandedProjects((current) => ({ ...current, [projectId]: true }));
+    }
+    finishChatDrag();
   };
 
   return (
@@ -224,6 +265,14 @@ export default function Sidebar({
                   chatDraft={chatDraft}
                   iconPickerProjectId={iconPickerProjectId}
                   busy={busy}
+                  isDropTarget={dropTarget === project.project_id}
+                  onDragOver={(event) =>
+                    allowChatDrop(event, project.project_id)
+                  }
+                  onDragLeave={(event) =>
+                    leaveChatDrop(event, project.project_id)
+                  }
+                  onDrop={(event) => dropChat(event, project.project_id)}
                   onToggle={() => toggleProject(project.project_id)}
                   onOpenProject={() =>
                     handleProjectOpen(project.project_id)
@@ -263,6 +312,8 @@ export default function Sidebar({
                     setChatDraft("");
                   }}
                   onDeleteChat={onDelete}
+                  onChatDragStart={startChatDrag}
+                  onChatDragEnd={finishChatDrag}
                 />
               );
             })}
@@ -270,34 +321,52 @@ export default function Sidebar({
 
           <div className="my-4 border-t border-slate-100" />
 
-          <SidebarSectionTitle>Chats</SidebarSectionTitle>
+          <div
+            aria-label="Chats outside projects drop area"
+            onDragOver={(event) => allowChatDrop(event, "unfiled")}
+            onDragLeave={(event) => leaveChatDrop(event, "unfiled")}
+            onDrop={(event) => dropChat(event, null)}
+            className={`rounded-xl border p-1 transition ${
+              dropTarget === "unfiled"
+                ? "border-blue-400 bg-blue-50 ring-2 ring-blue-100"
+                : "border-transparent"
+            }`}
+          >
+            <SidebarSectionTitle>Chats</SidebarSectionTitle>
 
-          {chatsWithoutProject.length === 0 ? (
-            <p className="px-3 py-4 text-center text-xs text-slate-400">
-              No chats outside projects.
-            </p>
-          ) : (
-            <div className="space-y-1">
-              {chatsWithoutProject.map((chat) => (
-                <ChatItem
-                  key={chat.chat_id}
-                  chat={chat}
-                  active={chat.chat_id === activeChatId}
-                  editing={editingChatId === chat.chat_id}
-                  draft={chatDraft}
-                  onOpen={() => onOpen?.(chat.chat_id)}
-                  onStartRename={() => startChatRename(chat)}
-                  onDraftChange={setChatDraft}
-                  onCommitRename={() => commitChatRename(chat.chat_id)}
-                  onCancelRename={() => {
-                    setEditingChatId(null);
-                    setChatDraft("");
-                  }}
-                  onDelete={() => onDelete?.(chat.chat_id, chat.title)}
-                />
-              ))}
-            </div>
-          )}
+            {chatsWithoutProject.length === 0 ? (
+              <p className="px-3 py-4 text-center text-xs text-slate-400">
+                {draggingChatId
+                  ? "Drop here to remove the chat from its project."
+                  : "No chats outside projects."}
+              </p>
+            ) : (
+              <div className="space-y-1">
+                {chatsWithoutProject.map((chat) => (
+                  <ChatItem
+                    key={chat.chat_id}
+                    chat={chat}
+                    active={chat.chat_id === activeChatId}
+                    editing={editingChatId === chat.chat_id}
+                    draft={chatDraft}
+                    busy={busy}
+                    dragging={draggingChatId === chat.chat_id}
+                    onDragStart={startChatDrag}
+                    onDragEnd={finishChatDrag}
+                    onOpen={() => onOpen?.(chat.chat_id)}
+                    onStartRename={() => startChatRename(chat)}
+                    onDraftChange={setChatDraft}
+                    onCommitRename={() => commitChatRename(chat.chat_id)}
+                    onCancelRename={() => {
+                      setEditingChatId(null);
+                      setChatDraft("");
+                    }}
+                    onDelete={() => onDelete?.(chat.chat_id, chat.title)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         </nav>
       </aside>
 
@@ -370,6 +439,10 @@ function ProjectItem({
   chatDraft,
   iconPickerProjectId,
   busy,
+  isDropTarget,
+  onDragOver,
+  onDragLeave,
+  onDrop,
   onToggle,
   onOpenProject,
   onNewChat,
@@ -386,6 +459,8 @@ function ProjectItem({
   onCommitChatRename,
   onCancelChatRename,
   onDeleteChat,
+  onChatDragStart,
+  onChatDragEnd,
 }) {
   const isEditing = editingProjectId === project.project_id;
   const showIconPicker = iconPickerProjectId === project.project_id;
@@ -393,8 +468,14 @@ function ProjectItem({
   return (
 
     <div
+      aria-label={`Project drop area: ${project.name}`}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       className={`rounded-xl border transition ${
-        isActive
+        isDropTarget
+          ? "border-blue-400 bg-blue-50 ring-2 ring-blue-100"
+          : isActive
           ? "border-slate-300 bg-slate-50"
           : "border-transparent hover:bg-slate-50"
       }`}
@@ -510,6 +591,10 @@ function ProjectItem({
                   active={chat.chat_id === activeChatId}
                   editing={editingChatId === chat.chat_id}
                   draft={chatDraft}
+                  busy={busy}
+                  dragging={false}
+                  onDragStart={onChatDragStart}
+                  onDragEnd={onChatDragEnd}
                   onOpen={() => onOpenChat?.(chat.chat_id)}
                   onStartRename={() => onStartChatRename(chat)}
                   onDraftChange={onChatDraftChange}
@@ -536,6 +621,10 @@ function ChatItem({
   editing,
   draft,
   compact = false,
+  busy = false,
+  dragging = false,
+  onDragStart,
+  onDragEnd,
   onOpen,
   onStartRename,
   onDraftChange,
@@ -545,9 +634,15 @@ function ChatItem({
 }) {
   return (
     <div
+      draggable={!editing && !busy}
+      onDragStart={(event) => onDragStart?.(event, chat.chat_id)}
+      onDragEnd={onDragEnd}
+      aria-label={`Chat: ${chat.title}`}
       className={`group rounded-lg transition ${
         compact ? "ml-5" : ""
-      } ${active ? "bg-slate-200" : "hover:bg-slate-100"}`}
+      } ${dragging ? "opacity-40" : ""} ${
+        active ? "bg-slate-200" : "hover:bg-slate-100"
+      }`}
     >
       {editing ? (
         <div className="p-2">

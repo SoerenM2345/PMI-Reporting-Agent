@@ -92,9 +92,9 @@ def install(document, brand: BrandSystem) -> None:
                bold=True, color=brand.color("text_inverse"), space_after=0)
     _paragraph(document, TABLE_BODY, font, brand.font("small").size_pt,
                color=brand.color("text"), space_after=0)
-    _paragraph(document, SOURCE_NOTE, font, brand.font("label").size_pt,
-               color=brand.color("muted"), italic=True, space_before=4,
-               space_after=12)
+    _paragraph(document, SOURCE_NOTE, font, 6.0,
+               color="#A6A6A6", italic=True, space_before=3,
+               space_after=8)
     _paragraph(document, KPI_VALUE, font, brand.font("kpi").size_pt * 0.6,
                bold=True, color=brand.color("primary"), space_after=0)
     _paragraph(document, KPI_LABEL, font, brand.font("label").size_pt,

@@ -152,6 +152,35 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
     if _is_capability_question(text):
         return _capabilities(json_store.load_analysis(chat.session_id))
 
+    if chat.project_id:
+        from app.project.chat_context import save_rule, standing_rule
+
+        rule = standing_rule(text)
+        if rule:
+            saved = save_rule(chat.project_id, rule)
+            return say(
+                "## Project rule saved\n\n"
+                f"- {saved}\n\nThis now applies to every chat and report in "
+                "the project. You can also edit it under **Knowledge & context**."
+            )
+
+    if _is_greeting(text):
+        return say(
+            "Hello! I can turn your PMI files into professional reports, presentations, "
+            "dashboards, and charts tailored to your audience. Upload your documents and "
+            "tell me what you need, including the sections and structure you prefer. For example:\n\n"
+            "• CFO Finance Report — Budget Overview, Synergy Realization, Financial Risks, Cash Flow\n"
+            "• PMO Status Report — Workstream Progress, Milestones, Risks & Issues, Next Steps\n"
+            "• IT Integration Deck — System Migration, Application Landscape, Day-1 Readiness, Cybersecurity\n"
+            "• HR Integration Report — Organization Design, Talent Retention, Change Management\n"
+            "• Operations Dashboard — Manufacturing, Supply Chain, KPIs, Integration Progress\n"
+            "• Synergy Tracking Report — Synergy Pipeline, Benefits Realized, Value Capture, Forecast\n"
+            "• Executive Summary — Overall Integration Health, Key Risks, Decisions Required, Recommendations\n"
+            "• Risk Management Report — Top Risks, Mitigation Actions, Escalations, Dependencies\n"
+            "• 100-Day Plan — Priorities, Owners, Milestones, Critical Actions\n"
+            "• Steering Presentation — Progress, Financial Impact, Open Decisions, Next Steps"
+        )
+
     uploaded = _uploaded_files(chat)
     if not uploaded:
         return say(
@@ -247,6 +276,15 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
         return preamble.then(
             _render(chat, analysis, turn.output_format, cancel=cancel))
 
+    if turn.intent == "revise_content" and _remember_structure(chat, text):
+        # A structural edit is a re-plan, not a cosmetic page operation.  The
+        # latter can drop an existing page but cannot reliably add a requested
+        # topic from the evidence.  Re-planning from the amended, durable
+        # structure keeps preview, deck, document and workbook aligned.
+        return preamble.then(_plan(
+            chat, analysis, turn, text, collect_gaps=False, cancel=cancel,
+            remember_structure=False,
+        ))
     if turn.intent == "revise_content":
         return preamble.then(_revise(chat, analysis, text))
     if turn.intent in ("request_report", "set_audience"):
@@ -406,32 +444,81 @@ def _found(chat: Chat, analysis) -> ChatAnswer:
 
     from app.agent.corrections import fillable
 
-    parts = [f"Read {len(model.source_files)} file(s): {model.entity_count()} items."]
-    if unresolved:
-        parts.append(f"{len(unresolved)} source conflict(s) still open.")
+    critical_conflicts = [c for c in unresolved if c.critical]
+    critical_issues = [i for i in model.validation_issues
+                       if i.severity.value in ("critical", "high")]
+    parts = [
+        "## Data review",
+        f"**{len(model.source_files)} files read** · "
+        f"**{model.entity_count()} items found**",
+        "",
+        "### Problems found",
+        f"- **{len(critical_conflicts) + len(critical_issues)} critical/high-priority problem(s)**",
+        f"- **{len(unresolved)} unresolved source conflict(s)**",
+    ]
     gaps = fillable(model.validation_issues)
+    parts.append(f"- **{len(model.validation_issues)} data-quality issue(s)**")
     if gaps:
-        parts.append(f"{len(gaps)} value(s) missing that only you can fill.")
+        parts.append(f"- **{len(gaps)} missing value(s)** that only you can fill")
     if score is not None:
-        parts.append(f"Data quality {score:.0f}/100.")
+        parts.extend(["", f"**Data-quality score:** {score:.0f}/100"])
+
+    findings: list[tuple[int, str]] = []
+    for conflict in unresolved:
+        severity = conflict.severity.value
+        values = "; ".join(
+            f"`{name}`: **{value}**" for name, value in conflict.values.items())
+        findings.append((
+            0 if conflict.critical else 2,
+            f"- **{severity.title()} — {conflict.entity_key} / "
+            f"{conflict.field.replace('_', ' ')}.** {values}",
+        ))
+    for issue in model.validation_issues:
+        severity = issue.severity.value
+        source = ", ".join(ref.file_name for ref in issue.source_references[:2])
+        suffix = f" *Source: {source}.*" if source else ""
+        findings.append((
+            0 if severity == "critical" else 1 if severity == "high" else 3,
+            f"- **{severity.title()} — {issue.entity_label or issue.entity_type}.** "
+            f"{issue.message}{suffix}",
+        ))
+    if findings:
+        shown = [line for _, line in sorted(findings, key=lambda row: row[0])[:10]]
+        parts.extend(["", "### First problems to review", *shown])
+        if len(findings) > len(shown):
+            parts.append(f"- *…and {len(findings) - len(shown)} more in the data-quality report.*")
+        parts.extend(["", "Reply with a correction or choose a value below; I’ll "
+                      "apply it before generating the report."])
 
     if not low:
-        return say(" ".join(parts))
+        return ChatAnswer(
+            content="\n".join(parts),
+            actions=([ResolveConflictAction(conflicts=[
+                c.model_dump(mode="json") for c in unresolved
+            ])] if unresolved else []),
+        )
 
-    parts.append(
-        f"\n\n{len(low)} finding(s) were read from an image or scan — they are "
-        f"in the report, but check them before you rely on them.")
+    parts.extend([
+        "", "### Image and scan review",
+        f"{len(low)} finding(s) came from an image or scan. They remain in the "
+        "draft, but should be checked before circulation.",
+    ])
+    actions = []
+    if unresolved:
+        actions.append(ResolveConflictAction(
+            conflicts=[c.model_dump(mode="json") for c in unresolved]))
+    actions.append(ReviewFindingsAction(items=[
+        LowConfidenceItem(kind=kind, label=label, confidence=confidence)
+        for kind, label, confidence in sorted(low, key=lambda item: item[2])
+    ]))
     return ChatAnswer(
-        content=" ".join(parts),
-        actions=[ReviewFindingsAction(items=[
-            LowConfidenceItem(kind=kind, label=label, confidence=confidence)
-            for kind, label, confidence in sorted(low, key=lambda item: item[2])
-        ])],
+        content="\n".join(parts), actions=actions,
     )
 
 
 def _plan(chat: Chat, analysis, turn: TurnIntent, text: str,
-         *, collect_gaps: bool = True, cancel=None) -> ChatAnswer:
+         *, collect_gaps: bool = True, cancel=None,
+         remember_structure: bool = True) -> ChatAnswer:
     """Draft the report. `respond` guarantees `analysis` is not None."""
     from app.generation import chat_writer
 
@@ -443,7 +530,8 @@ def _plan(chat: Chat, analysis, turn: TurnIntent, text: str,
             "Committee wants decisions, an IMO wants overdue work."
         )
 
-    _remember_structure(chat, text)
+    if remember_structure:
+        _remember_structure(chat, text)
 
     answer = ChatAnswer()
     blocking = [c for c in analysis.data_model.unresolved_conflicts() if c.critical]
@@ -515,7 +603,7 @@ def _readable_warnings(warnings: list[str]) -> list[str]:
     return readable
 
 
-def _remember_structure(chat: Chat, text: str) -> None:
+def _remember_structure(chat: Chat, text: str) -> bool:
     """A structure the user described becomes the template for every format.
 
     Stored in the KB rather than used once, so it survives later turns: someone
@@ -525,19 +613,25 @@ def _remember_structure(chat: Chat, text: str) -> None:
     """
     from app.report import structure as structure_mod
 
+    kb = knowledge.load(chat.session_id)
     spec = structure_mod.detect(text, provider=chat.provider or "",
                                 model=chat.model or "")
     if not spec:
-        return
+        spec = structure_mod.revise(kb.structure, text)
+    if not spec:
+        return False
 
-    kb = knowledge.load(chat.session_id)
+    previous = kb.structure
     kb.structure = spec.model_dump(mode="json")
+    if previous == kb.structure:
+        return False
     # Structure changes what the report says, so it counts towards the content
     # revision and leaves any existing draft stale.
     kb.content_revision += 1
     knowledge.save(kb)
     log.info("structure requested for %s: %s", chat.session_id,
              [s.title for s in spec.sections])
+    return True
 
 
 def _revise(chat: Chat, analysis, text: str) -> ChatAnswer:
@@ -683,9 +777,11 @@ def _classify(text: str, chat: Chat) -> TurnIntent:
     client = get_client(chat.provider)
     if client.name != "none":
         try:
+            from app.llm import fast_model
+
             return client.structured(
                 system=SYSTEM, user=text, output_model=TurnIntent,
-                model=chat.model,
+                model=fast_model(), max_tokens=256,
             )
         except LLMError as exc:
             log.warning("intent classification failed (%s); using keywords", exc)
@@ -712,7 +808,8 @@ def _classify_by_keyword(text: str) -> TurnIntent:
         return TurnIntent(intent="render", output_format=output_format,
                           audience=audience)
 
-    if re.search(r"\b(remove|drop|delete|add|move|reorder|shorten|rename|"
+    if re.search(r"\b(remove|drop|delete|exclude|omit|leave out|add|include|"
+                 r"move|reorder|shorten|rename|"
                  r"put .* first|show \d+)\b", lowered):
         return TurnIntent(intent="revise_content", audience=audience)
 
@@ -753,6 +850,13 @@ def _is_capability_question(text: str) -> bool:
         r"what can you help( me)? with|how (can|do) you help|"
         r"your capabilities|what features|what can this do)\b", t
     ))
+
+
+def _is_greeting(text: str) -> bool:
+    """Recognise a greeting only when it is the whole social turn."""
+    return bool(re.fullmatch(
+        r"\s*(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))"
+        r"(?:\s+there)?[!.?\s]*", text or "", re.I))
 
 
 def _capabilities(analysis) -> ChatAnswer:
@@ -1140,4 +1244,3 @@ def _audience_label(text: str) -> str:
     if _match_audience(stripped.lower()) is None:
         return ""
     return stripped
-

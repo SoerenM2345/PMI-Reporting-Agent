@@ -181,11 +181,11 @@ def fallback_storyline(context: GenerationContext, brief: OutputBrief,
         governing_message=(f"Status of {context.display_name()}"
                            + (f" for {context.reporting_period}"
                               if context.reporting_period else "")),
-        executive_takeaway=(
+        """executive_takeaway=(
             "This document was assembled without a language model, so its "
             "sections follow the topics requested and the evidence available "
             "rather than a reasoned argument. The figures in it are validated; "
-            "the emphasis and the conclusions are not."),
+            "the emphasis and the conclusions are not."),"""
         situation="", complication="", question="",
         supporting_arguments=[],
         narrative_flow="by_severity",

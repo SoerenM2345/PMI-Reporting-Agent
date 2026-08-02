@@ -31,7 +31,7 @@ def write_conflict_report(model: PMIDataModel, out_dir: Path) -> Path:
         "",
         f"**Project:** {model.project.project_name}  ",
         f"**Generated:** {date.today():%d-%m-%Y}  ",
-        f"**Sources:** {', '.join(model.source_files) or 'none'}",
+        f"<sub>Sources: {', '.join(model.source_files) or 'none'}</sub>",
         "",
         "Where two uploaded files disagreed about the same fact. The report shows what "
         "each source said, which value was used, and on what authority.",
@@ -67,7 +67,11 @@ def write_conflict_report(model: PMIDataModel, out_dir: Path) -> Path:
                 "| Source | Location | Value | Confidence |",
                 "|---|---|---|---|",
             ]
-            for item in conflict.evidence:
+            evidence = conflict.evidence
+            if conflict.is_resolved:
+                evidence = [item for item in evidence
+                            if item.file_name == conflict.resolved_from][:1]
+            for item in evidence:
                 ref = item.source_reference
                 lines.append(
                     f"| {ref.file_name} | {ref.location or '—'} | **{item.value}** | "
