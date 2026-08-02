@@ -88,6 +88,40 @@ Action = Annotated[
 ]
 
 
+def _dedupe_actions(actions: list[Action]) -> list[Action]:
+    """Compose affordances without rendering the same control twice.
+
+    Data review can surface every open conflict while planning separately
+    surfaces the critical subset. Those are two explanations of one decision,
+    not two decisions. Merge conflict payloads by id and collapse other exact
+    duplicates while preserving their first position in the turn.
+    """
+    import json
+
+    merged: list[Action] = []
+    resolve: Optional[ResolveConflictAction] = None
+    conflict_positions: dict[str, int] = {}
+
+    for action in actions:
+        if isinstance(action, ResolveConflictAction):
+            if resolve is None:
+                resolve = action.model_copy(deep=True)
+                resolve.conflicts = []
+                merged.append(resolve)
+            for conflict in action.conflicts:
+                key = str(conflict.get("conflict_id") or json.dumps(
+                    conflict, sort_keys=True, default=str))
+                if key in conflict_positions:
+                    resolve.conflicts[conflict_positions[key]] = conflict
+                else:
+                    conflict_positions[key] = len(resolve.conflicts)
+                    resolve.conflicts.append(conflict)
+            continue
+        if action not in merged:
+            merged.append(action)
+    return merged
+
+
 # ----------------------------------------------------------------- artifacts
 ArtifactType = Literal["pptx", "docx", "pdf", "xlsx", "html", "md", "png", "other"]
 
@@ -203,7 +237,7 @@ class ChatAnswer(BaseModel):
                  if part]
         return ChatAnswer(
             content="\n\n".join(parts),
-            actions=[*self.actions, *other.actions],
+            actions=_dedupe_actions([*self.actions, *other.actions]),
             artifacts=[*self.artifacts, *other.artifacts],
             # A failure anywhere in the turn is the turn's status: a message that
             # reports an error and calls itself completed is lying about itself.

@@ -661,6 +661,47 @@ def test_uploading_files_mid_chat_is_a_turn_with_an_answer(client, sample_files)
     assert set(before.data_model.source_files) <= set(after.data_model.source_files)
 
 
+def test_a_report_request_resumes_when_files_arrive_in_the_next_turn(
+        client, sample_files):
+    """Prompt-first and files-first are both valid chat journeys. A request made
+    before uploads must not disappear into the transcript while the upload turn
+    merely claims it is reading."""
+    from app.deliverable import session as session_plan
+    from app.storage import json_store
+
+    created = client.post("/api/chats", json={}).json()
+    chat_id = created["chat"]["chat_id"]
+    session_id = created["session_id"]
+    request = (
+        "Create an IT Integration Status presentation for the CIO with slides "
+        "on Application Landscape, Cybersecurity Risks, and Open Decisions."
+    )
+
+    first = agent_reply(client.post(
+        f"/api/chats/{chat_id}/turn", data={"text": request}))
+    assert "upload" in prose(first).lower()
+    assert json_store.load_pending(session_id)["request_text"] == request
+
+    names = ("integration_tracker.xlsx", "weekly_update.pptx")
+    handles = [open(sample_files / name, "rb") for name in names]
+    try:
+        uploaded = client.post(
+            f"/api/chats/{chat_id}/turn",
+            data={"text": ""},
+            files=[("files", (name, handle, "application/octet-stream"))
+                   for name, handle in zip(names, handles)],
+        )
+    finally:
+        for handle in handles:
+            handle.close()
+
+    resumed = agent_reply(uploaded)
+    assert not actions(resumed, "choose_audience")
+    assert actions(resumed, "open_preview")
+    assert json_store.load_analysis(session_id).request_text == request
+    assert session_plan.load(session_id).audience_label.upper() == "CIO"
+
+
 def test_reopening_a_chat_returns_the_whole_transcript(client):
     chat_id = client.post("/api/chats", json={}).json()["chat"]["chat_id"]
     chat_store.add_message(chat_id, "user", {"text": "first"})
@@ -703,6 +744,23 @@ def test_an_answers_actions_and_artifacts_survive_the_round_trip(client):
     assert actions(stored, "resolve_conflict")[0]["conflicts"] == [{"conflict_id": "c1"}]
     assert artifacts(stored)[0]["filename"] == "PMI_Report.pptx"
     assert artifacts(stored)[0]["download_url"] == "/api/download/s1/PMI_Report.pptx"
+
+
+def test_composing_answers_merges_duplicate_conflict_actions():
+    from app.agent.replies import ChatAnswer, ResolveConflictAction
+
+    review = ChatAnswer(actions=[ResolveConflictAction(conflicts=[
+        {"conflict_id": "c1", "field": "current_value"},
+        {"conflict_id": "c2", "field": "status"},
+    ])])
+    critical_gate = ChatAnswer(actions=[ResolveConflictAction(conflicts=[
+        {"conflict_id": "c1", "field": "current_value"},
+    ])])
+
+    combined = review.then(critical_gate)
+
+    assert len(combined.actions) == 1
+    assert [c["conflict_id"] for c in combined.actions[0].conflicts] == ["c1", "c2"]
 
 
 def test_the_model_choice_is_stored_per_chat(client):
@@ -788,10 +846,50 @@ def test_an_obvious_audience_is_never_asked_about():
 
     assert _match_audience("a pack for the integration director") is Audience.EXECUTIVE
     assert _match_audience("for the steering committee") is Audience.EXECUTIVE
+    assert _match_audience("create an IT integration presentation for the CIO") \
+        is Audience.EXECUTIVE
+    assert _match_audience("chief information officer") is Audience.EXECUTIVE
     assert _match_audience("the imo needs this") is Audience.PMO
     # "workstream" used to be filed under PMO, so every workstream request
     # produced an IMO document.
     assert _match_audience("for the hr workstream leads") is Audience.WORKSTREAM
+
+
+def test_cio_is_accepted_as_a_standalone_audience_answer():
+    """The free-text audience control submits only the typed label. A title that
+    is valid in the original request must stay valid when sent on its own."""
+    from app.agent.conversation import _audience_label, _classify_by_keyword
+    from app.models.pmi import Audience
+
+    turn = _classify_by_keyword("CIO")
+
+    assert turn.intent == "set_audience"
+    assert turn.audience is Audience.EXECUTIVE
+    assert _audience_label("CIO") == "CIO"
+
+
+def test_cio_in_the_first_prompt_does_not_trigger_an_audience_question(
+        client, sample_files):
+    """The report reader was explicit in the user's first sentence; asking again
+    loses information already present in the request."""
+    from app.deliverable import session as session_plan
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+
+    reply = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": (
+            "Create an IT Integration Status presentation for the CIO. Include "
+            "slides on System Integration Progress, Application Landscape, "
+            "Infrastructure Migration, Cybersecurity Risks, Day-1 Readiness, "
+            "and Open Decisions."
+        )},
+    ).json()["messages"][-1]
+
+    assert not actions(reply, "choose_audience")
+    assert actions(reply, "open_preview")
+    assert session_plan.load(session_id).audience_label.upper() == "CIO"
 
 
 def test_the_users_own_words_title_the_report(client, sample_files):
@@ -969,7 +1067,11 @@ def test_the_critical_conflict_gate_survives_into_the_chat(client, loaded):
     conflicts = [m for m in messages if actions(m, "resolve_conflict")]
 
     assert conflicts, "the 82-vs-75 conflict was not raised"
-    assert actions(conflicts[0], "resolve_conflict")[0]["conflicts"]
+    conflict_actions = actions(conflicts[0], "resolve_conflict")
+    assert len(conflict_actions) == 1, "the same critical issue card was shown twice"
+    assert conflict_actions[0]["conflicts"]
+    ids = [c["conflict_id"] for c in conflict_actions[0]["conflicts"]]
+    assert len(ids) == len(set(ids))
 
 
 def test_a_generate_reply_never_claims_work_it_did_not_do(client, loaded):

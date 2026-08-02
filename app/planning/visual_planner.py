@@ -197,8 +197,8 @@ def fallback_design(context: GenerationContext, brief: OutputBrief,
 
     return DocumentDesign(
         pages=pages,
-        """rationale="Assembled without a language model: one page per requested "
-                  "topic, shaped by the evidence available to it.")"""
+        rationale="Assembled without a language model: one page per requested "
+                  "topic, shaped by the evidence available to it.")
 
 
 # ============================================================ layout binding
