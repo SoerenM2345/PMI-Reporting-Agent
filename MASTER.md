@@ -157,3 +157,48 @@ prove the model can read a heatmap. Re-record it with
 See [docs/known_limitations.md](docs/known_limitations.md). The honest summary: no
 ground-truth PMI corpus, no auth, local JSON storage, and a figure stated only in prose
 (rather than a table) is not extracted without an LLM.
+
+## Dataset augmentation plan (in progress — branch `katja-dataset`)
+
+Addresses the "no ground-truth PMI corpus" gap above and the H2-initiative training-data
+strategy (QMSum/ECTSum/AMI). Work happens on a local branch `katja-dataset` (tracks
+`origin/katja`); **`main` is never touched and `origin/katja` is never merged**, per an
+explicit instruction — this is a working-copy-only effort.
+
+### Why, in one paragraph
+
+This project's own `docs/evaluation_plan.md` flags its one hand-built synthetic sample
+project as close to a tautology: the same team wrote both the test files and the
+conflicts they're scored against. More generated-but-fabricated PMI data doesn't fix
+that — it would still be *our* rules testing *our* rules. The fix is to build the corpus
+from **real, externally validated content** (QMSum, ECTSum, AMI — not invented PMI
+facts) reshaped into the agent's native formats, and to keep a held-out gold set that is
+never used to tune anything. Where real content can't naturally produce something the
+agent needs (e.g. two PMI documents disagreeing on the same milestone date — earnings
+calls don't have milestones), that is a documented limitation, not something papered
+over with fabricated data.
+
+### The pipeline (real data → PMI-shaped files, not the reverse)
+
+| Layer | Real source | Rendered into | Status |
+|---|---|---|---|
+| Executive/SteerCo digest | ECTSum (in-repo, 2,425 pairs) + QMSum general-query | xlsx KPI tracker, pptx exec slide, pdf excerpt | M1 in progress |
+| Workstream-detail report | QMSum specific-query | xlsx workstream sheet, docx status doc | not started |
+| Action-item extraction | AMI (manual download, host blocks automation) | varied formats — **not** Jira-shaped | not started |
+| Conflict probes | small subset of the above, one field deliberately perturbed in a duplicate rendering | 2 formats, `synthetic_perturbation: true` logged | not started |
+| Gold set | LLM-drafted + human-reviewed, and/or anonymized real artifacts if available | same shape as above, held out, never tuned against | not started |
+
+Every rendered record ships a `ground_truth.json` (entities expected, source record
+traced back to the real corpus, conflict-probe flag) so detection/extraction can be
+scored automatically instead of eyeballed — see the full plan for the schema.
+
+### Status so far
+- ✅ M0 — `katja-dataset` branch checked out from `origin/katja`; `scripts/make_sample_*.py`
+  confirmed to still run unmodified (baseline, untouched by this work).
+- ⏳ M1 — ECTSum → exec-digest augmentation (`scripts/dataset/prep_ectsum.py`,
+  `render_to_pmi_formats.py`) — paused mid-build.
+
+Full plan (context, the tautology problem explained, both gold-set authoring options,
+directory layout, build order M0–M6): saved locally at
+`~/.claude/plans/please-dont-merge-it-quizzical-hammock.md` (not yet committed into
+`docs/`).
