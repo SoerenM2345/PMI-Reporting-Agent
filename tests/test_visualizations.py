@@ -271,6 +271,49 @@ def test_a_chart_renders_to_a_real_png(evidence, brand, tmp_path):
     assert path.suffix == ".png"
 
 
+def test_long_category_names_are_wrapped_in_full_at_a_readable_scale(brand):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    names = [
+        "ERP cutover slips past Q3",
+        "Key engineer attrition in target company",
+        "Customer churn during rebranding",
+    ]
+    figure, axes = plt.subplots()
+    try:
+        charts._category_axis(  # noqa: SLF001 - renderer contract
+            axes, list(range(len(names))), names, brand)
+        labels = axes.get_xticklabels()
+
+        assert [" ".join(label.get_text().split()) for label in labels] == names
+        assert all("…" not in label.get_text() for label in labels)
+        assert all(label.get_rotation() == 0 for label in labels)
+        assert all(label.get_fontsize() >= charts.MIN_CATEGORY_LABEL_PT
+                   for label in labels)
+    finally:
+        plt.close(figure)
+
+
+def test_svg_category_names_are_multiline_and_never_truncated(evidence, brand):
+    request = budget_request()
+    request.evidence_ids = ["ev:budget:B1", "ev:budget:B2", "ev:budget:B3"]
+    spec = builder.build_chart(request, evidence)
+    spec.categories = [
+        "ERP cutover slips past Q3",
+        "Key engineer attrition in target company",
+        "Customer churn during rebranding",
+    ]
+
+    svg = charts.to_svg(spec, brand)
+
+    assert "…" not in svg
+    assert "Key engineer" in svg and "target company" in svg
+    assert "<tspan" in svg
+
+
 def test_a_chart_renders_to_real_svg_with_traceable_marks(evidence, brand):
     spec = builder.build_chart(budget_request(), evidence)
     svg = charts.to_svg(spec, brand)

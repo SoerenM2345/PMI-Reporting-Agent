@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from pptx import Presentation
-from pptx.util import Emu
+from pptx.util import Emu, Inches
 
 from app.config import get_settings
 from app.context import builder
@@ -164,6 +164,77 @@ def test_content_is_written_into_real_placeholders(rendered):
         filled = [p for p in slide.placeholders
                   if p.has_text_frame and p.text_frame.text.strip()]
         assert filled, f"slide {index + 1} has no filled placeholder"
+
+
+def test_slide_text_and_table_cells_fit_their_assigned_shapes(rendered):
+    from pptx.enum.text import MSO_AUTO_SIZE
+
+    _deliverable, _context, _result, presentation = rendered
+    checked_text = checked_cells = 0
+    for slide in presentation.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape.text_frame.text.strip():
+                assert shape.text_frame.auto_size \
+                    == MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE, shape.name
+                checked_text += 1
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        assert cell.text_frame.auto_size \
+                            == MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+                        checked_cells += 1
+    assert checked_text and checked_cells
+
+
+def test_long_table_cells_are_shortened_in_powerpoint_not_in_the_spec():
+    from app.renderers.pptx_base import _shorten_table_cell
+
+    original = "A very long status explanation " * 12
+    shown = _shorten_table_cell(original)
+
+    assert len(shown) <= 111
+    assert shown.endswith("…")
+    assert original.startswith(shown[:-1])
+
+
+def test_powerpoint_table_view_caps_rows_without_mutating_the_spec():
+    from app.report.content import Cell, Column
+    from app.visualizations.specs import TableSpec
+
+    spec = TableSpec(
+        spec_id="dense",
+        columns=[Column(header="Item")],
+        rows=[[Cell(text=f"row {index}")] for index in range(15)],
+        row_evidence_ids=[f"E{index}" for index in range(15)],
+        evidence_ids=[f"E{index}" for index in range(15)],
+        total_rows=15,
+    )
+
+    shown = pptx_renderer._table_view_for_slide(
+        spec, (Inches(0), Inches(0), Inches(10), Inches(5)))
+
+    assert len(shown.rows) == 8
+    assert shown.truncation_note() == "Showing 8 of 15 rows."
+    assert len(spec.rows) == 15, "PowerPoint changed the shared report spec"
+
+
+def test_cover_uses_the_plain_logo_layout_and_native_title_placeholder(rendered):
+    deliverable, context, _result, presentation = rendered
+    cover_page = next(page for page in deliverable.pages
+                      if page.purpose == "cover")
+    cover_slide = presentation.slides[cover_page.index]
+
+    assert cover_slide.slide_layout.name.strip() == "Title slide - White"
+    assert "tagline logo lockup" not in cover_slide.slide_layout.name.casefold()
+    title = cover_slide.shapes.title
+    assert title is not None and title.text == cover_page.title
+
+    title_slot = context.template_reference.catalog.by_id(
+        cover_page.layout_id).slot("title")
+    assert round(title.left / 914400, 3) == round(title_slot.left_in, 3)
+    assert round(title.top / 914400, 3) == round(title_slot.top_in, 3)
+    assert not any(shape.name == "pmi:governing"
+                   for shape in cover_slide.shapes)
 
 
 def test_a_filled_run_inherits_its_typography(rendered):
@@ -431,8 +502,8 @@ def test_the_renderer_reports_what_it_laid_out(rendered):
 
 
 # ============================================================== keyless deck
-def test_a_keyless_deck_still_renders_and_discloses_itself(model, tmp_path):
-    """No model at all: the deck is plainer, complete, and says so on page one."""
+def test_a_keyless_deck_still_renders_without_system_provenance(model, tmp_path):
+    """No model at all: the deck remains complete without implementation copy."""
     context = context_for(model, "Prepare a pack:\n1. Risks\n2. Budget position")
     deliverable = engine.build(context)
     assert deliverable.planned_by == "fallback"
@@ -443,7 +514,7 @@ def test_a_keyless_deck_still_renders_and_discloses_itself(model, tmp_path):
 
     text = "\n".join(shape.text_frame.text for slide in presentation.slides
                      for shape in slide.shapes if shape.has_text_frame)
-    assert "without a language model" in text
+    assert "without a language model" not in text.lower()
     assert "Chart:" not in text
 
 

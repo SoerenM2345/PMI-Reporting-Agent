@@ -166,11 +166,12 @@ def _pptx_default_template() -> Optional[Path]:
 
 
 def _logo_bytes(path: Path) -> Optional[bytes]:
-    """The template's logo, for inlining into the HTML dashboard and the cover.
+    """A visible-on-white logo, cropped for report and dashboard covers.
 
-    The smallest PNG in a corporate master is almost always the logo; the large
-    ones are backgrounds and photography. Wrong guesses cost a decorative image,
-    not correctness, so a heuristic is the right trade here.
+    The Deloitte master contains both dark and white wordmarks. Choosing only by
+    compressed file size selected the white variant, which disappeared on Word's
+    white cover except for its green dot. Prefer the smallest candidate with
+    meaningful dark pixels, then crop transparent master-slide padding.
     """
     try:
         with zipfile.ZipFile(path) as archive:
@@ -178,8 +179,41 @@ def _logo_bytes(path: Path) -> Optional[bytes]:
                      if n.startswith("ppt/media/") and n.lower().endswith(".png")]
             if not media:
                 return None
-            smallest = min(media, key=lambda n: archive.getinfo(n).file_size)
-            return archive.read(smallest)
+            candidates = [archive.read(name) for name in media]
+            visible = [data for data in candidates if _has_dark_wordmark(data)]
+            chosen = min(visible or candidates, key=len)
+            return _crop_transparency(chosen)
     except (OSError, zipfile.BadZipFile, ValueError) as exc:    # noqa: BLE001
         log.debug("no logo extracted from %s (%s)", path, exc)
         return None
+
+
+def _has_dark_wordmark(data: bytes) -> bool:
+    try:
+        import io
+
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(data)).convert("RGBA")
+        return sum(1 for red, green, blue, alpha in image.get_flattened_data()
+                   if alpha > 96 and red < 96 and green < 96 and blue < 96) > 1000
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def _crop_transparency(data: bytes) -> bytes:
+    try:
+        import io
+
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(data)).convert("RGBA")
+        bounds = image.getchannel("A").getbbox()
+        if not bounds:
+            return data
+        cropped = image.crop(bounds)
+        output = io.BytesIO()
+        cropped.save(output, format="PNG", optimize=True)
+        return output.getvalue()
+    except Exception:                                          # noqa: BLE001
+        return data

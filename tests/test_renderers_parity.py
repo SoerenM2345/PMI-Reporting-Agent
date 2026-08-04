@@ -164,9 +164,17 @@ def test_every_page_title_appears_in_every_format(built):
                 f"{fmt} is missing the title {title!r}"
 
 
-def test_the_governing_message_leads_every_format(built):
+def test_the_governing_message_leads_reading_formats_without_becoming_a_ppt_overlay(
+        built):
     deliverable, _context, results = built
     for fmt, result in results.items():
+        if fmt == "pptx":
+            # PowerPoint follows the native title hierarchy. A separate copy of
+            # the governing message above that placeholder collided with the
+            # logo; the cover's planned title is the visible opening instead.
+            assert normalized(deliverable.pages[0].title) in \
+                normalized(text_of(result.path))
+            continue
         assert normalized(deliverable.governing_message) in \
             normalized(text_of(result.path)), fmt
 
@@ -203,6 +211,27 @@ def test_every_format_embeds_a_real_visual(built):
 
     html = results["html"].path.read_text(encoding="utf-8")
     assert "<svg" in html
+
+
+def test_word_and_pdf_put_the_deloitte_logo_on_page_one(built):
+    """The cover wordmark must be a visible first-page image, not the former
+    white-on-transparent asset that showed only its green dot on white paper."""
+    import docx
+    import fitz
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    _deliverable, _context, results = built
+
+    word = docx.Document(str(results["docx"].path))
+    assert word.paragraphs
+    assert "<w:drawing" in word.paragraphs[0]._p.xml
+    assert word.paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.RIGHT
+
+    with fitz.open(str(results["pdf"].path)) as pdf:
+        images = pdf[0].get_images(full=True)
+        assert len(images) == 1
+        rects = pdf[0].get_image_rects(images[0][0])
+        assert rects and rects[0].x0 > pdf[0].rect.width / 2
 
 
 def test_the_transcribed_figure_is_disclosed_in_every_format(built):
@@ -256,18 +285,25 @@ def test_word_uses_defined_brand_styles_not_words_defaults(built):
 
 
 def test_word_has_a_real_toc_field_and_a_static_fallback(built):
-    """A TOC field is empty until Word recalculates it; most readers never do."""
+    """The fallback is numbered, and Word refreshes it to exact pagination."""
     import docx
 
     deliverable, _context, results = built
     document = docx.Document(str(results["docx"].path))
     xml = document.element.xml
     assert "TOC \\o" in xml
+    assert "PAGEREF pmi_section_1" in xml
+    assert "bookmarkStart" in xml
+    assert "updateFields" in document.settings.element.xml
 
     body = normalized(text_of(results["docx"].path))
     assert "Contents" in body
     titles = [p.title for p in deliverable.pages if p.purpose != "cover"]
     assert normalized(titles[0]) in body
+    first_entry = next(p.text for p in document.paragraphs
+                       if p.text.startswith(titles[0]))
+    assert first_entry.endswith("\t3"), \
+        "the cached TOC fallback has no visible page number"
 
 
 def test_word_repeats_table_headers_and_numbers_figures(built):
@@ -304,6 +340,36 @@ def test_generated_chart_text_is_not_repeated_beside_the_chart():
     _remove_redundant_visual_text(page)
 
     assert [element.element_id for element in page.elements] == ["chart", "extra"]
+
+def test_generated_table_text_is_not_repeated_below_the_table():
+    from app.deliverable.engine import _remove_redundant_visual_text
+    from app.deliverable.model import (
+        BulletsElement,
+        PageDesign,
+        TableElement,
+        TextElement,
+    )
+
+    page = PageDesign(page_id="risks", elements=[
+        TableElement(element_id="table", spec_id="risk-table",
+                     evidence_ids=["ev:risk:1", "ev:risk:2"]),
+        TextElement(element_id="duplicate", role="body",
+                    text="The two risks listed above remain open.",
+                    evidence_ids=["ev:risk:1", "ev:risk:2"],
+                    authored_by="llm"),
+        TextElement(element_id="extra", role="body",
+                    text="Management still needs to choose an owner.",
+                    evidence_ids=["ev:decision:1"], authored_by="llm"),
+        BulletsElement(element_id="user-note", items=["Keep this wording"],
+                       evidence_ids=["ev:risk:1"], authored_by="user"),
+    ])
+
+    _remove_redundant_visual_text(page)
+
+    assert [element.element_id for element in page.elements] == [
+        "table", "extra", "user-note",
+    ]
+
 
 def test_word_keeps_headings_with_what_follows(built):
     import docx
@@ -408,6 +474,8 @@ def test_the_dashboard_is_one_self_contained_file(built):
 
 
 def test_the_dashboard_is_interactive_without_a_library(built):
+    import re
+
     _deliverable, _context, results = built
     html = results["html"].path.read_text(encoding="utf-8")
     assert "<script>" in html
@@ -416,6 +484,19 @@ def test_the_dashboard_is_interactive_without_a_library(built):
     assert 'class="filter"' in html                # row filtering
     assert "pmi-mark" in html                      # chart tooltips
     assert "data-evidence-id" in html              # marks are traceable
+    # The custom tooltip is the only hover tooltip. A nested SVG <title> would
+    # make the browser show the same value a second time.
+    assert not re.search(r'class="pmi-mark"[^>]*>\s*<title>', html)
+    assert re.search(r'class="pmi-mark"[^>]*aria-label=', html)
+
+
+def test_the_dashboard_labels_unknown_cover_metadata(built):
+    _deliverable, _context, results = built
+    html = results["html"].path.read_text(encoding="utf-8")
+
+    assert '<span class="meta-label">Audience:</span> Steering Committee' in html
+    assert '<span class="meta-label">Reporting period:</span> July 2026' in html
+    assert '<span class="meta-label">Integration phase:</span> Unknown' in html
 
 
 def test_the_dashboard_charts_are_inline_svg_not_images(built):
@@ -489,7 +570,7 @@ def test_one_failing_format_does_not_lose_the_others(model, scripted_planning,
     assert "fell over" in results[1].warnings[0]
 
 
-def test_a_keyless_run_renders_all_four_and_discloses_itself(model, tmp_path):
+def test_a_keyless_run_renders_all_formats_without_system_provenance(model, tmp_path):
     context = builder._assemble(
         scope="project", project_id="proj", chat_id=None, session_id=None,
         model=model, digest=KnowledgeDigest(), folder_name="Aurora",
@@ -501,4 +582,6 @@ def test_a_keyless_run_renders_all_four_and_discloses_itself(model, tmp_path):
     for fmt in registry.supported():
         result = registry.render(deliverable, context, tmp_path, fmt)
         assert result.path.is_file(), fmt
-        assert "without a language model" in text_of(result.path), fmt
+        body = text_of(result.path).lower()
+        assert "without a language model" not in body, fmt
+        assert "language model unavailable" not in body, fmt

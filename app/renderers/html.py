@@ -88,16 +88,19 @@ def _masthead(deliverable: Deliverable, context: GenerationContext,
     logo = brand.logo_data_uri()
     mark = (f'<img class="logo" src="{logo}" alt="">' if logo
             else '<span class="wordmark">Deloitte</span>')
-    meta = " &middot; ".join(escape(part) for part in (
-        deliverable.audience_label, context.reporting_period,
-        context.transaction.integration_phase.replace("_", " ")
-        if context.transaction.integration_phase != "unknown" else "") if part)
-
-    banner = ""
-    if deliverable.planned_by == "fallback":
-        banner = (f'<p class="banner" role="status">'
-                  f'{escape(deliverable.warnings[0] if deliverable.warnings else "")}'
-                  f"</p>")
+    # Bare values made ``STEERING COMMITTEE · UNKNOWN`` impossible to
+    # understand: Unknown was the integration phase, not the audience or report
+    # status. Keep every value attached to its field name, including absences.
+    meta = " &middot; ".join(
+        f'<span><span class="meta-label">{escape(label)}:</span> '
+        f'{escape(_meta_value(value))}</span>'
+        for label, value in (
+            ("Audience", deliverable.audience_label),
+            ("Reporting period", context.reporting_period),
+            ("Integration phase", context.transaction.integration_phase),
+        )
+        if value
+    )
 
     takeaway = (f'<p class="takeaway">{escape(deliverable.executive_takeaway)}</p>'
                 if deliverable.executive_takeaway else "")
@@ -106,7 +109,7 @@ def _masthead(deliverable: Deliverable, context: GenerationContext,
             f'<p class="subtitle">{escape(deliverable.subtitle)}</p>\n'
             f'<p class="meta">{meta}</p>\n'
             f'<p class="governing">{escape(deliverable.governing_message)}</p>\n'
-            f"{takeaway}{banner}\n</header>")
+            f"{takeaway}\n</header>")
 
 
 def _rail(deliverable: Deliverable) -> str:
@@ -181,7 +184,10 @@ def _element(element, deliverable: Deliverable, brand: BrandSystem) -> str:
         spec = deliverable.specs.charts.get(element.spec_id)
         if spec is None:
             return ""
-        svg = chart_render.to_svg(spec, brand)
+        # SVG mark ``<title>`` nodes produce a browser-native tooltip. This page
+        # already has the styled delegated tooltip below, so enabling both shows
+        # the same value twice on hover.
+        svg = chart_render.to_svg(spec, brand, native_tooltips=False)
         return f'<figure class="chart">{svg}</figure>'
 
     if isinstance(element, DiagramElement):
@@ -242,6 +248,11 @@ def _table(spec) -> str:
 
 def _align(kind: str) -> str:
     return "num" if kind in ("number", "currency", "percent") else "txt"
+
+
+def _meta_value(value: str) -> str:
+    text = " ".join(str(value or "").replace("_", " ").split())
+    return "Unknown" if text.casefold() == "unknown" else text
 
 
 def _methodology(deliverable: Deliverable, context: GenerationContext) -> str:

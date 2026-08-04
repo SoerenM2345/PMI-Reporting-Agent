@@ -207,7 +207,7 @@ class Deliverable(BaseModel):
     document_kind: str = "status_report"
     primary_format: str = "pptx"
     audience_label: str = ""
-
+    presentation_layout: bool = False
     governing_message: str = ""
     executive_takeaway: str = ""
 

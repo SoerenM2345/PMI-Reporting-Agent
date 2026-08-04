@@ -170,7 +170,7 @@ def render(deliverable: Deliverable, context: GenerationContext,
     boxes: list[MeasuredBox] = []
     figure_number = [0]
 
-    _cover(story, deliverable, context, sheet)
+    _cover(story, deliverable, context, brand, sheet)
     _contents(story, deliverable, sheet)
 
     for page in deliverable.pages:
@@ -340,9 +340,20 @@ def _styles(brand: BrandSystem, regular: str, bold: str) -> dict:
 
 # ==================================================================== story
 def _cover(story: list, deliverable: Deliverable, context: GenerationContext,
-           sheet: dict) -> None:
+           brand: BrandSystem, sheet: dict) -> None:
+    if brand.logo_png_b64:
+        import base64
+        import io
+
+        try:
+            logo = Image(io.BytesIO(base64.b64decode(brand.logo_png_b64)),
+                         width=1.75 * inch, height=0.33 * inch)
+            logo.hAlign = "RIGHT"
+            story.append(logo)
+        except Exception:                                      # noqa: BLE001
+            pass
     story.append(NextPageTemplate("content"))
-    story.append(Spacer(1, 1.6 * inch))
+    story.append(Spacer(1, 1.25 * inch))
     story.append(Paragraph(_x(deliverable.title), sheet["title"]))
     if deliverable.subtitle:
         story.append(Paragraph(_x(deliverable.subtitle), sheet["subtitle"]))
@@ -355,8 +366,6 @@ def _cover(story: list, deliverable: Deliverable, context: GenerationContext,
                                sheet["governing"]))
     if deliverable.executive_takeaway:
         story.append(Paragraph(_x(deliverable.executive_takeaway), sheet["body"]))
-    if deliverable.planned_by == "fallback" and deliverable.warnings:
-        story.append(Paragraph(_x(deliverable.warnings[0]), sheet["callout"]))
     story.append(PageBreak())
 
 

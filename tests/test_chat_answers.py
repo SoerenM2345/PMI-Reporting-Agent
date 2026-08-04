@@ -112,6 +112,41 @@ def test_the_question_and_the_evidence_both_reach_the_model(model):
     assert "GDPR retention breach" in payload, "the evidence was not sent"
 
 
+def test_a_question_about_unknown_receives_the_active_report_context(model):
+    from app.deliverable import store
+    from app.deliverable.model import Deliverable, PageDesign
+
+    context = context_for(model, "Why does the HTML report show Unknown?")
+    context.scope = "session"
+    context.project_id = None
+    context.session_id = "s1"
+    context.reporting_period = ""
+    context.transaction.integration_phase = "Unknown"
+    store.save(Deliverable(
+        deliverable_id="dlv-chat", session_id="s1",
+        title="GlobalMed x MediTexh", subtitle="GlobalMed x MediTexh",
+        audience_label="Steering Committee",
+        pages=[PageDesign(page_id="cover", purpose="cover",
+                          title="GlobalMed x MediTexh"),
+               PageDesign(page_id="risks", title="Employee Risks")],
+    ))
+
+    client = _Says(
+        "Unknown refers to the integration phase; the supplied files do not "
+        "state that phase."
+    )
+    llm.set_client(client)
+    answer = chat_writer.answer(
+        "Why does the HTML report show Unknown?", context=context)
+
+    payload = client.calls[0]
+    assert "<active_report>" in payload
+    assert "Audience: Steering Committee" in payload
+    assert "Integration phase: Unknown" in payload
+    assert "Employee Risks" in payload
+    assert "integration phase" in answer.content.lower()
+
+
 def test_a_chat_turn_returns_prose_and_no_card_payload(client, sample_files):
     """The endpoint's contract: one message, whose substance is text."""
     body = client.post("/api/chats", json={}).json()

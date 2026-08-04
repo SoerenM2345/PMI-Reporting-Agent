@@ -241,7 +241,10 @@ def test_a_composition_gets_a_native_layout_with_the_right_columns(
 
 
 def test_page_purposes_land_on_their_own_layout_families(catalog):
-    assert catalog.choose(purpose="cover").layout.role == "title"
+    cover = catalog.choose(purpose="cover").layout
+    assert cover.role == "title"
+    assert "tagline logo lockup" not in cover.normalized_name
+    assert cover.raw_name.strip() == "Title slide - White"
     assert catalog.choose(purpose="closing").layout.role == "end"
 
     divider = catalog.choose(purpose="divider").layout

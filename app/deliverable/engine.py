@@ -46,17 +46,6 @@ from app.planning.schemas import DocumentDesign, OutputBrief, StorylinePlan
 
 log = logging.getLogger("pmi.deliverable.engine")
 
-#: What a keyless run says on its own first page. A document that was assembled
-#: from a fallback and looks analysed is the failure the whole warning
-#: machinery exists to prevent, so the disclosure goes in the artifact, not only
-#: in a log the reader will never see.
-UNPLANNED_NOTICE = (
-    "Assembled without a language model: the sections, their order and the "
-    "wording follow the request and the available evidence rather than a "
-    "reasoned argument. Every figure shown is validated; the emphasis and the "
-    "conclusions are not."
-)
-
 #: What each planning stage contributes, so a partial fallback can say what it
 #: actually lost instead of claiming the whole document is unplanned.
 _STAGE_LOST = {
@@ -132,6 +121,7 @@ def build(context: GenerationContext, *, force: bool = False,
         document_kind=brief.document_kind,
         primary_format=brief.primary_format,
         audience_label=brief.audience_label,
+        presentation_layout=context.presentation_layout,
         governing_message=plan.governing_message,
         executive_takeaway=plan.executive_takeaway,
         pages=pages,
@@ -154,10 +144,13 @@ def build(context: GenerationContext, *, force: bool = False,
         warnings.extend(narrative_writer.write_page(
             page, context, plan, use_model=False,
             copy=copy_by_page.get(page.page_id)))
-        _remove_redundant_visual_text(page)
+        _remove_redundant_visual_text(page, context)
     warnings.extend(title_writer.write_titles(deliverable, context, plan,
                                               use_model=False,
                                               titles=complete.titles))
+    for page in deliverable.pages:
+        _ensure_readable_page(page, deliverable)
+        _normalize_table_only_page(page, context)
     deliverable.warnings = warnings
 
     if fell_back:
@@ -173,20 +166,28 @@ def build(context: GenerationContext, *, force: bool = False,
     return deliverable
 
 
-def _remove_redundant_visual_text(page: PageDesign) -> None:
-    """Let a chart carry the facts it already visualizes once.
+def _remove_redundant_visual_text(page: PageDesign,
+                                  context: Optional[GenerationContext] = None
+                                  ) -> None:
+    """Let a visual carry the facts it already presents once.
 
-    Commentary survives when it adds evidence the chart does not contain, and
-    user-authored text always survives.  The common generated duplicate — a
-    paragraph or bullets built from exactly the chart's evidence — is removed
-    at the planning boundary so every renderer receives the same clean page.
+    Commentary survives when it adds evidence the chart, diagram or table does
+    not contain, and user-authored text always survives. The common generated
+    duplicate — a paragraph or bullets built from exactly the visual's evidence
+    — is removed at the planning boundary so every renderer receives the same
+    clean page.
     """
-    from app.deliverable.model import BulletsElement, ChartElement, DiagramElement
+    from app.deliverable.model import (
+        BulletsElement,
+        ChartElement,
+        DiagramElement,
+        TableElement,
+    )
 
     visual_ids = {
         evidence_id
         for element in page.elements
-        if isinstance(element, (ChartElement, DiagramElement))
+        if isinstance(element, (ChartElement, DiagramElement, TableElement))
         for evidence_id in element.evidence_ids
     }
     if not visual_ids:
@@ -201,8 +202,137 @@ def _remove_redundant_visual_text(page: PageDesign) -> None:
             role = getattr(element, "role", "")
             if duplicate and authored_by != "user" and role in ("body", "bullets"):
                 continue
+            if (isinstance(element, BulletsElement) and context is not None
+                    and authored_by != "user" and own & visual_ids):
+                visual_statements = {
+                    _normalised_statement(item.statement)
+                    for item in context.evidence.resolve(own & visual_ids)
+                    if item.statement
+                }
+                element.items = [
+                    item for item in element.items
+                    if _normalised_statement(item) not in visual_statements
+                ]
+                element.evidence_ids = [
+                    evidence_id for evidence_id in element.evidence_ids
+                    if evidence_id not in visual_ids
+                ]
+                if not element.items:
+                    continue
         kept.append(element)
     page.elements = kept
+
+
+def _normalised_statement(text: str) -> str:
+    return " ".join((text or "").casefold().split()).strip(" .")
+
+
+def _normalize_table_only_page(page: PageDesign,
+                               context: GenerationContext) -> None:
+    """Give a table the full page when duplicate commentary was removed.
+
+    A planned chart can legitimately downgrade to a table after its data is
+    validated.  If the generated commentary then says exactly what that table
+    already says, deduplication removes it.  Keeping the old two-column layout
+    would leave an empty column, so bind the surviving table to the template's
+    native one-column table layout instead.
+    """
+    from app.deliverable.model import TableElement
+
+    if len(page.elements) != 1 or not isinstance(page.elements[0], TableElement):
+        return
+
+    page.composition = "table_full"
+    reference = context.template_reference
+    catalog = getattr(reference, "catalog", None)
+    choice = None
+    if catalog is not None:
+        choice = catalog.choose(
+            composition="table_full",
+            purpose=page.purpose,
+            family="white",
+            needs_subtitle=bool(page.subtitle),
+            needs_picture=False,
+        )
+    if choice is not None:
+        page.layout_id = choice.layout.layout_id
+        page.layout_name = choice.layout.raw_name.strip()
+        if choice.degraded and choice.reason not in page.warnings:
+            page.warnings.append(choice.reason)
+
+    page.elements[0].slot = visual_planner._content_slots(choice)[0]
+
+
+def _ensure_readable_page(page: PageDesign, deliverable: Deliverable) -> None:
+    """Remove duplicated furniture and give an empty chapter an honest body.
+
+    Headline and kicker intents are already represented by ``page.title`` and
+    ``page.subtitle``. PowerPoint knew to skip those elements, while PDF, Word,
+    HTML and Markdown rendered them again as body copy. Normalising once here
+    keeps every format aligned and prevents a heading from making an otherwise
+    empty page look populated to the planning pipeline.
+    """
+    from app.deliverable.model import (
+        BulletsElement,
+        ChartElement,
+        DiagramElement,
+        ImageElement,
+        KpiRowElement,
+        TableElement,
+    )
+
+    if page.purpose in ("cover", "divider", "closing"):
+        return
+
+    page.elements = [
+        element for element in page.elements
+        if not (isinstance(element, TextElement)
+                and element.role in ("headline", "kicker", "source_note"))
+    ]
+    if _same_heading(page.title, page.subtitle):
+        page.subtitle = ""
+
+    body_texts = [element.text for element in page.elements
+                  if isinstance(element, TextElement)
+                  and element.role in ("body", "callout", "quote")
+                  and element.text.strip()]
+    if any(_same_heading(text, page.subtitle) for text in body_texts):
+        page.subtitle = ""
+
+    def visible(element) -> bool:
+        if isinstance(element, TextElement):
+            return bool(element.text.strip())
+        if isinstance(element, BulletsElement):
+            return bool(element.items)
+        if isinstance(element, KpiRowElement):
+            return bool(element.tiles)
+        if isinstance(element, ChartElement):
+            return element.spec_id in deliverable.specs.charts
+        if isinstance(element, DiagramElement):
+            return element.spec_id in deliverable.specs.diagrams
+        if isinstance(element, TableElement):
+            spec = deliverable.specs.tables.get(element.spec_id)
+            return bool(spec and spec.rows)
+        if isinstance(element, ImageElement):
+            return bool(element.image_ref)
+        return False
+
+    if any(visible(element) for element in page.elements):
+        return
+
+    page.elements.append(TextElement(
+        element_id=f"{page.page_id}.body-empty",
+        slot="col1",
+        role="body",
+        text="Not enough data",
+        authored_by="python",
+        prominence="primary",
+    ))
+
+
+def _same_heading(title: str, subtitle: str) -> bool:
+    normalise = lambda value: " ".join((value or "").casefold().split())
+    return bool(normalise(title)) and normalise(title) == normalise(subtitle)
 
 
 def _enforce_design_sections(design: DocumentDesign,
@@ -231,36 +361,19 @@ def _enforce_design_sections(design: DocumentDesign,
             continue
         design.pages.append(page)
         restored.append(section_id)
-    return ([f"Added pages for required sections omitted from the design: "
-             f"{', '.join(restored)}."] if restored else [])
+    if restored:
+        # This is a successful internal repair, not a limitation of the report.
+        # Keep it in operational logs instead of printing it in the appendix.
+        log.info("restored required section page(s) omitted by the design: %s",
+                 ", ".join(restored))
+    return []
 
 
 def _mark_unplanned(deliverable: Deliverable, stages: Sequence[str]) -> None:
-    """Put the disclosure in the artifact, not only in a log.
-
-    A document that was assembled from a fallback and *looks* analysed is the
-    exact failure the warning machinery exists to prevent, and a reader never
-    sees a log.
-    """
-    # Deduped: a stage that was retried and fell back twice lost one thing, not
-    # two, and counting it twice would claim the whole document was unplanned.
+    """Record fallback provenance in logs without adding system copy to reports."""
     lost = [_STAGE_LOST[s] for s in dict.fromkeys(stages) if s in _STAGE_LOST]
-    if "plan.complete_report" in stages or len(lost) >= len(_STAGE_LOST):
-        notice = UNPLANNED_NOTICE
-    else:
-        notice = ("Assembled with a language model unavailable for part of the "
-                  "planning: " + ", ".join(lost) + " fell back to a "
-                  "deterministic default. Every figure shown is validated.")
-
-    deliverable.warnings.insert(0, notice)
-    if not deliverable.pages:
-        return
-    first = deliverable.pages[0]
-    first.elements.insert(0, TextElement(
-        element_id=f"{first.page_id}-unplanned",
-        role="callout", text=notice, emphasis="warn",
-        authored_by="python", prominence="aside",
-    ))
+    log.warning("%s used deterministic planning fallback for: %s",
+                deliverable.deliverable_id, ", ".join(lost) or "unknown stage")
 
 
 # ---------------------------------------------------------------- repairs

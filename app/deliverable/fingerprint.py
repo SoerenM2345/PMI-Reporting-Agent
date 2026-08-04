@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 #: Bumped whenever planning semantics change enough that an existing document
 #: would not be produced the same way again.
-ENGINE_VERSION = 1
+ENGINE_VERSION = 4
 
 
 class ContextFingerprint(BaseModel):
@@ -98,6 +98,7 @@ def _item_digest(item, evidence=None) -> str:
 def _normalize_request(context) -> str:
     text = " ".join((context.user_request or "").split()).casefold()
     extras = [context.audience or "", context.requested_output_format or "",
+              "presentation" if context.presentation_layout else "document",
               "|".join(context.requested_sections),
               "|".join(f"{c.kind}={c.value}" for c in context.user_constraints)]
     return text + "||" + "||".join(extras)

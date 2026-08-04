@@ -442,6 +442,62 @@ def test_a_pasted_block_fills_many_due_dates_at_once(client, sample_files):
         assert now.due_date == date(2026, 8, 12), f"{original.title} did not land"
 
 
+def test_filled_findings_are_applied_together_and_refresh_the_report(
+        client, sample_files):
+    """A copied quality paragraph is a batch of values, not a page rewrite.
+
+    This is the chat gesture from the reported failure: the user filled several
+    findings in the text the agent had shown and explicitly asked to include
+    them. The agent must save all values, refresh the current draft, and disclose
+    whatever remains unresolved instead of asking for the same fields one by
+    one or returning the page list.
+    """
+    from datetime import date
+
+    from app.deliverable import session as session_plan
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a SteerCo deck"})
+    before = session_plan.load(session_id)
+
+    text = (
+        "please include in the report "
+        "Risk 'Key engineer attrition in target company' has a mitigation "
+        "action but nobody is assigned to Marco Rossi High — "
+        "Risk 'ERP cutover slips past Q3' has a mitigation action but nobody "
+        "is assigned to Marco Rossi High — "
+        "Risk 'Customer churn during rebranding' has a mitigation action but "
+        "nobody is assigned to Marco Rossi Low — Day-1 readiness checklist. "
+        "Task 'Day-1 readiness checklist' completion date 07.07.2026. "
+        "Source: integration_tracker.xlsx."
+    )
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": text}))
+
+    written = prose(reply).lower()
+    assert "wording change" not in written
+    assert "saved 4 value" in written
+    assert "still unresolved" in written
+    assert "updated the report" in written
+    assert actions(reply, "open_preview")
+
+    current = json_store.load_analysis(session_id).data_model
+    assert {risk.mitigation_owner for risk in current.risks
+            if risk.title in {
+                "Key engineer attrition in target company",
+                "ERP cutover slips past Q3",
+                "Customer churn during rebranding",
+            }} == {"Marco Rossi"}
+    task = next(task for task in current.tasks
+                if task.title == "Day-1 readiness checklist")
+    assert task.completion_date == date(2026, 7, 7)
+    assert session_plan.load(session_id).version > before.version
+
+
 def test_editing_a_card_saves_the_users_text_and_survives_a_replan(
         client, sample_files):
     """§ editable prose. A card's narrative is the user's to rewrite, and the
@@ -816,6 +872,32 @@ def test_a_render_request_names_the_format_the_user_asked_for():
     assert turn.output_format == "word"
 
 
+def test_powerpoint_creation_uses_light_mode_without_an_extra_question(
+        client, sample_files):
+    from app.deliverable import session as session_plan
+    from app.templates import template_registry
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "Draft a presentation for the SteerCo."})
+
+    made = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "Generate it as PowerPoint."}))
+    assert artifacts(made)
+    assert "light mode" not in prose(made).lower()
+    assert "dark mode" not in prose(made).lower()
+
+    deliverable = session_plan.load(session_id)
+    catalog = template_registry.default().catalog
+    assert deliverable.presentation_layout is True
+    assert any(page.purpose == "divider" for page in deliverable.pages)
+    assert all(catalog.by_id(page.layout_id).family == "white"
+               for page in deliverable.pages)
+
+
 def test_a_picture_is_a_format_the_agent_recognises():
     """"Generate an image…" had no format entry and no renderer branch, so it
     fell through to a re-plan and handed back the data-quality report labelled
@@ -925,6 +1007,51 @@ def test_an_edit_instruction_is_read_as_a_revision_not_a_new_report():
     assert _classify_by_keyword("drop the dependencies section").intent \
         == "revise_content"
     assert _classify_by_keyword("put risks first").intent == "revise_content"
+    assert _classify_by_keyword(
+        "instead of Employee Risks I would like to have Employee Budget"
+    ).intent == "revise_content"
+    assert _classify_by_keyword(
+        "why does the HTML report show UNKNOWN here?"
+    ).intent == "question"
+    assert _classify_by_keyword(
+        "why did you include UNKNOWN in the HTML report?"
+    ).intent == "question"
+
+
+def test_instead_of_replaces_a_remembered_section_and_replans(
+        client, sample_files):
+    """A topic replacement keeps the surrounding structure and its position."""
+    from app.agent import knowledge
+    from app.deliverable import session as session_plan
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Create an HR Integration presentation for the Steering "
+                "Committee with these sections: 1. Headcount Integration "
+                "2. Employee Risks 3. Next Steps",
+    })
+    before = session_plan.load(session_id)
+
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "instead of Employee Risks I would like to have "
+                      "Employee Budget"},
+    ))
+
+    assert "couldn't match" not in prose(reply).lower()
+    assert actions(reply, "open_preview")
+    titles = [section["title"]
+              for section in knowledge.load(session_id).structure["sections"]]
+    assert titles == ["Headcount Integration", "Employee Budget", "Next Steps"]
+
+    updated = session_plan.load(session_id)
+    assert updated.version > before.version
+    assert "Employee Budget" in updated.covered_sections
+    assert "Employee Risks" not in updated.covered_sections
+    budget_pages = updated.covered_sections["Employee Budget"]
+    assert any("budget" in page_id for page_id in budget_pages), budget_pages
 
 
 # ================================================ the loop has no dead ends

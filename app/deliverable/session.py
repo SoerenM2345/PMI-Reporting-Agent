@@ -35,6 +35,7 @@ OVERRIDE_PREFIX = "dlv:"
 
 def plan(session_id: str, analysis, *, request_text: str = "",
          audience: str = "", fmt: Optional[str] = None,
+         presentation_layout: bool = False,
          force: bool = True, cancel=None) -> Deliverable:
     """Plan the session's deliverable and store it as a new version."""
     from app.agent import knowledge as kb_store
@@ -47,6 +48,7 @@ def plan(session_id: str, analysis, *, request_text: str = "",
         analysis=analysis)
     if fmt:
         context.requested_output_format = fmt
+    context.presentation_layout = presentation_layout
     # The reader named in *this* turn wins: "actually it's for the CFO" is a
     # correction, and falling back to the stored label would ignore it.
     context.audience = (audience or context.audience
@@ -102,6 +104,8 @@ def _fingerprint(session_id: str, analysis,
     context = builder.build_for_session(session_id, request, analysis=analysis)
     if deliverable is not None and deliverable.audience_label:
         context.audience = deliverable.audience_label
+    if deliverable is not None:
+        context.presentation_layout = deliverable.presentation_layout
     return fp.compute(context,
                       content_revision=kb_store.load(session_id).content_revision)
 

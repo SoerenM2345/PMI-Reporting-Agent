@@ -170,6 +170,17 @@ class LayoutCatalog(BaseModel):
     def _non_content(self, role: str, family: LayoutFamily,
                      purpose: str) -> LayoutChoice:
         pool = self.with_role(role, family) or self.with_role(role)
+        if role == "title":
+            # The template still contains legacy cover variants whose Deloitte
+            # lockup includes the retired "Together makes progress" tagline.
+            # Prefer the otherwise identical plain-wordmark layouts. Keeping
+            # this choice in the catalog means every PowerPoint renderer and
+            # every stored page binding agrees on the approved cover family.
+            plain_wordmark = [
+                lay for lay in pool
+                if "tagline logo lockup" not in lay.normalized_name
+            ]
+            pool = plain_wordmark or pool
         if role == "divider":
             # Reserve the low, full-width statement band for `quote`. An
             # ordinary section break wants its title in the upper third, where
