@@ -127,7 +127,9 @@ def _dependency_statement(d) -> str:
 
 
 def _decision_statement(d) -> str:
-    body = d.decision_body or "an unnamed body"
+    body = _s(d.decision_body)
+    if not body or body.casefold() == "unknown":
+        body = "an unnamed decision body"
     when = f" by {fmt.date_str(d.decision_deadline)}" if d.decision_deadline else ""
     rec = f" Recommended: {d.recommended_option}." if d.recommended_option else ""
     return f"'{d.title}' requires a decision from {body}{when}.{rec}"

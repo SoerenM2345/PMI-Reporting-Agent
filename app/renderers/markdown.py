@@ -63,9 +63,6 @@ def to_markdown(deliverable: Deliverable,
         parts.append(f"> {deliverable.governing_message}")
     if deliverable.executive_takeaway:
         parts.append(deliverable.executive_takeaway)
-    if deliverable.planned_by == "fallback" and deliverable.warnings:
-        parts.append(f"**Note:** {deliverable.warnings[0]}")
-
     for page in deliverable.pages:
         if page.purpose == "cover":
             continue

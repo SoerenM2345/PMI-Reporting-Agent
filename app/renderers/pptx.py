@@ -158,23 +158,10 @@ def _render_cover(slide, page: PageDesign, deliverable: Deliverable,
 
     The template's cover puts its title at the bottom left, not centred, and
     offers a large picture placeholder. An unfilled picture placeholder shows a
-    prompt, so it is released rather than left.
+    prompt, so it is released rather than left. The cover title has already
+    been decided by the planner and is filled into that native placeholder by
+    ``_render_page``; no second free-positioned headline belongs near the logo.
     """
-    # The template's cover puts its title at the bottom left and leaves the upper
-    # area to a picture. That area is where the governing message belongs: a
-    # reader who opens the deck and reads nothing else should still get the one
-    # sentence the document exists to deliver.
-    if deliverable.governing_message:
-        title_slot = _slot(layout, "title")
-        top = 0.9
-        height = (title_slot.top_in - top - 0.4) if title_slot else 3.4
-        pptx_base.draw_text(
-            slide, brand, deliverable.governing_message,
-            (Inches(brand.grid.margin_x_in), Inches(top),
-             Inches(min(brand.slide_w_in * 0.44, 5.6)),
-             Inches(max(height, 1.0))),
-            token="h1", color="deep", name="pmi:governing")
-
     for element in page.of_role("callout"):
         box = (Inches(brand.grid.margin_x_in),
                Inches(brand.slide_h_in - 1.15),
@@ -277,8 +264,13 @@ def _render_visual(slide, element, box, page: PageDesign,
         spec = deliverable.specs.tables.get(element.spec_id)
         if spec is None:
             return False
-        pptx_base.draw_table(slide, brand, spec, box)
-        _caption(slide, brand, spec.truncation_note(), box)
+        shown = _table_view_for_slide(spec, box)
+        table_box = box
+        if shown.is_truncated:
+            left, top, width, height = box
+            table_box = (left, top, width, max(height - Inches(0.28), Inches(1)))
+        pptx_base.draw_table(slide, brand, shown, table_box)
+        _caption(slide, brand, shown.truncation_note(), table_box)
         return True
     if isinstance(element, KpiRowElement):
         pptx_base.draw_kpi_row(slide, brand, element.tiles, box)
@@ -291,6 +283,24 @@ def _render_visual(slide, element, box, page: PageDesign,
         except (OSError, ValueError) as exc:                    # noqa: BLE001
             page.warnings.append(f"An image could not be placed ({exc}).")
     return False
+
+
+def _table_view_for_slide(spec, box, *, row_cap: int = 8):
+    """A readable slide view; the stored spec keeps every row for other formats."""
+    _left, _top, _width, height = box
+    by_height = max(3, int(Emu(height).inches / 0.5) - 1)
+    limit = min(row_cap, by_height)
+    if len(spec.rows) <= limit:
+        return spec
+
+    shown = spec.model_copy(deep=True)
+    shown.rows = shown.rows[:limit]
+    shown.row_evidence_ids = shown.row_evidence_ids[:limit]
+    shown.evidence_ids = shown.evidence_ids[:limit]
+    shown.emphasis_rows = [row for row in shown.emphasis_rows if row < limit]
+    shown.total_rows = max(shown.total_rows, len(spec.rows))
+    shown.row_limit = limit
+    return shown
 
 
 def _render_chart(slide, element: ChartElement, box, page: PageDesign,

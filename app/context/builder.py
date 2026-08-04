@@ -103,9 +103,10 @@ def build_for_session(session_id: str, request_text: str, *,
         project_knowledge = default_repositories().knowledge.current(
             linked_project_id)
 
+    session_kb = kb_store.load(session_id)
     digest = _merge_digests(
         _project_digest(project_knowledge, record),
-        _session_digest(kb_store.load(session_id)),
+        _session_digest(session_kb),
     )
     active_chat_id = chat.chat_id if chat is not None else chat_id
     messages = (

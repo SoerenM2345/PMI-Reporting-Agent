@@ -156,6 +156,20 @@ _ADD = re.compile(
 _RENAME = re.compile(
     r"\b(?:rename|retitle)\s+(?:the\s+)?(?P<old>.+?)\s+"
     r"(?:to|as|into)\s+(?P<new>.+?)\s*[.!?]?\s*$", re.I)
+_REPLACE = (
+    re.compile(
+        r"\breplace\s+(?:the\s+)?(?P<old>.+?)\s+(?:with|by)\s+"
+        r"(?:the\s+)?(?P<new>.+?)\s*[.!?]?\s*$", re.I),
+    re.compile(
+        r"\binstead of\s+(?:the\s+)?(?P<old>.+?)\s+"
+        r"(?:i(?:'d|\s+would)?\s+(?:like|prefer|want)\s+(?:to\s+)?"
+        r"(?:have|use|include|show)|(?:please\s+)?(?:have|use|include|show))\s+"
+        r"(?:the\s+)?(?P<new>.+?)\s*[.!?]?\s*$", re.I),
+    re.compile(
+        r"\bi(?:'d|\s+would)?\s+(?:like|prefer|want)\s+(?:to\s+)?"
+        r"(?:have|use|include|show)\s+(?:the\s+)?(?P<new>.+?)\s+"
+        r"instead of\s+(?:the\s+)?(?P<old>.+?)\s*[.!?]?\s*$", re.I),
+)
 
 
 def revise(existing: Optional[dict], instruction: str) -> Optional[StructureSpec]:
@@ -166,6 +180,27 @@ def revise(existing: Optional[dict], instruction: str) -> Optional[StructureSpec
         current = StructureSpec.model_validate(existing)
     except (TypeError, ValueError):
         return None
+
+    replacement = None
+    for pattern in _REPLACE:
+        replacement = pattern.search(instruction)
+        if replacement:
+            break
+    if replacement:
+        old = _clean_edit(replacement.group("old"))
+        new = _clean_edit(replacement.group("new"))
+        changed = False
+        sections: list[SectionSpec] = []
+        for section in current.sections:
+            if not changed and old and new and _same_topic(section.title, old):
+                # This is a semantic replacement, not a cosmetic rename. Clear
+                # any prior builder match so the new topic is matched to its own
+                # evidence (Budget must not keep rendering Risk rows).
+                sections.append(SectionSpec(title=new))
+                changed = True
+            else:
+                sections.append(section)
+        return StructureSpec(sections=sections) if changed else None
 
     rename = _RENAME.search(instruction)
     if rename:

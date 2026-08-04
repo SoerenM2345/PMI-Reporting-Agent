@@ -215,11 +215,16 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
     turn = _classify(text, chat)
     preamble = ChatAnswer()
 
-    update = nl_updates.parse(text)
+    # Multi-item shapes take precedence over the broad one-sentence parser.
+    # A pasted findings paragraph contains ordinary verbs ("is open") and a
+    # date, so parsing one sentence first can misread everything after the first
+    # "is" as one enormous value for the currently focused field.
+    embedded = nl_updates.parse_embedded(text)
+    update = nl_updates.parse(text) if not embedded else None
     # A pasted block of "<title> — <owner> · due <date>" lines is a value edit
     # too, just many at once — recognised only when a single "X is Y" sentence
     # was not, so a normal correction is never re-read as a one-line paste.
-    bulk = nl_updates.parse_bulk(text) if update is None else []
+    bulk = nl_updates.parse_bulk(text) if update is None and not embedded else []
     wants_fill = _is_fill_gaps(text)
 
     # Every turn now gets an answer, so every turn needs the files read — the
@@ -261,6 +266,19 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
                                    focus=knowledge.load(chat.session_id).focus)
         if applied is not None:
             return preamble.then(_after_update(chat, analysis, applied))
+
+    # The agent's own quality findings are often copied, filled in and pasted
+    # back as one paragraph. Apply every explicit value rather than treating the
+    # paragraph as a wording edit to whichever page happens to be open.
+    if embedded and analysis is not None:
+        result = nl_updates.apply_embedded(
+            analysis, text, focus=knowledge.load(chat.session_id).focus)
+        if result is not None:
+            return preamble.then(_after_bulk(
+                chat, analysis, result,
+                refresh_report=_requests_report_refresh(text),
+                show_remaining=True,
+            ))
 
     # A pasted list of items — "deliver X — Marco Rossi · due — 01-11-2026" per
     # line — fills many gaps at once. Same engine as the single sentence above,
@@ -698,12 +716,19 @@ def _numeric_corpus(session_id: str, analysis) -> set[str]:
 def _render(chat: Chat, analysis, output_format: Optional[str],
             *, cancel=None) -> ChatAnswer:
     """Build the file. `respond` guarantees analysis exists and content is drafted."""
+    fmt = output_format or "powerpoint"
+    canonical = FORMAT_ALIASES.get(fmt.casefold(), fmt.casefold())
+    wants_presentation_layout = canonical in (
+        "powerpoint", "pptx", "deck", "slides", "presentation")
+
     deliverable = session_plan.load(chat.session_id)
     if deliverable is None:
         return say("Let me draft the report first — what do you need?")
 
     preamble = ChatAnswer()
-    if session_plan.is_stale(deliverable, chat.session_id, analysis):
+    layout_changed = deliverable.presentation_layout != wants_presentation_layout
+    if layout_changed or session_plan.is_stale(
+            deliverable, chat.session_id, analysis):
         # Re-plan and carry on. Telling the user to ask again is the dead end
         # this router exists to eliminate: they asked for a Word document, the
         # draft was stale because of a correction *they* just made, and there is
@@ -715,9 +740,12 @@ def _render(chat: Chat, analysis, output_format: Optional[str],
             chat.session_id, analysis,
             request_text=deliverable.request_text or analysis.request_text or "",
             audience=deliverable.audience_label or "",
+            presentation_layout=wants_presentation_layout,
             cancel=cancel)
-        preamble = say(f"*{reason or 'The data changed, so I redid the draft.'}*"
-                       f" I've redone it from the current data.")
+        if not layout_changed:
+            preamble = say(
+                f"*{reason or 'The data changed, so I redid the draft.'}*"
+                f" I've redone it from the current data.")
 
     # Actually render it. Saying "generating…" and returning nothing would be a
     # reply that claims work it did not do — the one thing a status tool must
@@ -725,7 +753,6 @@ def _render(chat: Chat, analysis, output_format: Optional[str],
     from app.agent.cancellation import Cancelled
     from app.agent.graph import run_generation
 
-    fmt = output_format or "powerpoint"
     blocking = [c for c in analysis.data_model.unresolved_conflicts() if c.critical]
     _check(cancel, f"building the {fmt}")
 
@@ -814,13 +841,21 @@ def _classify_by_keyword(text: str) -> TurnIntent:
         None,
     )
 
+    # A report can be the *subject* of a question. "Why did you include Unknown
+    # in the HTML report?" contains both an edit verb and a format, but the user
+    # is asking for an explanation, not another file or a silent revision.
+    if re.match(
+            r"^(?:why\b|how\s+(?:did|does|come)\b|what\s+(?:does|is)\b|"
+            r"can you explain\b|please explain\b|explain\b)", lowered):
+        return TurnIntent(intent="question", audience=audience)
+
     if re.search(r"\b(generate|export|download|create|make|render|build|produce)\b",
                  lowered) and output_format:
         return TurnIntent(intent="render", output_format=output_format,
                           audience=audience)
 
     if re.search(r"\b(remove|drop|delete|exclude|omit|leave out|add|include|"
-                 r"move|reorder|shorten|rename|"
+                 r"move|reorder|shorten|rename|replace|instead of|"
                  r"put .* first|show \d+)\b", lowered):
         return TurnIntent(intent="revise_content", audience=audience)
 
@@ -996,7 +1031,7 @@ def _interrupts_collection(text: str, model) -> bool:
     # A pasted multi-item block answers many gaps at once rather than the one
     # being asked, so it abandons the one-at-a-time loop and is applied in full
     # by normal routing.
-    if nl_updates.parse(text) is None and nl_updates.parse_bulk(text):
+    if nl_updates.parse_bulk(text) or nl_updates.parse_embedded(text):
         return True
     return _classify_by_keyword(text).intent in (
         "render", "request_report", "revise_content", "set_audience",
@@ -1013,6 +1048,12 @@ def _handle_pending(chat: Chat, analysis, pending: dict, text: str):
     mode = pending.get("mode")
     lowered = (text or "").strip().lower()
 
+    if mode == "choose_presentation_mode":
+        # Compatibility for sessions paused by the removed design question:
+        # resume their requested export immediately with the light master.
+        json_store.clear_pending(chat.session_id)
+        return _render(chat, analysis, pending.get("format") or "powerpoint")
+
     if mode == "await_regen":
         json_store.clear_pending(chat.session_id)
         if lowered in _AFFIRM:
@@ -1027,12 +1068,12 @@ def _handle_pending(chat: Chat, analysis, pending: dict, text: str):
     current_key = pending.get("current_key")
 
     if lowered in _STOP_WORDS:
-        # "Leave the rest blank" is durable. Clearing only pending.json caused
-        # the same questions to restart after the next draft.
+        # "Leave the rest blank" is a durable decision, not just an exit from
+        # this one prompt. Record every currently open gap so a later re-plan
+        # does not restart the questionnaire the user explicitly stopped.
         kb = knowledge.load(chat.session_id)
         for gap in _open_gaps(model, chat.session_id, skipped):
             kb.decline_gap(_gap_key(gap))
-        kb.set_focus(None)
         knowledge.save(kb)
         json_store.clear_pending(chat.session_id)
         return say("Okay — I'll leave the rest blank (they'll show as \"Not "
@@ -1161,7 +1202,9 @@ def _consequence_of(applied) -> list[str]:
     return ["I'll use that everywhere the report names it."]
 
 
-def _after_bulk(chat: Chat, analysis, result) -> ChatAnswer:
+def _after_bulk(chat: Chat, analysis, result, *,
+                refresh_report: bool = False,
+                show_remaining: bool = False) -> ChatAnswer:
     """The reply for a pasted, multi-item update.
 
     Says how many values landed and — just as importantly — names the lines it
@@ -1175,14 +1218,89 @@ def _after_bulk(chat: Chat, analysis, result) -> ChatAnswer:
         body.append("")
         body.append(f"**{len(result.skipped)} line(s) I couldn't place:**")
         body += fmt_chat.bullets(result.skipped, limit=8)
+    if show_remaining:
+        body += _remaining_problem_summary(analysis)
 
     answer = say(fmt_chat.reply(
-        f"Saved {len(result.applied)} value(s) from {result.count} item(s)",
+        (f"Saved {len(result.applied)} value(s) from {result.count} item(s)"
+         if result.applied else
+         f"I found {result.count} supplied value(s), but couldn't save them"),
         body=body,
         action=("Those gaps are closed — the report will state your values and "
-                "record them as coming from you."),
+                "record them as coming from you." if result.applied else ""),
     ))
+    if not result.applied:
+        return answer
+    if refresh_report:
+        return answer.then(_refresh_current_report(chat, analysis))
     return answer.then(_offer_regeneration(chat))
+
+
+def _remaining_problem_summary(analysis, limit: int = 6) -> list[str]:
+    """Name what is still wrong after a batch edit; never imply all was fixed."""
+    model = analysis.data_model
+    conflicts = list(model.unresolved_conflicts())
+    issues = list(model.validation_issues)
+    if not conflicts and not issues:
+        return ["", "**No unresolved data-quality problems remain.**"]
+
+    lines = [
+        "",
+        (f"**Still unresolved:** {len(conflicts)} source conflict(s) and "
+         f"{len(issues)} data-quality issue(s)."),
+    ]
+    shown = 0
+    for conflict in conflicts:
+        if shown >= limit:
+            break
+        label = getattr(conflict, "entity_key", None) or "source disagreement"
+        field = (getattr(conflict, "field", "") or "value").replace("_", " ")
+        lines.append(f"- {label} — conflicting {field}")
+        shown += 1
+    for issue in issues:
+        if shown >= limit:
+            break
+        severity = getattr(getattr(issue, "severity", None), "value", "")
+        prefix = f"{severity.title()} — " if severity else ""
+        lines.append(f"- {prefix}{issue.message}")
+        shown += 1
+    remaining = len(conflicts) + len(issues) - shown
+    if remaining > 0:
+        lines.append(f"- *…and {remaining} more in the data-quality report.*")
+    return lines
+
+
+def _requests_report_refresh(text: str) -> bool:
+    """Did the value-bearing message also ask to use it in the current report?"""
+    lowered = (text or "").casefold()
+    report_words = ("report", "draft", "deck", "presentation", "slide")
+    action_words = ("include", "use", "apply", "incorporate", "reflect", "update")
+    return any(word in lowered for word in report_words) \
+        and any(word in lowered for word in action_words)
+
+
+def _refresh_current_report(chat: Chat, analysis) -> ChatAnswer:
+    """Re-plan immediately when the same message says to include the values."""
+    existing = session_plan.load(chat.session_id)
+    if existing is None and analysis.audience is None:
+        return _ask_audience(
+            "I saved the values. Who is the report for? It changes what goes in it."
+        )
+
+    stored = session_plan.plan(
+        chat.session_id, analysis,
+        request_text=((existing.request_text if existing else "")
+                      or analysis.request_text or ""),
+        audience=((existing.audience_label if existing else "")
+                  or analysis.audience_label or ""),
+    )
+    return ChatAnswer(
+        content="Updated the report with the values I could place.",
+        actions=[OpenPreviewAction(
+            session_id=chat.session_id, version=stored.version,
+            formats=PREVIEW_FORMATS,
+        )],
+    )
 
 
 def _offer_regeneration(chat: Chat) -> ChatAnswer:

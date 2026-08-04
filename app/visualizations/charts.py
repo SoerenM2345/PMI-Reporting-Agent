@@ -21,6 +21,7 @@ findings and the second is usually the worse one.
 from __future__ import annotations
 
 import logging
+import textwrap
 from html import escape
 from pathlib import Path
 from typing import Optional, Sequence
@@ -32,6 +33,10 @@ from app.visualizations.specs import ChartSeries, ChartSpec, DataPoint
 log = logging.getLogger("pmi.visualizations.charts")
 
 DPI = 200
+#: Category names carry meaning and must remain readable after a chart is
+#: reduced to the PDF/Word content width. This is deliberately larger than the
+#: numeric-axis tick size, which is supporting furniture rather than content.
+MIN_CATEGORY_LABEL_PT = 10.0
 #: How a missing value is labelled wherever a value would have been.
 MISSING_LABEL = "not reported"
 
@@ -75,6 +80,11 @@ def to_png(spec: ChartSpec, brand: BrandSystem, out_dir: Path, *,
             axes.spines[side].set_color(brand.chart.axis_color)
         axes.tick_params(colors=brand.chart.axis_color,
                          labelsize=brand.chart.tick_pt)
+        category_labels = (axes.get_yticklabels()
+                           if spec.chart_type in ("bar", "stacked_bar")
+                           else axes.get_xticklabels())
+        for label in category_labels:
+            label.set_fontsize(_category_label_pt(brand))
         if spec.value_axis.title:
             axes.set_ylabel(spec.value_axis.title,
                             color=brand.chart.axis_color,
@@ -215,11 +225,11 @@ def _category_axis(axes, positions, categories, brand: BrandSystem, *,
     setter = axes.set_yticks if horizontal else axes.set_xticks
     labeller = axes.set_yticklabels if horizontal else axes.set_xticklabels
     setter(list(positions))
-    rotation = 0 if horizontal or max(
-        (len(str(c)) for c in categories), default=0) <= 10 else 30
-    labeller([_wrap(str(c)) for c in categories], rotation=rotation,
-             ha="right" if rotation else "center",
-             fontsize=brand.chart.tick_pt, color=brand.chart.axis_color)
+    limit = 28 if horizontal else 18
+    labeller([_wrap(str(c), limit) for c in categories], rotation=0,
+             ha="right" if horizontal else "center",
+             fontsize=_category_label_pt(brand),
+             color=brand.chart.axis_color)
 
 
 def _label_bars(axes, offsets, values, points: Sequence[DataPoint],
@@ -261,29 +271,39 @@ def _note_missing(spec: ChartSpec, axes, brand: BrandSystem) -> None:
 
 # ======================================================================= SVG
 def to_svg(spec: ChartSpec, brand: BrandSystem, *,
-           width: int = 720, height: int = 380) -> str:
+           width: int = 720, height: int = 380,
+           native_tooltips: bool = True) -> str:
     """Inline SVG, self-contained and accessible.
 
     Every mark carries `data-evidence-id`, `data-label` and `data-value`, so a
     single delegated handler in the page drives tooltips and legend toggling
     without a chart library. They are emitted unconditionally: with no
-    JavaScript present they are inert, and the `<title>` child still gives a
-    native tooltip and a screen-reader label.
+    JavaScript present they are inert. Standalone SVG uses a native ``<title>``
+    tooltip; the HTML renderer disables it because that page supplies one
+    styled tooltip of its own. In both cases marks retain an ``aria-label``.
     """
     if spec.chart_type in ("pie", "donut"):
-        return _svg_pie(spec, brand, width, height)
-    return _svg_cartesian(spec, brand, width, height)
+        return _svg_pie(spec, brand, width, height,
+                        native_tooltips=native_tooltips)
+    return _svg_cartesian(spec, brand, width, height,
+                          native_tooltips=native_tooltips)
 
 
 _PAD_LEFT, _PAD_RIGHT, _PAD_TOP, _PAD_BOTTOM = 64, 16, 28, 56
 
 
 def _svg_cartesian(spec: ChartSpec, brand: BrandSystem, width: int,
-                   height: int) -> str:
+                   height: int, *, native_tooltips: bool = True) -> str:
     scale = _scale_for(spec)
-    plot_w = width - _PAD_LEFT - _PAD_RIGHT
-    plot_h = height - _PAD_TOP - _PAD_BOTTOM
     categories = spec.categories or [p.label for p in spec.all_points()]
+    category_lines = [_wrap(str(category), 16).splitlines()
+                      for category in categories]
+    max_category_lines = max((len(lines) for lines in category_lines), default=1)
+    has_legend = len(spec.series) > 1 and spec.legend != "none"
+    pad_bottom = (_PAD_BOTTOM + (max_category_lines - 1) * 13
+                  + (20 if has_legend else 0))
+    plot_w = width - _PAD_LEFT - _PAD_RIGHT
+    plot_h = height - _PAD_TOP - pad_bottom
     count = max(len(categories), 1)
     slot = plot_w / count
 
@@ -293,10 +313,12 @@ def _svg_cartesian(spec: ChartSpec, brand: BrandSystem, width: int,
     parts: list[str] = [
         f'<svg viewBox="0 0 {width} {height}" role="img" '
         f'class="pmi-chart" data-chart-id="{escape(spec.spec_id)}" '
+        f'aria-label="{escape(spec.alt_text or spec.title or spec.spec_id)}" '
         f'preserveAspectRatio="xMidYMid meet">',
-        f"<title>{escape(spec.title or spec.spec_id)}</title>",
-        f"<desc>{escape(spec.alt_text)}</desc>",
     ]
+    if native_tooltips:
+        parts.append(f"<title>{escape(spec.title or spec.spec_id)}</title>")
+    parts.append(f"<desc>{escape(spec.alt_text)}</desc>")
 
     for tick in scale.ticks:
         y = y_of(tick)
@@ -321,7 +343,9 @@ def _svg_cartesian(spec: ChartSpec, brand: BrandSystem, width: int,
         color = brand.series_color(series_index)
         if spec.chart_type in ("line", "area", "slope") \
                 or series.kind_override in ("line", "area"):
-            parts.append(_svg_line(series, color, slot, y_of, brand))
+            parts.append(_svg_line(
+                series, color, slot, y_of, brand,
+                native_tooltips=native_tooltips))
             continue
 
         for index, point in enumerate(series.points):
@@ -338,6 +362,7 @@ def _svg_cartesian(spec: ChartSpec, brand: BrandSystem, width: int,
             top = y_of(bottoms[index] + point.value) if stacked \
                 else y_of(max(point.value, 0.0))
             base = y_of(bottoms[index]) if stacked else zero_y
+            label = f"{series.name} — {point.label}: {point.display}"
             parts.append(
                 f'<rect class="pmi-mark" x="{x:.1f}" y="{min(top, base):.1f}" '
                 f'width="{bar_w:.1f}" height="{abs(base - top):.1f}" '
@@ -347,33 +372,35 @@ def _svg_cartesian(spec: ChartSpec, brand: BrandSystem, width: int,
                 f'data-series="{escape(series.name)}" '
                 f'data-value="{escape(point.display)}"'
                 + (f' data-note="{escape(point.note)}"' if point.note else "")
-                + "><title>"
-                + escape(f"{series.name} — {point.label}: {point.display}")
-                + "</title></rect>")
+                + _svg_mark_tail("rect", label, native_tooltips))
             if stacked:
                 bottoms[index] += point.value
 
-    for index, category in enumerate(categories):
+    for index, lines in enumerate(category_lines):
         centre = _PAD_LEFT + slot * (index + 0.5)
+        y = height - pad_bottom + 18
+        tspans = "".join(
+            f'<tspan x="{centre:.1f}" dy="{0 if line_index == 0 else 13}">'
+            f'{escape(line)}</tspan>'
+            for line_index, line in enumerate(lines))
         parts.append(
-            f'<text x="{centre:.1f}" y="{height - _PAD_BOTTOM + 18}" '
-            f'text-anchor="middle" font-size="{brand.chart.tick_pt}" '
-            f'fill="{brand.chart.axis_color}">{escape(_wrap(str(category), 16))}'
-            f'</text>')
+            f'<text x="{centre:.1f}" y="{y}" text-anchor="middle" '
+            f'font-size="{_category_label_pt(brand)}" '
+            f'fill="{brand.chart.axis_color}">{tspans}</text>')
 
     parts.append(
         f'<line x1="{_PAD_LEFT}" y1="{zero_y:.1f}" x2="{width - _PAD_RIGHT}" '
         f'y2="{zero_y:.1f}" stroke="{brand.chart.axis_color}" '
         f'stroke-width="1"/>')
 
-    if len(spec.series) > 1 and spec.legend != "none":
+    if has_legend:
         parts.append(_svg_legend(spec, brand, width, height))
     parts.append("</svg>")
     return "\n".join(parts)
 
 
 def _svg_line(series: ChartSeries, color: str, slot: float, y_of,
-              brand: BrandSystem) -> str:
+              brand: BrandSystem, *, native_tooltips: bool = True) -> str:
     """A polyline that breaks at gaps rather than interpolating through them."""
     runs: list[list[str]] = [[]]
     markers: list[str] = []
@@ -385,21 +412,21 @@ def _svg_line(series: ChartSeries, color: str, slot: float, y_of,
         x = _PAD_LEFT + slot * (index + 0.5)
         y = y_of(point.value)
         runs[-1].append(f"{x:.1f},{y:.1f}")
+        label = f"{series.name} — {point.label}: {point.display}"
         markers.append(
             f'<circle class="pmi-mark" cx="{x:.1f}" cy="{y:.1f}" r="4" '
             f'fill="{color}" data-evidence-id="{escape(point.evidence_id)}" '
             f'data-label="{escape(point.label)}" '
             f'data-series="{escape(series.name)}" '
-            f'data-value="{escape(point.display)}"><title>'
-            + escape(f"{series.name} — {point.label}: {point.display}")
-            + "</title></circle>")
+            f'data-value="{escape(point.display)}"'
+            + _svg_mark_tail("circle", label, native_tooltips))
     lines = [f'<polyline points="{" ".join(run)}" fill="none" stroke="{color}" '
              f'stroke-width="2"/>' for run in runs if len(run) > 1]
     return "\n".join(lines + markers)
 
 
 def _svg_pie(spec: ChartSpec, brand: BrandSystem, width: int,
-             height: int) -> str:
+             height: int, *, native_tooltips: bool = True) -> str:
     import math
 
     series = spec.series[0] if spec.series else ChartSeries()
@@ -410,9 +437,11 @@ def _svg_pie(spec: ChartSpec, brand: BrandSystem, width: int,
     inner = radius * 0.58 if spec.chart_type == "donut" else 0.0
 
     parts = [f'<svg viewBox="0 0 {width} {height}" role="img" class="pmi-chart" '
-             f'data-chart-id="{escape(spec.spec_id)}">',
-             f"<title>{escape(spec.title)}</title>",
-             f"<desc>{escape(spec.alt_text)}</desc>"]
+             f'data-chart-id="{escape(spec.spec_id)}" '
+             f'aria-label="{escape(spec.alt_text or spec.title or spec.spec_id)}">']
+    if native_tooltips:
+        parts.append(f"<title>{escape(spec.title)}</title>")
+    parts.append(f"<desc>{escape(spec.alt_text)}</desc>")
     angle = -math.pi / 2
     for index, point in enumerate(points):
         sweep = 2 * math.pi * ((point.value or 0.0) / total)
@@ -429,15 +458,24 @@ def _svg_pie(spec: ChartSpec, brand: BrandSystem, width: int,
         else:
             path = (f"M {cx:.1f} {cy:.1f} L {x1:.1f} {y1:.1f} "
                     f"A {radius:.1f} {radius:.1f} 0 {large} 1 {x2:.1f} {y2:.1f} Z")
+        label = f"{point.label}: {point.display}"
         parts.append(
             f'<path class="pmi-mark" d="{path}" fill="{brand.series_color(index)}" '
             f'data-evidence-id="{escape(point.evidence_id)}" '
             f'data-label="{escape(point.label)}" '
-            f'data-value="{escape(point.display)}"><title>'
-            + escape(f"{point.label}: {point.display}") + "</title></path>")
+            f'data-value="{escape(point.display)}"'
+            + _svg_mark_tail("path", label, native_tooltips))
         angle = end
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+def _svg_mark_tail(tag: str, label: str, native_tooltips: bool) -> str:
+    """Close an SVG mark with one tooltip mechanism and an accessible name."""
+    accessible = f' aria-label="{escape(label)}" tabindex="0"'
+    if native_tooltips:
+        return accessible + f"><title>{escape(label)}</title></{tag}>"
+    return accessible + f"></{tag}>"
 
 
 def _svg_legend(spec: ChartSpec, brand: BrandSystem, width: int,
@@ -570,7 +608,8 @@ def apply_chart_brand(chart, brand: BrandSystem, spec: ChartSpec) -> None:
                 gridlines.color.rgb = brand.pptx_rgb("rule")
                 gridlines.width = Pt(brand.chart.gridline_pt)
             axis.format.line.color.rgb = brand.pptx_rgb("muted")
-            axis.tick_labels.font.size = Pt(brand.chart.tick_pt)
+            axis.tick_labels.font.size = Pt(
+                brand.chart.tick_pt if has_grid else _category_label_pt(brand))
             axis.tick_labels.font.color.rgb = brand.pptx_rgb("muted")
             if has_grid:
                 axis.tick_labels.number_format_is_linked = False
@@ -606,9 +645,16 @@ def _scale_for(spec: ChartSpec) -> scales.Scale:
 
 
 def _wrap(text: str, limit: int = 18) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit - 1].rstrip() + "…"
+    lines = textwrap.wrap(
+        " ".join((text or "").split()), width=limit,
+        break_long_words=True, break_on_hyphens=True,
+    )
+    return "\n".join(lines) if lines else ""
+
+
+def _category_label_pt(brand: BrandSystem) -> float:
+    return max(float(brand.chart.tick_pt), float(brand.chart.label_pt),
+               MIN_CATEGORY_LABEL_PT)
 
 
 def _safe(name: str) -> str:

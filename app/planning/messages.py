@@ -116,7 +116,7 @@ def _general(items: Sequence[EvidenceItem]) -> str:
 
     absences = [i for i in items if i.is_absence]
     if absences and not [i for i in items if not i.is_absence]:
-        return "Nothing in this project covers this subject"
+        return "Not enough data"
     return ""
 
 

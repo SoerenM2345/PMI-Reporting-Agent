@@ -710,12 +710,138 @@ class BulkResult(BaseModel):
     skipped: list[str] = []        # "<title>: <why>" for each write that failed
 
 
+class EmbeddedValue(BaseModel):
+    """One value filled into a finding the agent previously displayed.
+
+    People commonly copy the data-quality findings, replace the missing part in
+    each sentence, and paste the whole paragraph back.  That is neither a
+    one-field correction nor the compact ``title — owner · due — date`` table
+    shape below, so it needs a small typed intermediate of its own.
+    """
+
+    entity_type: str
+    label: str
+    field: str
+    value: str
+    position: int = 0
+
+
+_BULK_DATE = r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"
+
+
+# The phrases mirror the findings emitted by ``consistency/completeness.py`` and
+# ``calculations.py``.  They intentionally require an explicit entity type,
+# quoted label and field phrase: ordinary prose must never be mined for a value
+# merely because it contains a person's name or a date.
+_EMBEDDED_VALUE_PATTERNS: tuple[tuple[str, str, re.Pattern], ...] = (
+    (
+        "risk", "mitigation_owner",
+        re.compile(
+            r"\bRisk\s+['\"“‘](?P<label>.+?)['\"”’]\s+"
+            r"(?:has a mitigation action but (?:nobody is )?assigned to|"
+            r"has (?:a )?mitigation owner|mitigation owner(?:\s+is|\s*:))\s+"
+            r"(?P<value>.+?)(?=\s+(?:Critical|High|Medium|Low)\s*[—–-]|"
+            r"\s+Source\s*:|[.;\n]|$)",
+            re.I,
+        ),
+    ),
+    (
+        "decision", "decision_deadline",
+        re.compile(
+            rf"\bDecision\s+['\"“‘](?P<label>.+?)['\"”’][^;\n]{{0,120}}?"
+            rf"\b(?:has|with)\s+(?:a\s+)?deadline(?:\s+(?:of|is|:))?\s+"
+            rf"(?P<value>{_BULK_DATE})",
+            re.I,
+        ),
+    ),
+    (
+        "dependency", "owner",
+        re.compile(
+            r"\bDependency\s+['\"“‘](?P<label>.+?)['\"”’]\s+"
+            r"(?:has\s+(?:an?\s+)?owner|owner(?:\s+is|\s*:))\s+"
+            r"(?P<value>.+?)(?=\s+(?:Critical|High|Medium|Low)\s*[—–-]|"
+            r"\s+Source\s*:|[.;\n]|$)",
+            re.I,
+        ),
+    ),
+    (
+        "task", "completion_date",
+        re.compile(
+            rf"\bTask\s+['\"“‘](?P<label>.+?)['\"”’][^;\n]{{0,100}}?"
+            rf"\bcompletion date(?:\s+(?:of|is|:))?\s+"
+            rf"(?P<value>{_BULK_DATE})",
+            re.I,
+        ),
+    ),
+)
+
+_NOT_SUPPLIED = {
+    "it", "nobody", "none", "no owner", "not assigned", "not reported",
+    "unknown", "unassigned", "missing",
+}
+
+
+def parse_embedded(text: str) -> list[EmbeddedValue]:
+    """Read values inserted into one or more displayed quality findings.
+
+    The returned order is the order in which the findings appeared, even though
+    each field shape has its own pattern. Duplicate references to the same
+    field are collapsed so a pasted paragraph cannot write one value twice.
+    """
+    found: list[EmbeddedValue] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entity_type, field, pattern in _EMBEDDED_VALUE_PATTERNS:
+        for match in pattern.finditer(text or ""):
+            label = " ".join(match.group("label").split()).strip()
+            value = " ".join(match.group("value").split()).strip(" ,:-")
+            key = (entity_type, label.casefold(), field)
+            if not label or not value or value.casefold() in _NOT_SUPPLIED \
+                    or key in seen:
+                continue
+            if field.endswith("date") or field.endswith("deadline"):
+                if not is_date(value):
+                    continue
+            elif not is_name(value):
+                continue
+            seen.add(key)
+            found.append(EmbeddedValue(
+                entity_type=entity_type, label=label, field=field,
+                value=value, position=match.start(),
+            ))
+    return sorted(found, key=lambda item: item.position)
+
+
+def apply_embedded(analysis, text: str, focus=None) -> Optional[BulkResult]:
+    """Apply all values a user inserted into pasted quality findings.
+
+    Values still travel through :func:`apply`, so coercion, re-checking,
+    persistence, provenance and report staleness are identical to a value typed
+    as a standalone sentence.  This is only a more forgiving input shape.
+    """
+    values = parse_embedded(text)
+    if not values:
+        return None
+
+    result = BulkResult(count=len(values))
+    for item in values:
+        field = item.field.replace("_", " ")
+        sentence = (f"the {field} for {item.entity_type} {item.label} "
+                    f"is {item.value}")
+        applied = apply(analysis, sentence, focus=focus)
+        if applied is not None and applied.applied:
+            result.applied.append(applied.message)
+        else:
+            why = (applied.message if applied is not None
+                   else "I couldn't match this item to the data.")
+            result.skipped.append(f"{item.label} — {field}: {why}")
+    return result
+
+
 #: One pasted line: "<title> — <owner> · due — <date>". This is the exact shape
 #: the agent's own task/issue/milestone answers print, so copying an answer,
 #: filling the dashes, and pasting it back is the natural gesture — and the one
 #: `parse` (single "X is Y" sentence) cannot read. Separators are the em/en dash
 #: the answers use, never the hyphen inside a word ("data-privacy", "Re-baseline").
-_BULK_DATE = r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"
 _BULK_RECORD = re.compile(
     rf"(?P<title>[^\n]+?)\s*[—–]\s*"           # title —
     rf"(?P<owner>[^\n·|]+?)?\s*"                # optional owner

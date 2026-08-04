@@ -19,6 +19,7 @@ from app.context import builder
 from app.context.schemas import GenerationContext, KnowledgeDigest
 from app.deliverable import engine
 from app.deliverable.engine import PlanningError
+from app.evidence.model import EvidenceItem
 from app.extractors.base import make_source
 from app.models.entities import PMIProject
 from app.models.pmi import (
@@ -310,7 +311,7 @@ def test_the_keyless_storyline_does_not_invent_a_conclusion(model):
     plan = storyline.fallback_storyline(
         context, brief, storyline.retrieve_for(context, brief))
 
-    assert "without a language model" in plan.executive_takeaway
+    assert plan.executive_takeaway == ""
     assert plan.complication == ""
     assert plan.supporting_arguments == []
 
@@ -326,19 +327,92 @@ def test_the_keyless_storyline_still_discloses_must_include_evidence(model):
     assert set(context.evidence.must_include()) <= disclosed
 
 
+def test_infrastructure_sections_do_not_repeat_project_background(model):
+    """Background guides the plan; it must not become rows in a status table."""
+    context = context_for(
+        model,
+        "Create a report with a section on Infrastructure Migration.",
+        digest=KnowledgeDigest(
+            free_text=("GlobalMed, a multinational manufacturer, has acquired "
+                       "MediTech, a diagnostics company.")),
+    )
+
+    ids = storyline._evidence_for_topic(  # noqa: SLF001 - planning boundary
+        "Infrastructure Migration", context.evidence,
+        storyline.retrieve_for(context, request_interpreter.fallback_brief(context)),
+    )
+    items = context.evidence.resolve(ids)
+
+    assert items
+    assert not any(item.kind in ("context", "assumption", "absence")
+                   for item in items)
+    assert any(item.kind in ("task", "milestone", "budget", "dependency")
+               for item in items)
+
+
+def test_an_empty_chapter_says_not_enough_data_instead_of_staying_blank():
+    from app.deliverable.model import Deliverable, PageDesign, TextElement
+
+    page = PageDesign(
+        page_id="open-decisions", title="Open Decisions",
+        subtitle="Open Decisions",
+        elements=[TextElement(element_id="headline", role="headline",
+                              text="Open Decisions")],
+    )
+    deliverable = Deliverable(pages=[page])
+
+    engine._ensure_readable_page(page, deliverable)  # noqa: SLF001
+
+    assert page.subtitle == ""
+    assert [element.text for element in page.of_role("body")] == [
+        "Not enough data"]
+    assert not page.of_role("headline")
+
+
+def test_a_body_intent_is_not_mistaken_for_finished_page_copy(model):
+    from app.deliverable.model import PageDesign, TextElement
+    from app.generation import narrative_writer
+    from app.planning.schemas import PageCopy
+
+    context = context_for(model, "Open Decisions")
+    item = EvidenceItem(
+        evidence_id="ev:decision:D1", kind="decision",
+        origin="normalized_value", label="Approve ERP fallback",
+        statement="Decision 'Approve ERP fallback' remains open.",
+        search_text="approve ERP fallback decision",
+    )
+    context.evidence.add(item)
+    page = PageDesign(
+        page_id="open-decisions", title="Open Decisions",
+        evidence_ids=[item.evidence_id],
+        elements=[TextElement(
+            element_id="open-decisions.body1", role="body",
+            text="Open Decisions", evidence_ids=[item.evidence_id],
+            authored_by="llm")],
+    )
+
+    narrative_writer.write_page(
+        page, context, use_model=False,
+        copy=PageCopy(page_id=page.page_id, message_title=page.title),
+    )
+
+    assert page.of_role("body")[0].text == item.statement
+
+
 # ==================================================== the keyless deliverable
-def test_a_keyless_run_says_so_on_the_page_not_only_in_a_log(model):
-    """A document assembled from a fallback that *looks* analysed is the exact
-    failure the warning machinery exists to prevent, and nobody reads a log."""
+def test_a_keyless_run_keeps_system_provenance_out_of_the_report(model):
+    """Planning provenance remains structured metadata, not cover-page copy."""
     context = context_for(model, "Prepare a pack:\n1. Risks\n2. Budget position")
     deliverable = engine.build(context)
 
     assert deliverable.planned_by == "fallback"
-    assert engine.UNPLANNED_NOTICE in deliverable.warnings
-
-    callouts = deliverable.pages[0].of_role("callout")
-    assert callouts and "without a language model" in callouts[0].text
-    assert callouts[0].emphasis == "warn"
+    assert not any("language model" in warning.lower()
+                   for warning in deliverable.warnings)
+    assert not any("language model" in element.text.lower()
+                   for page in deliverable.pages for element in page.elements
+                   if hasattr(element, "text"))
+    assert not any("required sections omitted" in warning.lower()
+                   for warning in deliverable.warnings)
 
 
 def test_a_keyless_run_still_covers_every_requested_topic(model):
@@ -351,11 +425,21 @@ def test_a_keyless_run_still_covers_every_requested_topic(model):
     assert all(deliverable.covered_sections[f"Topic {n}"] for n in range(1, 12))
 
 
+def test_the_keyless_cover_uses_the_status_message_as_its_title(model):
+    context = context_for(model, "Prepare a SteerCo status presentation.")
+    deliverable = engine.build(context)
+    cover = next(page for page in deliverable.pages if page.purpose == "cover")
+
+    assert cover.title == deliverable.governing_message
+    assert cover.title.startswith("Status of ")
+
+
 @pytest.mark.parametrize("scripted_planning", ["steerco_status"], indirect=True)
 def test_a_fully_planned_run_carries_no_unplanned_notice(model, scripted_planning):
     deliverable = engine.build(context_for(model, "Prepare a SteerCo pack."))
-    assert engine.UNPLANNED_NOTICE not in deliverable.warnings
-    assert not any("without a language model" in element.text
+    assert not any("language model" in warning.lower()
+                   for warning in deliverable.warnings)
+    assert not any("language model" in element.text.lower()
                    for page in deliverable.pages
                    for element in page.of_role("callout"))
 
@@ -413,8 +497,9 @@ def test_one_run_that_fell_back_does_not_label_the_next_one_unplanned(model):
     second = engine.build(context_for(model, "Prepare a SteerCo pack."))
 
     assert second.planned_by == "llm"
-    assert engine.UNPLANNED_NOTICE not in second.warnings
-    assert not any("without a language model" in element.text
+    assert not any("language model" in warning.lower()
+                   for warning in second.warnings)
+    assert not any("language model" in element.text.lower()
                    for page in second.pages
                    for element in page.of_role("callout"))
 
@@ -474,10 +559,41 @@ def test_elements_land_in_named_slots(model, scripted_planning):
     context = context_for(model, "Prepare a SteerCo pack.")
     deliverable = engine.build(context)
 
-    two_column = next(p for p in deliverable.pages
-                      if p.composition == "chart_plus_commentary")
-    slots = [e.slot for e in two_column.elements if e.slot]
-    assert len(set(slots)) >= 2, "a two-column page must use both columns"
+    two_column = [p for p in deliverable.pages
+                  if p.composition == "chart_plus_commentary"]
+    for page in two_column:
+        slots = [e.slot for e in page.elements if e.slot]
+        assert len(set(slots)) >= 2, "a two-column page must use both columns"
+
+    table_only = [p for p in deliverable.pages
+                  if p.composition == "table_full"
+                  and len(p.elements) == 1
+                  and p.elements[0].role == "table"]
+    assert table_only, "a table left after deduplication must use the full page"
+    assert all(p.elements[0].slot == "col1" for p in table_only)
+
+
+@pytest.mark.parametrize("scripted_planning", ["steerco_status"], indirect=True)
+def test_presentation_layout_uses_light_master_layouts_and_native_dividers(
+        model, scripted_planning):
+    context = context_for(model, "Prepare a SteerCo pack.")
+    context.presentation_layout = True
+
+    deliverable = engine.build(context)
+    catalog = context.template_reference.catalog
+    layouts = [catalog.by_id(page.layout_id) for page in deliverable.pages]
+
+    assert layouts and all(layout is not None for layout in layouts)
+    assert all(layout.family == "white" for layout in layouts), [
+        (page.page_id, page.purpose, layout.family, layout.raw_name)
+        for page, layout in zip(deliverable.pages, layouts)
+        if layout.family != "white"
+    ]
+    dividers = [page for page in deliverable.pages
+                if page.purpose == "divider"]
+    assert dividers
+    assert all(catalog.by_id(page.layout_id).raw_name.strip() == "Divider - Glow"
+               for page in dividers)
 
 
 @pytest.mark.parametrize("scripted_planning", ["finance_deep_dive"], indirect=True)

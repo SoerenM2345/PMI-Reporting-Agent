@@ -219,6 +219,10 @@ class GenerationContext(BaseModel):
     requested_sections: list[str] = Field(default_factory=list)
     requested_visuals: list[str] = Field(default_factory=list)
     audience: Optional[str] = None
+    #: PowerPoint-only chapter treatment. There is one supported visual family:
+    #: the light master. Other document formats keep the report's content pages
+    #: without presentation divider slides.
+    presentation_layout: bool = False
     user_constraints: list[UserConstraint] = Field(default_factory=list)
 
     # --- the ground

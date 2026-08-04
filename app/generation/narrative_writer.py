@@ -72,7 +72,13 @@ def write_page(page: PageDesign, context: GenerationContext,
         if isinstance(element, TextElement) and element.role in (
                 "body", "callout", "quote"):
             text = copy.callout if element.role == "callout" else copy.body
-            text = text or element.text
+            # `element.text` starts life as the design intent (often just the
+            # section title), not finished copy. Rendering it when PageCopy is
+            # empty produced pages such as "Open Decisions / Open Decisions"
+            # with no decision content. Only preserve it here when a user has
+            # explicitly authored that element.
+            if not text and element.authored_by == "user":
+                text = element.text
             if not text:
                 text = _deterministic_body(items, context)
             if accept(text, context, page, warnings, element.role):
@@ -188,12 +194,8 @@ def _deterministic_body(items: Sequence[EvidenceItem],
     substantive = [i for i in items if not i.is_absence]
     absences = [i for i in items if i.is_absence]
 
-    if not substantive and absences:
-        return " ".join(i.statement for i in absences[:3])
     if not substantive:
-        return ("No source in this project covers the subject of this page, and "
-                "nothing has been recorded about it. Confirm which file or system "
-                "should be the source for it.")
+        return "Not enough data"
 
     sentences = [i.statement for i in substantive[:4] if i.statement]
     body = " ".join(sentences)

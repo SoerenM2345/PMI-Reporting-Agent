@@ -66,13 +66,50 @@ def load(*, project_id: Optional[str] = None, session_id: Optional[str] = None,
     if not path.is_file():
         return None
     try:
-        return Deliverable.model_validate_json(path.read_text(encoding="utf-8"))
+        deliverable = Deliverable.model_validate_json(
+            path.read_text(encoding="utf-8"))
+        _upgrade_legacy_cover(deliverable)
+        return deliverable
     except Exception as exc:                                   # noqa: BLE001
         # A stored version that no longer validates is a schema change, not a
         # crash: re-planning is always available, so return None and let the
         # caller do that rather than 500 on a stale file.
         log.warning("could not read %s (%s); treating as absent", path, exc)
         return None
+
+
+def _upgrade_legacy_cover(deliverable: Deliverable) -> None:
+    """Repair cover bindings saved before the plain-logo/title-placeholder fix.
+
+    Stored deliverables are the source of truth, but layout names and bindings
+    are renderer metadata rather than user-authored copy. Updating them in
+    memory lets an existing chat generate the corrected deck immediately,
+    without forcing a re-plan that could disturb the user's accepted content.
+    """
+    cover = next((page for page in deliverable.pages
+                  if page.purpose == "cover"), None)
+    if cover is None:
+        return
+
+    if "tagline logo lockup" in cover.layout_name.casefold():
+        from app.templates import template_registry
+
+        choice = template_registry.default().catalog.choose(purpose="cover")
+        cover.layout_id = choice.layout.layout_id
+        cover.layout_name = choice.layout.raw_name.strip()
+
+    generic_titles = {
+        " ".join((deliverable.title or "").casefold().split()),
+        " ".join((deliverable.subtitle or "").casefold().split()),
+    }
+    current = " ".join((cover.title or "").casefold().split())
+    governing = " ".join((deliverable.governing_message or "").split())
+    if (current in generic_titles and governing.casefold().startswith("status of ")
+            and len(governing) <= 80):
+        cover.title = governing
+        if " ".join((cover.subtitle or "").casefold().split()) \
+                == governing.casefold():
+            cover.subtitle = ""
 
 
 def head(*, project_id: Optional[str] = None,

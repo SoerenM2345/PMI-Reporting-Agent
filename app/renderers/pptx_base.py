@@ -159,8 +159,11 @@ def fill(slide, slot: Optional[LayoutSlot], text: str, *,
     if shape is None or not shape.has_text_frame:
         return False
 
+    from pptx.enum.text import MSO_AUTO_SIZE
+
     frame = shape.text_frame
     frame.word_wrap = True
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     frame.text = text
     paragraph = frame.paragraphs[0]
     if size_pt is not None:
@@ -180,8 +183,11 @@ def fill_bullets(slide, slot: Optional[LayoutSlot], items: Sequence[str], *,
     if shape is None or not shape.has_text_frame or not items:
         return False
 
+    from pptx.enum.text import MSO_AUTO_SIZE
+
     frame = shape.text_frame
     frame.word_wrap = True
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     frame.clear()
     for index, item in enumerate(items):
         paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
@@ -234,7 +240,7 @@ def draw_footer(slide, brand: BrandSystem, *, left_text: str = "",
     the template's own divider layouts use, so a generated footer reads as
     native rather than bolted on.
     """
-    from pptx.enum.text import PP_ALIGN
+    from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 
     width = brand.slide_w_in - 2 * brand.grid.margin_x_in
     box = slide.shapes.add_textbox(
@@ -243,6 +249,7 @@ def draw_footer(slide, brand: BrandSystem, *, left_text: str = "",
     box.name = "pmi:footer"
     frame = box.text_frame
     frame.word_wrap = False
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     frame.margin_left = frame.margin_right = 0
     frame.margin_top = frame.margin_bottom = 0
 
@@ -260,6 +267,7 @@ def draw_footer(slide, brand: BrandSystem, *, left_text: str = "",
             Inches(brand.footer_top_in), Inches(1.0),
             Inches(brand.footer_height_in))
         number.name = "pmi:page-number"
+        number.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
         number_paragraph = number.text_frame.paragraphs[0]
         number_paragraph.text = right
         number_paragraph.alignment = PP_ALIGN.RIGHT
@@ -277,8 +285,11 @@ def draw_source_note(slide, brand: BrandSystem, text: str, *,
         Inches(brand.grid.margin_x_in), Inches(top),
         Inches(brand.slide_w_in - 2 * brand.grid.margin_x_in), Inches(0.3))
     box.name = "pmi:source-note"
+    from pptx.enum.text import MSO_AUTO_SIZE
+
     frame = box.text_frame
     frame.word_wrap = True
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     paragraph = frame.paragraphs[0]
     paragraph.text = text
     paragraph.font.size = Pt(6)
@@ -289,6 +300,8 @@ def draw_source_note(slide, brand: BrandSystem, text: str, *,
 
 def draw_kpi_row(slide, brand: BrandSystem, tiles: Sequence, box: Box) -> None:
     """A row of figures, as shapes. Values were resolved from evidence already."""
+    from pptx.enum.text import MSO_AUTO_SIZE
+
     if not tiles:
         return
     left, top, width, height = box
@@ -308,6 +321,7 @@ def draw_kpi_row(slide, brand: BrandSystem, tiles: Sequence, box: Box) -> None:
 
         frame = panel.text_frame
         frame.word_wrap = True
+        frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
         frame.text = tile.display or "Not Reported"
         value = frame.paragraphs[0]
         value.font.size = Pt(brand.font("kpi").size_pt)
@@ -346,7 +360,7 @@ def draw_table(slide, brand: BrandSystem, spec, box: Box,
     `<a:tblStyle>` entries, so there is no style to inherit and no banding to
     switch on. Every fill, rule and alignment below has to be stated.
     """
-    from pptx.enum.text import PP_ALIGN
+    from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 
     left, top, width, height = box
     rows = len(spec.rows) + 1
@@ -354,7 +368,10 @@ def draw_table(slide, brand: BrandSystem, spec, box: Box,
     if not columns or rows < 2:
         return None
 
-    row_height = min(Inches(0.32), int(height / rows))
+    # Give wrapped cells enough vertical room while never exceeding the slot.
+    # The former fixed 0.32in rows made a two-line cell paint over every row
+    # below it even though the table shape itself technically stayed on-slide.
+    row_height = min(Inches(0.62), max(Inches(0.32), int(height / rows)))
     graphic = slide.shapes.add_table(rows, columns, left, top, width,
                                      row_height * rows)
     graphic.name = f"pmi:table:{spec.spec_id}"
@@ -372,7 +389,7 @@ def draw_table(slide, brand: BrandSystem, spec, box: Box,
         emphasised = (row_index - 1) in spec.emphasis_rows
         for column_index, cell_value in enumerate(row):
             cell = table.cell(row_index, column_index)
-            cell.text = cell_value.text
+            cell.text = _shorten_table_cell(cell_value.text)
             column = spec.columns[column_index] if column_index < columns else None
             _style_cell(
                 cell, brand, size_pt=brand.font("small").size_pt,
@@ -382,7 +399,21 @@ def draw_table(slide, brand: BrandSystem, spec, box: Box,
             if column is not None and column.kind in ("number", "currency",
                                                       "percent"):
                 cell.text_frame.paragraphs[0].alignment = PP_ALIGN.RIGHT
+            cell.text_frame.word_wrap = True
+            cell.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     return graphic
+
+
+def _shorten_table_cell(text: str, limit: int = 110) -> str:
+    """Keep a PowerPoint cell scannable; the full value remains in the spec."""
+    compact = " ".join((text or "").replace("_x000D_", " ").split())
+    if len(compact) <= limit:
+        return compact
+    cut = compact[:limit]
+    boundary = max(cut.rfind(" "), cut.rfind(";"), cut.rfind("."))
+    if boundary >= int(limit * 0.65):
+        cut = cut[:boundary]
+    return cut.rstrip(" ,;.") + "…"
 
 
 def _cell_color(emphasis: str) -> str:
@@ -392,10 +423,14 @@ def _cell_color(emphasis: str) -> str:
 
 def _style_cell(cell, brand: BrandSystem, *, size_pt: float, bold: bool,
                 color: str, fill: str) -> None:
+    from pptx.enum.text import MSO_AUTO_SIZE
+
     cell.fill.solid()
     cell.fill.fore_color.rgb = brand.pptx_rgb(fill)
     cell.margin_left = cell.margin_right = Inches(0.06)
     cell.margin_top = cell.margin_bottom = Inches(0.02)
+    cell.text_frame.word_wrap = True
+    cell.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     for paragraph in cell.text_frame.paragraphs:
         paragraph.font.size = Pt(size_pt)
         paragraph.font.bold = bold
@@ -411,8 +446,11 @@ def draw_text(slide, brand: BrandSystem, text: str, box: Box, *,
     left, top, width, height = box
     shape = slide.shapes.add_textbox(left, top, width, height)
     shape.name = name
+    from pptx.enum.text import MSO_AUTO_SIZE
+
     frame = shape.text_frame
     frame.word_wrap = True
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     frame.text = text
 
     style = brand.font(token)
@@ -444,8 +482,11 @@ def draw_callout(slide, brand: BrandSystem, text: str, box: Box, *,
     rule.line.fill.background()
     rule.shadow.inherit = False
 
+    from pptx.enum.text import MSO_AUTO_SIZE
+
     frame = panel.text_frame
     frame.word_wrap = True
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     frame.margin_left = Inches(0.16)
     frame.text = text
     paragraph = frame.paragraphs[0]
