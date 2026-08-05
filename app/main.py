@@ -477,11 +477,13 @@ class PatchProjectRequest(BaseModel):
     name: Optional[str] = None
     icon: Optional[str] = None
     knowledge: Optional[str] = None
+    pinned: Optional[bool] = None
 
 
 class PatchChatRequest(BaseModel):
     title: Optional[str] = None
     archived: Optional[bool] = None
+    pinned: Optional[bool] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     #: Filing is also an import into project context. Explicit null removes the
@@ -548,6 +550,7 @@ def patch_project(project_id: str, req: PatchProjectRequest) -> dict:
     _project_or_404(project_id)
     project = chat_store.update_project(
         project_id, name=req.name, icon=req.icon, knowledge=req.knowledge,
+        pinned=req.pinned,
     )
     return {"project": project.model_dump()}
 
@@ -816,6 +819,12 @@ def list_chats(include_archived: bool = False) -> dict:
                       for c in chat_store.list_chats(include_archived=include_archived)]}
 
 
+@app.get("/api/search")
+def search_app(q: str = "") -> dict:
+    """Search visible projects, chat titles, and decoded transcript text."""
+    return {"results": chat_store.search(q)}
+
+
 @app.get("/api/chats/{chat_id}")
 def get_chat(chat_id: str) -> dict:
     """The whole transcript, for reopening a chat from the sidebar."""
@@ -838,6 +847,8 @@ def patch_chat(chat_id: str, req: PatchChatRequest) -> dict:
         chat = chat_store.rename_chat(chat_id, req.title)
     if req.archived is not None:
         chat = chat_store.archive_chat(chat_id, req.archived)
+    if req.pinned is not None:
+        chat = chat_store.pin_chat(chat_id, req.pinned)
     if req.provider is not None or req.model is not None:
         chat = chat_store.set_model(chat_id, provider=req.provider, model=req.model)
     if "project_id" in req.model_fields_set:

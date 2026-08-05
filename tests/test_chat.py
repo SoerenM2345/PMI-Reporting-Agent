@@ -124,6 +124,42 @@ def test_a_chat_can_be_renamed_and_closed_and_reopened(client):
     assert chat_id in [c["chat_id"] for c in client.get("/api/chats").json()["chats"]]
 
 
+def test_chats_and_projects_can_be_pinned(client):
+    project = client.post("/api/projects", json={"name": "Aurora"}).json()["project"]
+    chat = client.post("/api/chats", json={"title": "Budget"}).json()["chat"]
+
+    pinned_project = client.patch(
+        f"/api/projects/{project['project_id']}", json={"pinned": True}
+    ).json()["project"]
+    pinned_chat = client.patch(
+        f"/api/chats/{chat['chat_id']}", json={"pinned": True}
+    ).json()["chat"]
+
+    assert pinned_project["pinned"] is True
+    assert pinned_chat["pinned"] is True
+    assert client.get("/api/projects").json()["projects"][0]["project_id"] == project["project_id"]
+    assert client.get("/api/chats").json()["chats"][0]["chat_id"] == chat["chat_id"]
+
+
+def test_app_search_finds_chat_text_and_project_knowledge(client):
+    project = client.post(
+        "/api/projects",
+        json={"name": "Aurora", "knowledge": "Separation deadline is October"},
+    ).json()["project"]
+    chat = client.post(
+        "/api/chats", json={"title": "Weekly update", "project_id": project["project_id"]}
+    ).json()["chat"]
+    chat_store.add_message(
+        chat["chat_id"], "user", {"text": "The synergy baseline needs review"}
+    )
+
+    text_results = client.get("/api/search", params={"q": "synergy baseline"}).json()["results"]
+    knowledge_results = client.get("/api/search", params={"q": "October"}).json()["results"]
+
+    assert any(result.get("chat_id") == chat["chat_id"] for result in text_results)
+    assert any(result.get("project_id") == project["project_id"] for result in knowledge_results)
+
+
 def test_an_existing_chat_can_be_added_to_a_project_with_its_context(client):
     project = client.post("/api/projects", json={"name": "Aurora"}).json()["project"]
     chat = client.post("/api/chats", json={"title": "Budget discussion"}).json()["chat"]
