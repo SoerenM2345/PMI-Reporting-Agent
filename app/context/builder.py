@@ -451,11 +451,24 @@ def requested_visuals(request: str) -> list[str]:
 
 _AUDIENCE_PATTERNS = (
     re.compile(r"\bfor (?:the )?(?P<who>steering committee|steerco|board|"
-               r"executive committee|exco|cfo|ceo|cio|coo|management team|"
+               r"executive committee|exco|cfo|ceo|cio|coo|cto|cmo|chro|cpo|"
+               r"cdo|clo|cso|ciso|management team|"
                r"leadership team|imo|pmo|integration management office|"
                r"workstream leads?|finance team|audit committee)\b", re.I),
     re.compile(r"\b(?P<who>steering committee|steerco|board|exco|cfo|ceo)\b"
                r"\s+(?:report|update|pack|presentation|deck)", re.I),
+    # Preserve arbitrary spelled-out job titles rather than maintaining an
+    # impossible exhaustive list (for example, "Chief People and Culture
+    # Officer" or "HR Business Partner"). The terminal role noun keeps a topic
+    # phrase such as "for supply chain" from being mistaken for a reader.
+    re.compile(
+        r"\bfor (?:the )?(?P<who>"
+        r"(?:[\w&/-]+\s+){0,8}"
+        r"(?:officer|director|manager|lead|leads|owner|partner|counsel|"
+        r"president|executive|analyst|specialist|coordinator|architect|"
+        r"engineer|team|committee|board|office))\b",
+        re.I,
+    ),
 )
 
 
@@ -478,6 +491,7 @@ _FORMAT_WORDS = (
     (re.compile(r"\b(word|docx|document|report document)\b", re.I), "docx"),
     (re.compile(r"\b(pdf)\b", re.I), "pdf"),
     (re.compile(r"\b(html|dashboard|web page|webpage|interactive)\b", re.I), "html"),
+    (re.compile(r"\b(chart|charts|graph|graphs|plot|image|png)\b", re.I), "chart"),
 )
 
 

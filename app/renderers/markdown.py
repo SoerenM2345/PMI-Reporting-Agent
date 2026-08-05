@@ -158,7 +158,7 @@ def _table(spec) -> str:
         "---:" if c.kind in ("number", "currency", "percent") else "---"
         for c in spec.columns)
     lines = [f"| {header} |", f"| {divider} |"]
-    for index, row in enumerate(spec.rows):
+    for index, row in enumerate(spec.displayed_rows):
         cells = []
         for cell in row[:len(spec.columns)]:
             text = _escape(cell.text)

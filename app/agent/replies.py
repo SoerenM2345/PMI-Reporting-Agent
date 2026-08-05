@@ -57,6 +57,15 @@ class ChooseAudienceAction(BaseModel):
     placeholder: str = ""
 
 
+class ChooseFormatAction(BaseModel):
+    """The required first decision for a new report request."""
+
+    type: Literal["choose_format"] = "choose_format"
+    options: list[str] = Field(default_factory=lambda: [
+        "powerpoint", "pdf", "word", "html", "chart",
+    ])
+
+
 class LowConfidenceItem(BaseModel):
     kind: str = ""
     label: str = ""
@@ -79,10 +88,14 @@ class OpenPreviewAction(BaseModel):
     version: int = 0
     #: What "generate it as…" can produce from this draft.
     formats: list[str] = Field(default_factory=list)
+    selected_format: Optional[str] = None
+    open_by_default: bool = False
+    approval_required: bool = False
 
 
 Action = Annotated[
-    Union[ResolveConflictAction, ChooseAudienceAction, ReviewFindingsAction,
+    Union[ResolveConflictAction, ChooseAudienceAction, ChooseFormatAction,
+          ReviewFindingsAction,
           OpenPreviewAction],
     Field(discriminator="type"),
 ]

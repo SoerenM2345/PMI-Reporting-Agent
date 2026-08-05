@@ -553,7 +553,7 @@ def test_shorthand_answers_to_several_findings_are_all_applied(
                                  "steerco_meeting_notes.docx")
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
     client.post(f"/api/chats/{chat_id}/messages",
-                json={"text": "give me a PMO status report"})
+                json={"text": "give me a PowerPoint PMO status report"})
 
     text = (
         "Risk 'Key engineer attrition in target company' assigned to Marco "
@@ -593,7 +593,7 @@ def test_mixed_decision_synergy_and_project_dates_are_all_applied(
                                  "synergy_tracker.xlsx")
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
     client.post(f"/api/chats/{chat_id}/messages",
-                json={"text": "give me a PMO status report"})
+                json={"text": "give me a PowerPoint PMO status report"})
 
     text = (
         "Decision 'rebranding budget overrun of 40k EUR approved.' has "
@@ -627,7 +627,7 @@ def test_shorthand_finding_answers_also_work_step_by_step(client, sample_files):
                                  "integration_tracker.xlsx")
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
     client.post(f"/api/chats/{chat_id}/messages",
-                json={"text": "give me a PMO status report"})
+                json={"text": "give me a PowerPoint PMO status report"})
 
     first = agent_reply(client.post(f"/api/chats/{chat_id}/messages", json={
         "text": "Risk 'Key engineer attrition in target company' assigned to "
@@ -661,7 +661,7 @@ def test_a_data_change_and_updated_pdf_are_completed_in_the_same_turn(
                                  "portal_dashboard_export.html")
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
     original_request = (
-        "Create a PMO Status Report for the Integration Management Office. "
+        "Create a PowerPoint PMO Status Report for the Integration Management Office. "
         "Include slides on Overall Progress, Workstream Status, Milestones, "
         "Dependencies, Risks & Issues, Decision Log, and Next Steps."
     )
@@ -673,7 +673,11 @@ def test_a_data_change_and_updated_pdf_are_completed_in_the_same_turn(
                 "give me back updated pdf",
     }))
 
-    pdf_artifact = next(item for item in artifacts(reply)
+    assert actions(reply, "open_preview"), \
+        "the changed data and PDF layout must be reviewed before generation"
+    generated = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "generate now"}))
+    pdf_artifact = next(item for item in artifacts(generated)
                         if item["filename"].endswith(".pdf"))
     written = prose(reply).lower()
     assert "warning" in written
@@ -815,7 +819,7 @@ def test_a_requested_structure_drives_the_order_in_every_format(client, sample_f
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
 
     client.post(f"/api/chats/{chat_id}/messages", json={
-        "text": "Create a status report for the steering committee with the "
+        "text": "Create a PowerPoint status report for the steering committee with the "
                 "following sections: 1. Risks 2. Budget 3. Milestones",
     })
 
@@ -862,7 +866,7 @@ def test_a_structure_survives_a_later_turn_that_does_not_repeat_it(
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
 
     client.post(f"/api/chats/{chat_id}/messages", json={
-        "text": "Create a status report for the steering committee with the "
+        "text": "Create a PowerPoint status report for the steering committee with the "
                 "following sections: 1. Risks 2. Budget 3. Milestones",
     })
     first = session_plan.load(session_id)
@@ -1134,6 +1138,13 @@ def test_an_obvious_audience_is_never_asked_about():
     assert _match_audience("create an IT integration presentation for the CIO") \
         is Audience.EXECUTIVE
     assert _match_audience("chief information officer") is Audience.EXECUTIVE
+    assert _match_audience("CHRO") is Audience.EXECUTIVE
+    assert _match_audience("Chief HR Officer") is Audience.EXECUTIVE
+    assert _match_audience("Chief People and Culture Officer") is Audience.EXECUTIVE
+    assert _match_audience("Chief Financial Officer") is Audience.FINANCE
+    assert _match_audience("Finance Director") is Audience.FINANCE
+    assert _match_audience("Senior Program Manager") is Audience.PMO
+    assert _match_audience("HR Business Partner") is Audience.WORKSTREAM
     assert _match_audience("the imo needs this") is Audience.PMO
     # "workstream" used to be filed under PMO, so every workstream request
     # produced an IMO document.
@@ -1151,6 +1162,78 @@ def test_cio_is_accepted_as_a_standalone_audience_answer():
     assert turn.intent == "set_audience"
     assert turn.audience is Audience.EXECUTIVE
     assert _audience_label("CIO") == "CIO"
+
+
+def test_chro_titles_are_accepted_as_standalone_audience_answers():
+    """Free-text audience answers may be acronyms or expanded job titles."""
+    from app.agent.conversation import _audience_label, _classify_by_keyword
+    from app.models.pmi import Audience
+
+    for label in ("CHRO", "Chief HR Officer", "Chief Human Resources Officer"):
+        turn = _classify_by_keyword(label)
+        assert turn.intent == "set_audience"
+        assert turn.audience is Audience.EXECUTIVE
+        assert _audience_label(label) == label
+
+    assert _audience_label("Senior Vice President of Human Resources") == \
+        "Senior Vice President of Human Resources"
+    assert _audience_label(
+        "Create a report for the Chief Human Resources Officer"
+    ) == "Chief Human Resources Officer"
+
+
+def test_chro_answer_continues_past_the_audience_question(client, sample_files):
+    """Regression for the repeated audience card shown after entering CHRO."""
+    from app.deliverable import session as session_plan
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+
+    format_reply = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "build me a report"},
+    ).json()["messages"][-1]
+    assert actions(format_reply, "choose_format")
+
+    audience_reply = client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "PowerPoint"}
+    ).json()["messages"][-1]
+    assert actions(audience_reply, "choose_audience")
+
+    reply = client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "CHRO"}
+    ).json()["messages"][-1]
+
+    assert not actions(reply, "choose_audience")
+    assert actions(reply, "open_preview")
+    deliverable = session_plan.load(session_id)
+    assert deliverable.audience_label == "CHRO"
+    assert "build me a report" in deliverable.request_text
+
+
+def test_a_new_role_is_accepted_instead_of_repeating_the_question(
+        client, sample_files):
+    """The free-text control is not a disguised four-value dropdown."""
+    from app.deliverable import session as session_plan
+    from app.storage import json_store
+    from app.models.pmi import Audience
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "build me a report"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "PowerPoint"})
+
+    reply = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "Quality Assurance Partner"},
+    ).json()["messages"][-1]
+
+    assert not actions(reply, "choose_audience")
+    assert actions(reply, "open_preview")
+    deliverable = session_plan.load(session_id)
+    assert json_store.load_analysis(session_id).audience is Audience.WORKSTREAM
+    assert deliverable.audience_label == "Quality Assurance Partner"
 
 
 def test_cio_in_the_first_prompt_does_not_trigger_an_audience_question(
@@ -1189,9 +1272,14 @@ def test_the_users_own_words_title_the_report(client, sample_files):
     chat_id = _chat_with_samples(client, sample_files)
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
 
-    # The agent asks who it is for, openly rather than as a closed list…
+    # Format is confirmed first, then the agent asks who it is for openly
+    # rather than as a closed list.
+    format_asked = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "build me a report"}).json()["messages"][-1]
+    assert actions(format_asked, "choose_format")
     asked = client.post(f"/api/chats/{chat_id}/messages",
-                        json={"text": "build me a report"}).json()["messages"][-1]
+                        json={"text": "PowerPoint"}).json()["messages"][-1]
     chosen = actions(asked, "choose_audience")
     assert chosen and chosen[0]["free_text"] is True
 
@@ -1212,6 +1300,12 @@ def test_an_edit_instruction_is_read_as_a_revision_not_a_new_report():
     assert _classify_by_keyword("put risks first").intent == "revise_content"
     assert _classify_by_keyword(
         "instead of Employee Risks I would like to have Employee Budget"
+    ).intent == "revise_content"
+    assert _classify_by_keyword(
+        "show all 26 of 26 rows in Data quality and limitations"
+    ).intent == "revise_content"
+    assert _classify_by_keyword(
+        "show all rows in Data quality and limitations"
     ).intent == "revise_content"
     assert _classify_by_keyword(
         "why does the HTML report show UNKNOWN here?"
@@ -1289,7 +1383,7 @@ def test_a_project_chat_keeps_its_draft_and_accepts_a_rename(client, sample_file
 
     drafted = agent_reply(client.post(
         f"/api/chats/{chat_id}/messages",
-        json={"text": "Create a SteerCo status report"},
+        json={"text": "Create a PowerPoint SteerCo status report"},
     ))
     assert actions(drafted, "open_preview")
     assert session_plan.load(session_id) is not None
@@ -1411,8 +1505,13 @@ def test_a_generate_reply_never_claims_work_it_did_not_do(client, loaded):
     client.post(f"/api/chats/{chat_id}/messages",
                 json={"text": "give me a SteerCo deck"})
 
+    changed_format = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "generate it as word"}).json()["messages"][-1]
+    assert actions(changed_format, "open_preview")
+    assert not artifacts(changed_format), "a changed format needs fresh approval"
     reply = client.post(f"/api/chats/{chat_id}/messages",
-                        json={"text": "generate it as word"}).json()["messages"][-1]
+                        json={"text": "generate now"}).json()["messages"][-1]
 
     outputs = [a["filename"] for a in artifacts(reply)]
     assert any(name.endswith(".docx") for name in outputs), outputs
@@ -1427,8 +1526,12 @@ def test_generating_over_open_conflicts_says_so_in_the_reply(client, loaded):
     client.post(f"/api/chats/{chat_id}/messages",
                 json={"text": "give me a SteerCo deck"})
 
+    changed_format = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "generate it as pdf"}).json()["messages"][-1]
+    assert actions(changed_format, "open_preview")
     reply = client.post(f"/api/chats/{chat_id}/messages",
-                        json={"text": "generate it as pdf"}).json()["messages"][-1]
+                        json={"text": "generate now"}).json()["messages"][-1]
 
     assert "unresolved critical conflict" in prose(reply)
 
@@ -1661,7 +1764,7 @@ def test_no_phrasing_of_a_first_request_dead_ends(client, loaded, message):
 
     offered = [a["type"] for a in actions(reply)]
     assert (actions(reply, "open_preview") or actions(reply, "choose_audience")
-            or artifacts(reply)), \
+            or actions(reply, "choose_format") or artifacts(reply)), \
         f"{message!r} dead-ended with {offered} / {prose(reply)[:120]!r}"
     assert "haven't read" not in prose(reply), \
         f"{message!r} still tells the user to do something they cannot do"
@@ -1760,7 +1863,8 @@ def test_a_chat_drafted_report_has_an_executive_summary(client, loaded):
     # and it survives the section ids becoming the planner's to choose.
     sections = draft["blocks"]
     assert sections, "the draft has no sections at all"
-    opening = sections[0]
+    opening = next(section for section in sections
+                   if not section.get("is_divider"))
     kinds = [b["kind"] for b in opening["blocks"]]
     assert kinds, f"the opening section “{opening['headline']}” is empty"
     assert not opening["empty_explanation"], opening["empty_explanation"]

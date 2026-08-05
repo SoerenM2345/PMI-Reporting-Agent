@@ -276,6 +276,9 @@ def test_the_chat_summary_is_deterministic_and_needs_no_model(model):
 @pytest.mark.parametrize("request_text,expected", [
     ("Prepare a pack for the Steering Committee", "Steering Committee"),
     ("A one-pager for the CFO please", "CFO"),
+    ("Prepare a report for the CHRO", "CHRO"),
+    ("Prepare a report for the Chief Human Resources Officer", "Chief Human Resources Officer"),
+    ("Prepare a report for the HR Business Partner", "HR Business Partner"),
     ("Give the IMO a status update", None),
     ("board update on synergies", "board"),
 ])

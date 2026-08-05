@@ -41,6 +41,25 @@ ConstraintKind = Literal[
 GapSeverity = Literal["block", "warn", "note"]
 
 
+class SourceUseConstraint(BaseModel):
+    """A user's instruction to reuse material from an uploaded source file.
+
+    This is deliberately part of the generation context rather than a renderer
+    option.  A table or a verbatim passage changes what the report contains,
+    while a referenced presentation changes the template fingerprint.  Keeping
+    both here makes them visible to planning, preview, approval and staleness.
+    """
+
+    kind: Literal["layout", "table", "exact_text"]
+    source_file: str
+    selector: str = ""
+    mode: Literal["exact", "adapted"] = "exact"
+    scope: str = "whole_report"
+    source_location: str = ""
+    checksum: str = ""
+    note: str = ""
+
+
 class CompanyNames(BaseModel):
     acquirer: Optional[str] = None
     target: Optional[str] = None
@@ -224,6 +243,7 @@ class GenerationContext(BaseModel):
     #: without presentation divider slides.
     presentation_layout: bool = False
     user_constraints: list[UserConstraint] = Field(default_factory=list)
+    source_use_constraints: list[SourceUseConstraint] = Field(default_factory=list)
 
     # --- the ground
     evidence: EvidenceIndex = Field(default_factory=EvidenceIndex)

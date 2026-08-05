@@ -21,6 +21,7 @@ ALIASES: dict[str, str] = {
     "docx": "docx", "word": "docx", "doc": "docx", "document": "docx",
     "pdf": "pdf",
     "html": "html", "dashboard": "html", "web": "html", "htm": "html",
+    "chart": "chart", "charts": "chart", "graph": "chart", "png": "chart",
 }
 
 
@@ -36,6 +37,8 @@ def renderer(fmt: str) -> Callable[..., RenderResult]:
     """The render function for `fmt`. Imported lazily so a missing optional
     dependency only breaks the format that needs it."""
     name = normalize(fmt)
+    if name == "chart":
+        raise ValueError("standalone charts use the chart renderer, not the document registry")
     if name == "pptx":
         from app.renderers.pptx import render
     elif name == "docx":

@@ -305,10 +305,29 @@ class TableSpec(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
     @property
+    def displayed_row_count(self) -> int:
+        """Rows the approved table view exposes.
+
+        ``rows`` deliberately retains the complete evidence-backed table so a
+        later revision can increase the limit without re-planning or inventing
+        data.  Consumers use this count (or ``displayed_rows``) at the display
+        boundary.
+        """
+        if self.row_limit is None:
+            return len(self.rows)
+        return min(max(self.row_limit, 0), len(self.rows))
+
+    @property
+    def displayed_rows(self) -> list[list[Cell]]:
+        return self.rows[:self.displayed_row_count]
+
+    @property
     def is_truncated(self) -> bool:
-        return bool(self.total_rows and self.total_rows > len(self.rows))
+        total = max(self.total_rows, len(self.rows))
+        return total > self.displayed_row_count
 
     def truncation_note(self) -> str:
         if not self.is_truncated:
             return ""
-        return f"Showing {len(self.rows)} of {self.total_rows} rows."
+        total = max(self.total_rows, len(self.rows))
+        return f"Showing {self.displayed_row_count} of {total} rows."

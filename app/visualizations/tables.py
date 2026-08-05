@@ -184,11 +184,9 @@ def build_table(spec_id: str, items: Sequence[EvidenceItem], *,
     usable = [i for i in items if not i.is_absence]
     columns, usable = _columns_for(usable)
     total = len(usable)
-    shown = usable[:row_limit] if row_limit else usable
-
     rows: list[list[Cell]] = []
     emphasis_rows: list[int] = []
-    for index, item in enumerate(shown):
+    for index, item in enumerate(usable):
         row = [_cell(item, column) for column in columns]
         rows.append(row)
         if item.is_contested or item.severity in ("critical", "high"):
@@ -200,16 +198,16 @@ def build_table(spec_id: str, items: Sequence[EvidenceItem], *,
         columns=[Column(header=c.header, kind=c.kind, rag=c.rag,
                         negative_is_bad=c.negative_is_bad) for c in columns],
         rows=rows,
-        row_evidence_ids=[i.evidence_id for i in shown],
+        row_evidence_ids=[i.evidence_id for i in usable],
         total_rows=total,
         row_limit=row_limit,
         emphasis_rows=emphasis_rows,
         caption=caption or title,
-        evidence_ids=[i.evidence_id for i in shown],
+        evidence_ids=[i.evidence_id for i in usable],
     )
     from app.evidence import provenance
 
-    table.source_note = provenance.source_note(shown)
+    table.source_note = provenance.source_note(usable)
     if table.is_truncated:
         table.warnings.append(table.truncation_note())
     return table

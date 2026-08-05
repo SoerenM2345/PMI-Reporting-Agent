@@ -35,11 +35,13 @@ class ContextFingerprint(BaseModel):
     content_revision: int = 0
     request_digest: str = ""
     template_digest: str = ""
+    reference_digest: str = ""
     brief_digest: str = ""
 
     def whole_document_key(self) -> tuple:
         """The parts whose change invalidates the storyline, not just figures."""
-        return (self.engine_version, self.request_digest, self.template_digest)
+        return (self.engine_version, self.request_digest, self.template_digest,
+                self.reference_digest)
 
     def brief_differs_from(self, other: "ContextFingerprint") -> bool:
         """Whether the two briefs disagree — *when both are known*.
@@ -70,6 +72,11 @@ def compute(context, *, brief=None, knowledge_version: int = 0,
         request_digest=_digest(_normalize_request(context)),
         template_digest=str(getattr(context.template_reference,
                                     "template_digest", "")),
+        reference_digest=_digest("|".join(
+            f"{item.kind}:{item.source_file}:{item.selector}:{item.mode}:"
+            f"{item.checksum}"
+            for item in context.source_use_constraints
+        )),
         brief_digest=_digest(_brief_key(brief)) if brief is not None else "",
     )
 
@@ -139,6 +146,8 @@ def stale_reason(deliverable, current: ContextFingerprint) -> str:
         return "The request has changed since this draft was planned."
     if stored.template_digest != current.template_digest:
         return "The presentation template has changed."
+    if stored.reference_digest != current.reference_digest:
+        return "A source file explicitly reused by this report has changed."
     if stored.brief_differs_from(current):
         return "The document's scope or audience has changed."
     if stored.evidence_digest != current.evidence_digest:

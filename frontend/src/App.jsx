@@ -236,14 +236,6 @@ export default function App() {
       return body.project;
     });
 
-  const addProjectRule = (id, rule) =>
-    run(async () => {
-      const body = await api.addProjectRule(id, rule);
-      await refreshProjects();
-      setActiveProject(body.project);
-      return body.project;
-    });
-
   const moveChatToProject = (existingChatId, projectId) =>
     run(async () => {
       const moved = await api.patchChat(existingChatId, { project_id: projectId });
@@ -418,6 +410,49 @@ export default function App() {
         return null;
       }
 
+      if (action.type === "approve_generate") {
+        const approval = await api.approveContent(
+          sessionId,
+          action.version,
+          action.format,
+        );
+        const body = await api.generateAs(
+          sessionId,
+          action.format,
+          true,
+          approval.approval_id,
+          action.version,
+        );
+        const unresolved = body.generated_with_unresolved_conflicts ?? [];
+        setMessages((prior) => [
+          ...prior,
+          {
+            message_id: `local-dl-${Date.now()}`,
+            role: "agent",
+            kind: "text",
+            content: {
+              format: "markdown",
+              content:
+                `Here is the approved ${action.format}.` +
+                (unresolved.length
+                  ? ` It carries ${unresolved.length} unresolved critical conflict(s), and says so.`
+                  : ""),
+              artifacts: (body.outputs ?? []).map((name) => ({
+                filename: name,
+                session_id: sessionId,
+                type: extensionOf(name),
+                title: name,
+                status: "ready",
+                download_url: api.downloadUrl(sessionId, name),
+              })),
+              actions: [],
+              status: "completed",
+            },
+          },
+        ]);
+        return body;
+      }
+
       return null;
     });
 
@@ -522,9 +557,6 @@ export default function App() {
             onNewChat={() => newChat(activeProject.project_id)}
             onAddExistingChat={(existingChatId) =>
               addExistingChat(activeProject.project_id, existingChatId)
-            }
-            onAddRule={(rule) =>
-              addProjectRule(activeProject.project_id, rule)
             }
             onOpenChat={openChat}
             onChangeIcon={(icon) =>

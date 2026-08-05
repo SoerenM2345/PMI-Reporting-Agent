@@ -27,6 +27,7 @@ from app.context.schemas import (
     ContextGap,
     GenerationContext,
     KnowledgeDigest,
+    SourceUseConstraint,
     TransactionContext,
     UserConstraint,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "ContextGap",
     "GenerationContext",
     "KnowledgeDigest",
+    "SourceUseConstraint",
     "TransactionContext",
     "UserConstraint",
     "build_for_project",

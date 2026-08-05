@@ -23,10 +23,9 @@ _REQUEST_HINTS: dict[str, list[str]] = {
 
 #: The one audience map, shared with `conversation._match_audience` (§4/§9).
 #:
-#: Order is significant — the first audience whose keywords match wins — and
-#: `WORKSTREAM` comes before `PMO` deliberately: "workstream lead" is a
-#: workstream report, not an IMO one, and it used to be listed under PMO so
-#: every workstream request produced the wrong document.
+#: When more than one hint appears, the most specific (longest) phrase wins.
+#: That keeps "Finance Director" in Finance rather than allowing the generic
+#: word "director" to turn it into an Executive report.
 #:
 #: Kept wide on purpose. §4 says to ask when the audience *cannot be inferred*;
 #: asking about "a deck for the Integration Director" is not carefulness, it is
@@ -35,20 +34,89 @@ _AUDIENCE_HINTS: dict[Audience, list[str]] = {
     Audience.EXECUTIVE: ["executive", "executives", "steerco", "steering",
                          "steering committee", "steering board", "c-level",
                          "board", "management", "senior management",
-                         "leadership", "ceo", "coo", "cio",
-                         "chief information officer", "sponsor",
+                         "leadership", "ceo", "coo", "cio", "cto", "cmo",
+                         "chro", "cpo", "cdo", "clo", "cso", "ciso",
+                         "chief executive officer", "chief operating officer",
+                         "chief information officer", "chief technology officer",
+                         "chief marketing officer", "chief human resources officer",
+                         "chief hr officer", "chief people officer",
+                         "chief data officer", "chief legal officer",
+                         "chief strategy officer", "chief information security officer",
+                         "president", "vice president", "vp", "svp", "evp",
+                         "managing director", "general counsel", "sponsor",
                          "integration director", "director", "geschäftsführung",
                          "vorstand", "lenkungsausschuss"],
     Audience.FINANCE: ["finance", "finances", "financial", "budget", "cost",
-                       "costs", "controlling", "cfo", "treasury", "finanz"],
+                       "costs", "controlling", "cfo", "chief financial officer",
+                       "finance director", "finance manager", "controller",
+                       "comptroller", "treasurer", "treasury", "fp&a",
+                       "accounting", "accountant", "finanz"],
     Audience.WORKSTREAM: ["workstream", "workstreams", "work stream",
                           "work streams", "workstream lead",
                           "workstream leads", "stream lead", "teilprojekt"],
     Audience.PMO: ["pmo", "imo", "project office", "integration office",
                    "integration management office", "programme office",
-                   "program office", "detailed", "team", "operational",
+                   "program office", "transformation office", "programme manager",
+                   "program manager", "project manager", "portfolio manager",
+                   "integration manager", "pmi lead", "detailed", "team", "operational",
                    "projektbüro"],
 }
+
+
+def match_audience(text: str) -> Audience | None:
+    """Resolve a named reader to one of the four internal report shapes.
+
+    The user's title remains free text; :class:`Audience` is only the closest
+    planning shape.  Exact phrases win over generic words (so ``Finance
+    Director`` is Finance rather than Executive merely because it contains
+    ``director``), then title patterns cover roles that cannot reasonably be
+    enumerated one by one.
+    """
+    lowered = (text or "").casefold()
+    matches: list[tuple[int, int, Audience]] = []
+    for order, (audience, keywords) in enumerate(_AUDIENCE_HINTS.items()):
+        for keyword in keywords:
+            if re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", lowered):
+                matches.append((len(keyword), -order, audience))
+    if matches:
+        return max(matches)[2]
+
+    # C-suite titles are executive readers even when the particular function
+    # is new to our vocabulary. Finance is kept separate because its document
+    # shape is materially different.
+    if re.search(r"\bchief\s+(?:finance|financial|accounting)\b.{0,40}\bofficer\b",
+                 lowered):
+        return Audience.FINANCE
+    if re.search(r"\bchief\b.{1,60}\bofficer\b", lowered):
+        return Audience.EXECUTIVE
+
+    if re.search(
+        r"\b(?:senior\s+)?(?:programme|program|project|portfolio|integration|"
+        r"transformation)\s+(?:director|manager|lead|officer|coordinator)\b",
+        lowered,
+    ):
+        return Audience.PMO
+
+    if re.search(
+        r"\b(?:head\s+of|vice\s+president\s+(?:of|for)|vp\s+(?:of|for)|"
+        r"managing\s+director|general\s+counsel)\b",
+        lowered,
+    ):
+        return Audience.EXECUTIVE
+
+    # A named functional role needs the detailed, domain-specific workstream
+    # shape. Requiring an actual role noun avoids treating a report *about*
+    # supply chain or HR as if its reader had been supplied.
+    if re.search(
+        r"\b(?:human\s+resources|hr|people|legal|it|technology|operations|"
+        r"procurement|supply\s+chain|sales|marketing|communications?|change|"
+        r"cyber(?:security)?|data|tax|product|engineering)\b.{0,50}\b"
+        r"(?:business\s+partner|manager|lead|owner|analyst|specialist|"
+        r"coordinator|counsel|architect|engineer|team)\b",
+        lowered,
+    ):
+        return Audience.WORKSTREAM
+    return None
 
 
 def heuristic_parse(request_text: str) -> RequestParse:
@@ -61,7 +129,7 @@ def heuristic_parse(request_text: str) -> RequestParse:
     output_type = next(
         (ot for ot, kws in _REQUEST_HINTS.items() if has_kw(kws)), "powerpoint"
     )
-    audience = next((a for a, kws in _AUDIENCE_HINTS.items() if has_kw(kws)), None)
+    audience = match_audience(text)
     # The topic steers which charts an image request produces (see
     # `charts.generate`), so "an image of the milestones and project plan" has
     # to land on "milestone", not the "status" catch-all — otherwise the picture

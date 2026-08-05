@@ -301,7 +301,7 @@ def _table(document, spec, brand: BrandSystem) -> None:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         styles.shade_cell(cell, brand.color("primary"))
 
-    for row_index, row in enumerate(spec.rows):
+    for row_index, row in enumerate(spec.displayed_rows):
         cells = table.add_row()
         styles.cannot_split(cells)
         emphasised = row_index in spec.emphasis_rows

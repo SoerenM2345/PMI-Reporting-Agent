@@ -155,6 +155,13 @@ def _interpret(deliverable: Deliverable, instruction: str, *,
                use_model: bool) -> DeliverableRevision:
     from app.llm import fast_model, prompts, tasks
 
+    # A direct table-size request must not disappear because a model returned
+    # an empty operation list. Keep the deterministic fast path narrow so a
+    # compound prose/structure revision can still be interpreted as a whole.
+    row_revision = _kw_row_limit((instruction or "").strip().lower(),
+                                 deliverable)
+    if row_revision is not None:
+        return row_revision
     if not use_model:
         return keyword_ops(instruction, deliverable)
 
@@ -179,7 +186,18 @@ def _prompt(deliverable: Deliverable, instruction: str) -> str:
 
     lines = ["Pages, in order:"]
     for page in deliverable.pages:
-        lines.append(f"- {page.page_id}: “{_label(page)}” ({page.purpose})")
+        table_details = []
+        for element in page.elements:
+            if not isinstance(element, TableElement):
+                continue
+            spec = deliverable.specs.tables.get(element.spec_id)
+            if spec is not None:
+                table_details.append(
+                    f"{spec.displayed_row_count} shown / "
+                    f"{max(spec.total_rows, len(spec.rows))} available")
+        suffix = f"; table: {', '.join(table_details)}" if table_details else ""
+        lines.append(
+            f"- {page.page_id}: “{_label(page)}” ({page.purpose}{suffix})")
     if deliverable.dropped_pages:
         lines += ["", "Removed but restorable:"]
         lines += [f"- {p.page_id}: “{_label(p)}”"
@@ -346,7 +364,16 @@ def _set_row_limit(draft: Deliverable, op: PageOp, _corpus) -> str:
     for element in tables:
         spec = draft.specs.tables.get(element.spec_id)
         if spec is not None:
+            old_note = spec.truncation_note()
             spec.row_limit = op.row_limit
+            # Validation records the original dynamic note on the spec. Keep
+            # it aligned with the revised view instead of preserving a stale
+            # “Showing 12 ...” warning after all rows have been requested.
+            spec.warnings = [warning for warning in spec.warnings
+                             if warning != old_note]
+            new_note = spec.truncation_note()
+            if new_note and new_note not in spec.warnings:
+                spec.warnings.append(new_note)
             changed += 1
     if not changed:
         raise _Refused(f"“{_label(page)}” has no table that can be resized")
@@ -479,16 +506,33 @@ def _kw_move_first(text: str, deliverable: Deliverable
 
 def _kw_row_limit(text: str, deliverable: Deliverable
                   ) -> Optional[DeliverableRevision]:
-    match = re.search(r"\bshow (?:me )?(?:only )?(\d+)\b", text)
-    if not match:
+    match = re.search(
+        r"\bshow\s+(?:me\s+)?(?:only\s+|all\s+)?(?P<count>\d+)"
+        r"(?:\s+of\s+\d+)?(?:\s+rows?)?\b",
+        text,
+    )
+    wants_all = bool(re.search(
+        r"\bshow\s+(?:me\s+)?all(?:\s+(?:the\s+)?)?rows?\b", text))
+    if not match and not wants_all:
         return None
     page = _match_page(text, deliverable.pages)
     if page is None:
         return None
+    if match:
+        row_limit = int(match.group("count"))
+    else:
+        totals = [max(spec.total_rows, len(spec.rows))
+                  for element in page.elements
+                  if isinstance(element, TableElement)
+                  for spec in [deliverable.specs.tables.get(element.spec_id)]
+                  if spec is not None]
+        if not totals:
+            return None
+        row_limit = max(totals)
     return DeliverableRevision(
         ops=[PageOp(op="set_row_limit", page_id=page.page_id,
-                    row_limit=int(match.group(1)))],
-        rationale=f"limit “{_label(page)}” to {match.group(1)} rows")
+                    row_limit=row_limit)],
+        rationale=f"show {row_limit} rows on “{_label(page)}”")
 
 
 def _match_page(text: str, pages) -> Optional[PageDesign]:

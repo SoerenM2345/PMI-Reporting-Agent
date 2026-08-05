@@ -289,8 +289,8 @@ def _table_view_for_slide(spec, box, *, row_cap: int = 8):
     """A readable slide view; the stored spec keeps every row for other formats."""
     _left, _top, _width, height = box
     by_height = max(3, int(Emu(height).inches / 0.5) - 1)
-    limit = min(row_cap, by_height)
-    if len(spec.rows) <= limit:
+    limit = min(row_cap, by_height, spec.displayed_row_count)
+    if len(spec.rows) <= limit and not spec.is_truncated:
         return spec
 
     shown = spec.model_copy(deep=True)

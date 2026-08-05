@@ -488,7 +488,7 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
                if column.kind in ("number", "currency", "percent")}
 
     rows = [header]
-    for row in spec.rows:
+    for row in spec.displayed_rows:
         rendered = []
         for index, cell in enumerate(row[:len(spec.columns)]):
             style = sheet["cell_num"] if index in numeric else sheet["cell"]
@@ -515,6 +515,8 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
             commands.append(("BACKGROUND", (0, index), (-1, index),
                              colors.HexColor(brand.color("surface_alt"))))
     for index in spec.emphasis_rows:
+        if index >= spec.displayed_row_count:
+            continue
         commands.append(("BACKGROUND", (0, index + 1), (-1, index + 1),
                          colors.HexColor(brand.color("surface_alt"))))
     table.setStyle(TableStyle(commands))

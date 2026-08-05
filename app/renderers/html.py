@@ -228,7 +228,7 @@ def _table(spec) -> str:
         f"{escape(column.header)}</th>" for column in spec.columns)
 
     rows = []
-    for index, row in enumerate(spec.rows):
+    for index, row in enumerate(spec.displayed_rows):
         emphasis = ' class="emphasis"' if index in spec.emphasis_rows else ""
         cells = "".join(
             f'<td class="{_align(spec.columns[position].kind)} '

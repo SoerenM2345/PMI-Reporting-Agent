@@ -17,6 +17,7 @@ from app.deliverable.model import (
     BulletsElement,
     Deliverable,
     PageDesign,
+    TableElement,
     TextElement,
 )
 from app.deliverable.revise import (
@@ -26,6 +27,8 @@ from app.deliverable.revise import (
     keyword_ops,
     revise,
 )
+from app.report.content import Cell, Column
+from app.visualizations.specs import TableSpec
 
 #: What the evidence supports. Everything else is an invented figure.
 CORPUS = {"4", "82"}
@@ -176,6 +179,73 @@ def test_the_common_instructions_are_understood_without_a_model(
         deliverable, instruction, expected):
     revision = keyword_ops(instruction, deliverable)
     assert [op.op for op in revision.ops] == [expected]
+
+
+def test_show_all_rows_keeps_and_reveals_the_complete_quality_table(
+        deliverable, monkeypatch):
+    """Regression: changing 12 to 26 cannot reveal rows discarded at plan time."""
+    page = deliverable.page("limits")
+    page.elements = [TableElement(element_id="limits.table",
+                                  spec_id="quality-table")]
+    deliverable.specs.tables["quality-table"] = TableSpec(
+        spec_id="quality-table",
+        columns=[Column(header="Finding")],
+        rows=[[Cell(text=f"finding {index}")] for index in range(26)],
+        row_evidence_ids=[f"ev:quality:{index}" for index in range(26)],
+        evidence_ids=[f"ev:quality:{index}" for index in range(26)],
+        total_rows=26,
+        row_limit=12,
+        warnings=["Showing 12 of 26 rows."],
+    )
+
+    # This exact instruction is deterministic; a model returning no operations
+    # must never make the agent ignore it.
+    monkeypatch.setattr(
+        "app.llm.tasks.run_task",
+        lambda *args, **kwargs: pytest.fail("direct row request called the model"),
+    )
+    result, warnings = revise(
+        deliverable,
+        "show all 26 of 26 rows in Data quality and limitations",
+        use_model=True,
+    )
+
+    assert warnings == []
+    assert result.changed
+    spec = result.deliverable.specs.tables["quality-table"]
+    assert len(spec.rows) == 26
+    assert len(spec.displayed_rows) == 26
+    assert spec.truncation_note() == ""
+    assert "Showing 12 of 26 rows." not in spec.warnings
+
+    from app.deliverable.preview import blocks
+
+    quality = next(block for section in blocks(result.deliverable)
+                   if section["section_id"] == "limits"
+                   for block in section["blocks"]
+                   if block["kind"] == "table")
+    assert len(quality["rows"]) == 26
+    assert quality["note"] == ""
+
+
+def test_show_all_rows_without_repeating_the_count_uses_the_table_total(
+        deliverable):
+    page = deliverable.page("limits")
+    page.elements = [TableElement(element_id="limits.table",
+                                  spec_id="quality-table")]
+    deliverable.specs.tables["quality-table"] = TableSpec(
+        spec_id="quality-table",
+        columns=[Column(header="Finding")],
+        rows=[[Cell(text=f"finding {index}")] for index in range(26)],
+        total_rows=26,
+        row_limit=12,
+    )
+
+    revision = keyword_ops(
+        "show all rows in Data quality and limitations", deliverable)
+
+    assert revision.ops == [PageOp(
+        op="set_row_limit", page_id="limits", row_limit=26)]
 
 
 def test_a_keyless_rename_preserves_the_users_casing(deliverable):
