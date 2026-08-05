@@ -524,8 +524,8 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
     out: list = [table]
     if spec.caption:
         out.append(Paragraph(_x(spec.caption), sheet["caption"]))
-    if spec.is_truncated:
-        out.append(Paragraph(_x(spec.truncation_note()), sheet["source"]))
+    if spec.has_note:
+        out.append(Paragraph(_x(spec.note()), sheet["source"]))
     return out
 
 

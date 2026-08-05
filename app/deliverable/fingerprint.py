@@ -38,10 +38,36 @@ class ContextFingerprint(BaseModel):
     reference_digest: str = ""
     brief_digest: str = ""
 
-    def whole_document_key(self) -> tuple:
-        """The parts whose change invalidates the storyline, not just figures."""
-        return (self.engine_version, self.request_digest, self.template_digest,
-                self.reference_digest)
+    def whole_document_differs_from(self, other: "ContextFingerprint") -> bool:
+        """Whether a part that invalidates the storyline — not just a figure — moved.
+
+        Compared field by field rather than as one tuple so that a sub-digest
+        nobody recorded can be treated as *unknown* rather than as changed. See
+        `reference_differs_from` for what that costs when it is not.
+        """
+        return (self.engine_version != other.engine_version
+                or self.request_digest != other.request_digest
+                or self.template_digest != other.template_digest
+                or self.reference_differs_from(other))
+
+    def reference_differs_from(self, other: "ContextFingerprint") -> bool:
+        """Whether the explicitly reused source files disagree — *when both are known*.
+
+        `compute` can never produce an empty reference digest: a document that
+        reuses no source file still hashes the empty string to a real value. So
+        an empty one means only that the draft was planned before references
+        were fingerprinted at all, and comparing it against a computed digest
+        marked every such draft permanently stale — telling the user "a source
+        file explicitly reused by this report has changed" about reports that
+        reuse no files, and disabling Generate with no way back. Same rule as
+        `brief_differs_from`: absence is not evidence of a difference.
+
+        `template_digest` is deliberately *not* treated this way. Empty is a
+        real answer there — it means no template reference was available — so a
+        draft planned without one and re-checked with one has genuinely changed.
+        """
+        return bool(self.reference_digest and other.reference_digest
+                    and self.reference_digest != other.reference_digest)
 
     def brief_differs_from(self, other: "ContextFingerprint") -> bool:
         """Whether the two briefs disagree — *when both are known*.
@@ -128,7 +154,7 @@ def is_stale(deliverable, current: ContextFingerprint) -> bool:
     stored = _stored(deliverable)
     if stored is None:
         return True
-    if stored.whole_document_key() != current.whole_document_key():
+    if stored.whole_document_differs_from(current):
         return True
     if stored.brief_differs_from(current):
         return True
@@ -146,7 +172,7 @@ def stale_reason(deliverable, current: ContextFingerprint) -> str:
         return "The request has changed since this draft was planned."
     if stored.template_digest != current.template_digest:
         return "The presentation template has changed."
-    if stored.reference_digest != current.reference_digest:
+    if stored.reference_differs_from(current):
         return "A source file explicitly reused by this report has changed."
     if stored.brief_differs_from(current):
         return "The document's scope or audience has changed."
@@ -164,7 +190,7 @@ def stale_pages(deliverable, current: ContextFingerprint) -> list[str]:
     document whose argument no longer holds.
     """
     stored = _stored(deliverable)
-    if stored is None or stored.whole_document_key() != current.whole_document_key():
+    if stored is None or stored.whole_document_differs_from(current):
         return []
     if stored.brief_differs_from(current):
         return []

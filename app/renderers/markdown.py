@@ -165,8 +165,8 @@ def _table(spec) -> str:
             cells.append(f"**{text}**" if index in spec.emphasis_rows else text)
         lines.append("| " + " | ".join(cells) + " |")
     out = "\n".join(lines)
-    if spec.is_truncated:
-        out += f"\n\n<sub>{spec.truncation_note()}</sub>"
+    if spec.has_note:
+        out += f"\n\n<sub>{spec.note()}</sub>"
     return out
 
 

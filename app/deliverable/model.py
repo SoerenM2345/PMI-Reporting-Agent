@@ -231,6 +231,13 @@ class Deliverable(BaseModel):
     #: saved. A genuinely new ask arrives through `plan()`, not through a check.
     request_text: str = ""
 
+    #: The audience value in the context when the request fingerprint was made.
+    #: This is deliberately separate from ``audience_label``: planning may turn
+    #: an inferred reader into polished display copy (for example, "CHRO" into
+    #: "Steering Committee"). Reusing that editorial label as request input
+    #: makes a draft appear stale the instant it is saved.
+    planning_audience: Optional[str] = None
+
     #: Uploaded files the user explicitly asked this output to reuse.  The
     #: extracted content lives in normal elements/specs; this list records the
     #: instruction, its source locator and checksum for preview and staleness.

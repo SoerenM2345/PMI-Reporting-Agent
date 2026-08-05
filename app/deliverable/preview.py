@@ -320,7 +320,7 @@ def _table(base: dict, element: TableElement, deliverable: Deliverable) -> dict:
     return {
         **base,
         "derived": False,
-        "note": spec.truncation_note(),
+        "note": spec.note(),
         "row_limit": spec.row_limit,
         "spec_id": spec.spec_id,
         "columns": [{"header": c.header, "kind": c.kind} for c in spec.columns],

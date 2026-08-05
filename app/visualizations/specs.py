@@ -285,6 +285,22 @@ class DiagramSpec(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ExcludedRow(BaseModel):
+    """A row taken out at the user's request, kept so the request can be undone.
+
+    Excluded rather than deleted, for the reason a dropped page moves to
+    `dropped_pages` instead of vanishing: the evidence still exists, and someone
+    who excludes the wrong row has to be able to say so.
+    """
+
+    label: str = ""
+    #: Where it sat in `rows`, so restoring puts it back rather than appending.
+    position: int = 0
+    cells: list[Cell] = Field(default_factory=list)
+    evidence_id: str = ""
+    emphasised: bool = False
+
+
 class TableSpec(BaseModel):
     """Reuses `Column`/`Cell` from the existing IR — including `Cell.ref`, which
     is what makes a table cell editable and writable back to the data model."""
@@ -299,6 +315,8 @@ class TableSpec(BaseModel):
     total_rows: int = 0
     row_limit: Optional[int] = None
     emphasis_rows: list[int] = Field(default_factory=list)
+    #: Rows the user asked to leave out. See `ExcludedRow`.
+    excluded_rows: list[ExcludedRow] = Field(default_factory=list)
     caption: str = ""
     source_note: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
@@ -331,3 +349,75 @@ class TableSpec(BaseModel):
             return ""
         total = max(self.total_rows, len(self.rows))
         return f"Showing {self.displayed_row_count} of {total} rows."
+
+    def exclusion_note(self) -> str:
+        """That the table is not the whole list — without reprinting what went.
+
+        A reader of a risk table is entitled to know it was filtered; naming the
+        excluded rows would republish exactly what the author asked to leave
+        out, so the count is stated and the rows are not.
+        """
+        if not self.excluded_rows:
+            return ""
+        return (f"{len(self.excluded_rows)} row(s) excluded at the "
+                f"author's request.")
+
+    def note(self) -> str:
+        """Everything the reader needs about what this table is *not*.
+
+        One method rather than a call per concern: the preview and all four
+        renderers must say the same thing, and nothing compares them except
+        `test_api_content.py::test_what_the_preview_says_is_what_the_deck_says`.
+        """
+        return " ".join(note for note in (self.truncation_note(),
+                                          self.exclusion_note()) if note)
+
+    @property
+    def has_note(self) -> bool:
+        return bool(self.note())
+
+    # ------------------------------------------------------------ row edits
+    def exclude_row(self, index: int) -> ExcludedRow:
+        """Take one row out, remembering enough to put it back.
+
+        Removed from `rows` rather than filtered at the display boundary. Two
+        things depend on that: `row_evidence_ids` and `emphasis_rows` are
+        index-parallel to `rows`, and every renderer — plus the cell editor in
+        `deliverable/preview.py` — reads `displayed_rows` as a *prefix* of
+        `rows`. Filtering instead would silently misalign both.
+        """
+        cells = self.rows.pop(index)
+        evidence_id = (self.row_evidence_ids.pop(index)
+                       if index < len(self.row_evidence_ids) else "")
+        emphasised = index in self.emphasis_rows
+        self.emphasis_rows = [row - 1 if row > index else row
+                              for row in self.emphasis_rows if row != index]
+        # `total_rows` counts what exists, so it drops too — otherwise the table
+        # reports a deliberate exclusion as if it had run out of room.
+        if self.total_rows > len(self.rows):
+            self.total_rows -= 1
+        excluded = ExcludedRow(
+            label=_row_label(cells), position=index, cells=cells,
+            evidence_id=evidence_id, emphasised=emphasised)
+        self.excluded_rows.append(excluded)
+        return excluded
+
+    def restore_row(self, excluded: ExcludedRow) -> None:
+        """Put an excluded row back where it was."""
+        if excluded in self.excluded_rows:
+            self.excluded_rows.remove(excluded)
+        index = min(max(excluded.position, 0), len(self.rows))
+        if self.total_rows >= len(self.rows):
+            self.total_rows += 1
+        self.rows.insert(index, excluded.cells)
+        if index <= len(self.row_evidence_ids):
+            self.row_evidence_ids.insert(index, excluded.evidence_id)
+        self.emphasis_rows = [row + 1 if row >= index else row
+                              for row in self.emphasis_rows]
+        if excluded.emphasised:
+            self.emphasis_rows.append(index)
+
+
+def _row_label(cells: list[Cell]) -> str:
+    """What to call a row: its first piece of text."""
+    return next((cell.text.strip() for cell in cells if cell.text.strip()), "")

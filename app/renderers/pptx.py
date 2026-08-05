@@ -266,11 +266,11 @@ def _render_visual(slide, element, box, page: PageDesign,
             return False
         shown = _table_view_for_slide(spec, box)
         table_box = box
-        if shown.is_truncated:
+        if shown.has_note:
             left, top, width, height = box
             table_box = (left, top, width, max(height - Inches(0.28), Inches(1)))
         pptx_base.draw_table(slide, brand, shown, table_box)
-        _caption(slide, brand, shown.truncation_note(), table_box)
+        _caption(slide, brand, shown.note(), table_box)
         return True
     if isinstance(element, KpiRowElement):
         pptx_base.draw_kpi_row(slide, brand, element.tiles, box)

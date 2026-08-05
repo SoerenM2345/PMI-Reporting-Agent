@@ -236,8 +236,8 @@ def _table(spec) -> str:
             for position, cell in enumerate(row) if position < len(spec.columns))
         rows.append(f"<tr{emphasis}>{cells}</tr>")
 
-    note = (f'<p class="note">{escape(spec.truncation_note())}</p>'
-            if spec.is_truncated else "")
+    note = (f'<p class="note">{escape(spec.note())}</p>'
+            if spec.has_note else "")
     caption = f"<caption>{escape(spec.caption)}</caption>" if spec.caption else ""
     return (f'<div class="table-wrap">'
             f'<input class="filter" type="search" placeholder="Filter rows" '

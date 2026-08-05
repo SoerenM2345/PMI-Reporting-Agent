@@ -88,6 +88,32 @@ def test_an_explicit_format_from_an_earlier_turn_is_remembered(client, sample_fi
     assert not _actions(report, "choose_format")
 
 
+def test_an_editorial_audience_label_does_not_stale_a_new_draft(
+        client, sample_files):
+    """The planner may turn an inferred reader into a polished display label.
+
+    That label belongs on the document; it is not a new user request.  Using it
+    to reconstruct the planning fingerprint made an HTML preview for "CHRO"
+    report itself stale immediately and disabled the Generate button.
+    """
+    chat_id, session_id = _chat(client, sample_files)
+
+    report = _reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "Create a CHRO report in HTML"},
+    ))
+    assert _actions(report, "open_preview")
+
+    preview = client.get(f"/api/content/{session_id}").json()
+    assert preview["audience"]
+    assert preview["stale"] is False
+
+    approved = client.post(f"/api/content/{session_id}/approve", json={
+        "version": preview["version"], "format": "html",
+    })
+    assert approved.status_code == 200
+
+
 def test_a_standalone_format_from_an_earlier_turn_is_remembered(
         client, sample_files):
     chat_id, _session_id = _chat(client, sample_files)

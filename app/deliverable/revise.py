@@ -19,6 +19,11 @@ differs:
 * **Text lives on elements, not blocks.** An op names a page and a role; the
   element is found within the page. Element ids are not stable across a re-plan
   and page ids are, so naming the page is what makes an instruction survive one.
+* **A row is excluded, not deleted.** "From open risks exclude X and Y" is a
+  selection, not a rewrite, and `exclude_rows` names rows the table already has
+  — so it stays within §11 exactly as `set_row_limit` does. The rows move to
+  `TableSpec.excluded_rows`, which is what makes `restore_rows` possible and
+  what lets the table say it was filtered.
 
 Applying is pure: ops in, a new `Deliverable` out. Nothing here writes to disk,
 and the input is never mutated — the caller decides whether the result becomes a
@@ -45,7 +50,7 @@ log = logging.getLogger("pmi.deliverable.revise")
 OpName = Literal[
     "reorder", "drop_page", "restore_page", "rewrite_title", "rewrite_subtitle",
     "rewrite_bullet", "add_bullet", "drop_bullet", "add_page",
-    "set_row_limit", "set_emphasis",
+    "set_row_limit", "set_emphasis", "exclude_rows", "restore_rows",
 ]
 
 #: A page whose removal the user is not offered. §12.5 requires the document to
@@ -65,6 +70,9 @@ class PageOp(BaseModel):
     text: Optional[str] = None
     #: Full page order, for `reorder`.
     order: Optional[list[str]] = None
+    #: Which table rows to exclude or restore, named in the user's own words.
+    #: Selects existing rows — it can no more author one than `text` can.
+    rows: Optional[list[str]] = None
     #: For `add_page`: a title, plus prose-only content.
     title: Optional[str] = None
     row_limit: Optional[int] = None
@@ -102,11 +110,19 @@ def apply(deliverable: Deliverable, revision: DeliverableRevision, *,
     §21.17: nothing is dropped silently. If every op is rejected the result
     carries no deliverable and all the reasons — the caller surfaces them rather
     than handing back the old version as though the request had succeeded.
+
+    A handler may answer with `(reply, note)` when the two audiences differ.
+    They differ for exactly one reason so far and it matters: `draft.notes` is
+    *rendered*, into the limitations section every format prints, while `reply`
+    only reaches the chat. So "excluded «Key engineer attrition»" is the right
+    confirmation to the person who asked and the wrong thing to publish — it
+    reprints, in the appendix, the row they asked to take out.
     """
     draft = deliverable.model_copy(deep=True)
     corpus = corpus if corpus is not None else set()
 
     applied: list[str] = []
+    notes: list[str] = []
     rejected: list[RejectedOp] = []
 
     for op in revision.ops:
@@ -116,9 +132,14 @@ def apply(deliverable: Deliverable, revision: DeliverableRevision, *,
                                        reason=f"unknown operation {op.op!r}"))
             continue
         try:
-            applied.append(handler(draft, op, corpus))
+            outcome = handler(draft, op, corpus)
         except _Refused as refusal:
             rejected.append(RejectedOp(op=op.op, reason=str(refusal)))
+            continue
+        reply, note = outcome if isinstance(outcome, tuple) else (outcome,
+                                                                 outcome)
+        applied.append(reply)
+        notes.append(note)
 
     for refusal in rejected:
         log.info("revision op refused: %s", refusal.reason)
@@ -128,9 +149,13 @@ def apply(deliverable: Deliverable, revision: DeliverableRevision, *,
 
     draft.parent_version = deliverable.version
     draft.version = deliverable.version + 1
+    # The instruction is quoted verbatim, so it goes in only when no handler
+    # asked for anything to be held back — the user's own sentence names the
+    # rows just as surely as the confirmation does.
+    redacted = notes != applied
     draft.notes.append(
-        f"Revision “{instruction.strip()}”: " + "; ".join(applied)
-        if instruction.strip() else "Revision: " + "; ".join(applied))
+        f"Revision “{instruction.strip()}”: " + "; ".join(notes)
+        if instruction.strip() and not redacted else "Revision: " + "; ".join(notes))
     draft.renumber()
     return RevisionResult(deliverable=draft, applied=applied, rejected=rejected)
 
@@ -176,17 +201,28 @@ def _interpret(deliverable: Deliverable, instruction: str, *,
     )
 
 
+#: Row labels shown per table. Enough to name the row someone means without
+#: turning the table of contents back into the table.
+_PROMPT_ROW_LABELS = 40
+
+
 def _prompt(deliverable: Deliverable, instruction: str) -> str:
     """Show the model the table of contents — never the figures.
 
     It does not need the numbers to decide what to reorder or remove, and not
     sending them removes the temptation to quote one back.
+
+    Row *labels* are the exception, and are not figures: "exclude the works
+    council row" cannot be carried out by anything that has not been told the
+    table has such a row. Only the label is listed, never the rest of the row.
     """
     from app.llm import prompts
 
     lines = ["Pages, in order:"]
     for page in deliverable.pages:
         table_details = []
+        row_labels: list[str] = []
+        excluded_labels: list[str] = []
         for element in page.elements:
             if not isinstance(element, TableElement):
                 continue
@@ -195,9 +231,19 @@ def _prompt(deliverable: Deliverable, instruction: str) -> str:
                 table_details.append(
                     f"{spec.displayed_row_count} shown / "
                     f"{max(spec.total_rows, len(spec.rows))} available")
+                row_labels += [label for row in spec.rows
+                               if (label := _row_label(row))]
+                excluded_labels += [row.label for row in spec.excluded_rows
+                                    if row.label]
         suffix = f"; table: {', '.join(table_details)}" if table_details else ""
         lines.append(
             f"- {page.page_id}: “{_label(page)}” ({page.purpose}{suffix})")
+        for label in row_labels[:_PROMPT_ROW_LABELS]:
+            lines.append(f"    row: {label}")
+        if len(row_labels) > _PROMPT_ROW_LABELS:
+            lines.append(f"    … and {len(row_labels) - _PROMPT_ROW_LABELS} more")
+        for label in excluded_labels[:_PROMPT_ROW_LABELS]:
+            lines.append(f"    excluded row (restorable): {label}")
     if deliverable.dropped_pages:
         lines += ["", "Removed but restorable:"]
         lines += [f"- {p.page_id}: “{_label(p)}”"
@@ -322,7 +368,10 @@ def _drop_bullet(draft: Deliverable, op: PageOp, _corpus) -> str:
     if op.index is None or not 0 <= op.index < len(element.items):
         raise _Refused(f"no bullet {op.index} on “{_label(page)}”")
     removed = element.items.pop(op.index)
-    return f"removed “{removed[:40]}” from “{_label(page)}”"
+    # Same split as `_exclude_rows`: confirm the wording to the person who
+    # asked, but do not reprint it in the rendered limitations section.
+    return (f"removed “{removed[:40]}” from “{_label(page)}”",
+            f"removed a point from “{_label(page)}”")
 
 
 def _add_page(draft: Deliverable, op: PageOp, corpus) -> str:
@@ -364,20 +413,105 @@ def _set_row_limit(draft: Deliverable, op: PageOp, _corpus) -> str:
     for element in tables:
         spec = draft.specs.tables.get(element.spec_id)
         if spec is not None:
-            old_note = spec.truncation_note()
             spec.row_limit = op.row_limit
             # Validation records the original dynamic note on the spec. Keep
             # it aligned with the revised view instead of preserving a stale
             # “Showing 12 ...” warning after all rows have been requested.
-            spec.warnings = [warning for warning in spec.warnings
-                             if warning != old_note]
-            new_note = spec.truncation_note()
-            if new_note and new_note not in spec.warnings:
-                spec.warnings.append(new_note)
+            _restate_notes(spec)
             changed += 1
     if not changed:
         raise _Refused(f"“{_label(page)}” has no table that can be resized")
     return f"showing {op.row_limit} row(s) on “{_label(page)}”"
+
+
+def _exclude_rows(draft: Deliverable, op: PageOp, _corpus) -> str:
+    """Leave named rows out of a page's table.
+
+    The rows are matched against what the table already holds and then moved
+    aside, so nothing here can put a value into the report that the evidence
+    did not already support.
+    """
+    page = _find(draft, op)
+    if not op.rows:
+        raise _Refused("exclude_rows needs the row(s) to leave out")
+    specs = _table_specs(draft, page)
+    if not specs:
+        raise _Refused(f"“{_label(page)}” has no table")
+
+    removed: list[str] = []
+    unmatched: list[str] = []
+    for wanted in op.rows:
+        for spec in specs:
+            index = _match_row(wanted, spec)
+            if index is not None:
+                removed.append(spec.exclude_row(index).label or wanted)
+                break
+        else:
+            unmatched.append(wanted)
+
+    if not removed:
+        raise _Refused(
+            f"no row on “{_label(page)}” matches "
+            + ", ".join(f"“{row}”" for row in op.rows[:3]))
+    for spec in specs:
+        _restate_notes(spec)
+    # §21.17: a row that could not be found is said out loud, in the same
+    # sentence as the ones that were — not left for the user to notice.
+    reply = (f"excluded {len(removed)} row(s) from “{_label(page)}”: "
+             + "; ".join(f"“{row}”" for row in removed)
+             + (" — but found no row matching "
+                + ", ".join(f"“{row}”" for row in unmatched)
+                if unmatched else ""))
+    return reply, f"excluded {len(removed)} row(s) from “{_label(page)}”"
+
+
+def _restore_rows(draft: Deliverable, op: PageOp, _corpus) -> str:
+    """Put excluded rows back. With no rows named, all of them."""
+    page = _find(draft, op)
+    specs = _table_specs(draft, page)
+    if not specs:
+        raise _Refused(f"“{_label(page)}” has no table")
+
+    restored: list[str] = []
+    for spec in specs:
+        for excluded in list(spec.excluded_rows):
+            if op.rows and not any(_mentions(_squash(wanted),
+                                             _squash(excluded.label))
+                                   or _mentions(_squash(excluded.label),
+                                                _squash(wanted))
+                                   for wanted in op.rows):
+                continue
+            spec.restore_row(excluded)
+            restored.append(excluded.label)
+    if not restored:
+        raise _Refused(f"no excluded row on “{_label(page)}” to put back")
+    for spec in specs:
+        _restate_notes(spec)
+    return (f"restored {len(restored)} row(s) on “{_label(page)}”: "
+            + "; ".join(f"“{row}”" for row in restored))
+
+
+def _table_specs(draft: Deliverable, page: PageDesign) -> list:
+    specs = [draft.specs.tables.get(element.spec_id) for element in page.elements
+             if isinstance(element, TableElement)]
+    return [spec for spec in specs if spec is not None]
+
+
+def _restate_notes(spec) -> None:
+    """Keep the table's own notes true after its rows have moved.
+
+    Both notes are derived, so a stale “Showing 12 of 137 rows.” left behind by
+    an earlier edit would contradict the table printed underneath it.
+    """
+    derived = (spec.truncation_note(), spec.exclusion_note())
+    spec.warnings = [warning for warning in spec.warnings
+                     if not _is_derived_note(warning)]
+    spec.warnings += [note for note in derived if note]
+
+
+def _is_derived_note(warning: str) -> bool:
+    return bool(re.match(r"^(Showing \d+ of \d+ rows\.|\d+ row\(s\) excluded)",
+                         warning or ""))
 
 
 def _set_emphasis(draft: Deliverable, op: PageOp, _corpus) -> str:
@@ -426,7 +560,8 @@ def keyword_ops(instruction: str, deliverable: Deliverable
         return renamed
 
     lowered = text.lower()
-    for rule in (_kw_drop, _kw_restore, _kw_move_first, _kw_row_limit):
+    for rule in (_kw_exclude_rows, _kw_drop, _kw_restore, _kw_move_first,
+                 _kw_row_limit):
         revision = rule(lowered, deliverable)
         if revision is not None:
             return revision
@@ -474,6 +609,83 @@ def _kw_drop(text: str, deliverable: Deliverable
     return DeliverableRevision(
         ops=[PageOp(op="drop_page", page_id=page.page_id)],
         rationale=f"remove “{_label(page)}”")
+
+
+_EXCLUDE_VERB = (r"exclude|omit|leave out|drop|remove|delete|take out|hide|"
+                 r"without")
+
+#: "from open risks exclude X and Y". The scope is what to look inside; it is
+#: also the only reliable signal that a page was named as a *place* rather than
+#: as the thing to delete.
+_SUBSET = re.compile(rf"\bfrom\s+(?P<scope>.+?)\s+(?:{_EXCLUDE_VERB})\b", re.I)
+
+
+def _kw_exclude_rows(text: str, deliverable: Deliverable
+                     ) -> Optional[DeliverableRevision]:
+    """``from open risks exclude X and Y`` — the items, not the page.
+
+    Runs before `_kw_drop`, which shares every one of its verbs. Without that
+    ordering this instruction matched the *page* “Open risks” and removed all
+    of it: someone asking to leave two entries out lost the whole register, and
+    the reply said “removed «Open risks»” as though that was the request.
+
+    The items are not split on "and". The first one here contains one
+    ("Communicate to employees and customers"), and any split that gets that
+    right gets another sentence wrong. Instead every entry the page already
+    holds is asked whether the instruction names it — which needs no splitting,
+    and cannot invent an entry that is not there.
+    """
+    if not re.search(rf"\b(?:{_EXCLUDE_VERB})\b", text):
+        return None
+    subset = _SUBSET.search(text)
+    # Match the page on the scope alone when there is one: the items carry
+    # words of their own ("customers") that otherwise pull the match onto
+    # whichever page happens to share them.
+    page = _match_page(subset.group("scope") if subset else text,
+                       deliverable.pages)
+    if page is None:
+        return None
+
+    ops, described = _exclusion_ops(deliverable, page, text)
+    if ops:
+        return DeliverableRevision(
+            ops=ops, rationale=f"exclude {described} from “{_label(page)}”")
+    if subset is None:
+        return None
+    # "from X exclude Y" is unambiguously about part of X. Declining is the
+    # only safe answer left — falling through would delete X entirely.
+    return DeliverableRevision(ops=[], rationale=(
+        f"“{_label(page)}” has nothing matching that. Name a row or a point as "
+        f"it appears on the page, or say “remove the {_label(page)} page” to "
+        f"take the whole page out."))
+
+
+def _exclusion_ops(deliverable: Deliverable, page: PageDesign,
+                   text: str) -> tuple[list[PageOp], str]:
+    """Ops that remove whichever of the page's own entries the text names.
+
+    Tables and bullet lists both, because which one a page uses is a layout
+    decision the user never made and should not have to know about.
+    """
+    instruction = _squash(text)
+    rows = [label for spec in _table_specs(deliverable, page)
+            for label in (_row_label(row) for row in spec.rows)
+            if label and _mentions(_squash(label), instruction)]
+    if rows:
+        return ([PageOp(op="exclude_rows", page_id=page.page_id, rows=rows)],
+                f"{len(rows)} row(s)")
+
+    element = next((e for e in page.elements if isinstance(e, BulletsElement)),
+                   None)
+    if element is None:
+        return [], ""
+    indexes = [index for index, item in enumerate(element.items)
+               if item and _mentions(_squash(item), instruction)]
+    # Descending: `drop_bullet` pops by index, so removing 1 before 3 would
+    # leave the second op pointing at whatever slid down into its place.
+    return ([PageOp(op="drop_bullet", page_id=page.page_id, index=index)
+             for index in sorted(indexes, reverse=True)],
+            f"{len(indexes)} point(s)")
 
 
 def _kw_restore(text: str, deliverable: Deliverable
@@ -557,6 +769,58 @@ def _words(text: str) -> set[str]:
             if w not in _STOPWORDS and len(w) > 2}
 
 
+def _squash(text: str) -> str:
+    """Letters and digits only — what somebody typed, minus how they typed it."""
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+#: A prefix shorter than this is not enough to name a row on its own.
+_MIN_ROW_PREFIX = 12
+
+
+def _mentions(needle: str, haystack: str) -> bool:
+    """Whether `haystack` names `needle`, allowing for how requests arrive.
+
+    Both sides are already squashed, because what reaches here is typed rather
+    than chosen from a list: "Communicate toemployees andcustomers" has to find
+    "Communicate to employees and customers", so spacing cannot be trusted.
+
+    A trailing prefix match handles the other half of that — "Release the
+    combined organisation structur" is the same row as "…structure", and a
+    request cut off mid-word is common enough that failing it would send the
+    user back to retype the whole instruction. Requiring three quarters of the
+    phrase, and never fewer than `_MIN_ROW_PREFIX` characters, is what keeps
+    that from matching a different row that merely starts the same way.
+    """
+    if not needle or not haystack:
+        return False
+    if needle in haystack:
+        return True
+    limit = max(_MIN_ROW_PREFIX, (len(needle) * 3) // 4)
+    return len(needle) > limit and needle[:limit] in haystack
+
+
+def _row_label(cells) -> str:
+    from app.visualizations.specs import _row_label as label
+
+    return label(cells)
+
+
+def _match_row(wanted: str, spec) -> Optional[int]:
+    """The row the instruction meant, or `None`.
+
+    Matched against the whole row, not only its label, so "exclude the GDPR
+    one" finds a row whose subject sits in the second column.
+    """
+    needle = _squash(wanted)
+    if len(needle) < 3:
+        return None
+    for index, row in enumerate(spec.rows):
+        if _mentions(needle, _squash(" ".join(cell.text for cell in row))):
+            return index
+    return None
+
+
 _HANDLERS = {
     "reorder": _reorder,
     "drop_page": _drop_page,
@@ -569,4 +833,6 @@ _HANDLERS = {
     "add_page": _add_page,
     "set_row_limit": _set_row_limit,
     "set_emphasis": _set_emphasis,
+    "exclude_rows": _exclude_rows,
+    "restore_rows": _restore_rows,
 }

@@ -325,8 +325,8 @@ def _table(document, spec, brand: BrandSystem) -> None:
 
     if spec.caption:
         _para(document, spec.caption, styles.CAPTION)
-    if spec.is_truncated:
-        _para(document, spec.truncation_note(), styles.SOURCE_NOTE)
+    if spec.has_note:
+        _para(document, spec.note(), styles.SOURCE_NOTE)
 
 
 def _emphasis_colour(emphasis: str, brand: BrandSystem) -> Optional[str]:
