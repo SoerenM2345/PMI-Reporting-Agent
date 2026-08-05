@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name           TEXT NOT NULL,
     icon           TEXT NOT NULL DEFAULT '📁',
     knowledge      TEXT NOT NULL DEFAULT '',
+    pinned         INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS chats (
     archived_at    TEXT,
     provider       TEXT,
     model          TEXT,
+    pinned         INTEGER NOT NULL DEFAULT 0,
     token_estimate INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -89,9 +91,22 @@ def _migrate(connection: sqlite3.Connection) -> None:
     The `project_id` index is created here rather than in `_SCHEMA` because the
     column it references may not exist until the `ALTER` above has run.
     """
-    columns = {row["name"] for row in connection.execute("PRAGMA table_info(chats)")}
-    if "project_id" not in columns:
+    chat_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(chats)")
+    }
+    if "project_id" not in chat_columns:
         connection.execute("ALTER TABLE chats ADD COLUMN project_id TEXT")
+    if "pinned" not in chat_columns:
+        connection.execute(
+            "ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+        )
+    project_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(projects)")
+    }
+    if "pinned" not in project_columns:
+        connection.execute(
+            "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id)"
     )
@@ -106,6 +121,7 @@ class Project(BaseModel):
     #: instructions. Persisted here so it survives across the project's chats;
     #: wiring it into a turn's context is a separate, later concern.
     knowledge: str = ""
+    pinned: bool = False
     created_at: str
     updated_at: str
     chat_count: int = 0
@@ -122,6 +138,7 @@ class Chat(BaseModel):
     archived_at: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    pinned: bool = False
     token_estimate: int = 0
     message_count: int = 0
 
@@ -222,7 +239,7 @@ def list_chats(*, include_archived: bool = False, limit: int = 100) -> list[Chat
             LEFT JOIN messages m ON m.chat_id = c.chat_id
             {clause}
             GROUP BY c.chat_id
-            ORDER BY c.updated_at DESC, c.rowid DESC
+            ORDER BY c.pinned DESC, c.updated_at DESC, c.rowid DESC
             LIMIT ?
             """,
             (limit,),
@@ -306,6 +323,16 @@ def archive_chat(chat_id: str, archived: bool = True) -> Optional[Chat]:
     return get_chat(chat_id)
 
 
+def pin_chat(chat_id: str, pinned: bool) -> Optional[Chat]:
+    """Pin or unpin without changing conversational recency."""
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE chats SET pinned = ? WHERE chat_id = ?",
+            (int(pinned), chat_id),
+        )
+    return get_chat(chat_id)
+
+
 def delete_chat(chat_id: str) -> bool:
     """Drops the conversation only.
 
@@ -350,7 +377,7 @@ def list_projects() -> list[Project]:
             LEFT JOIN chats c
                 ON c.project_id = p.project_id AND c.archived_at IS NULL
             GROUP BY p.project_id
-            ORDER BY p.name COLLATE NOCASE, p.rowid
+            ORDER BY p.pinned DESC, p.name COLLATE NOCASE, p.rowid
             """,
         ).fetchall()
     return [_project(row) for row in rows]
@@ -374,7 +401,8 @@ def get_project(project_id: str) -> Optional[Project]:
 
 def update_project(project_id: str, *, name: Optional[str] = None,
                    icon: Optional[str] = None,
-                   knowledge: Optional[str] = None) -> Optional[Project]:
+                   knowledge: Optional[str] = None,
+                   pinned: Optional[bool] = None) -> Optional[Project]:
     """Rename, re-icon, or re-knowledge a project — any subset in one call.
 
     Only the fields the caller actually passes are written; `None` means "leave
@@ -392,6 +420,9 @@ def update_project(project_id: str, *, name: Optional[str] = None,
     if knowledge is not None:
         sets.append("knowledge = ?")
         values.append(knowledge)
+    if pinned is not None:
+        sets.append("pinned = ?")
+        values.append(int(pinned))
     if not sets:
         return get_project(project_id)
 
@@ -488,6 +519,108 @@ def list_project_messages(project_id: str, *, include_superseded: bool = False
     return [_message(row) for row in rows]
 
 
+def search(query: str, *, limit: int = 40) -> list[dict[str, Any]]:
+    """Search project names/knowledge and every live chat transcript.
+
+    Content is decoded before matching so results are human text rather than
+    JSON fragments. The data set is local and intentionally bounded by the
+    response limit; avoiding an FTS shadow table keeps old databases migration
+    free and ensures nested message payloads remain searchable.
+    """
+    needle = query.strip().casefold()
+    if not needle:
+        return []
+
+    with _connect() as connection:
+        project_rows = connection.execute(
+            "SELECT * FROM projects ORDER BY pinned DESC, name COLLATE NOCASE"
+        ).fetchall()
+        chat_rows = connection.execute(
+            """
+            SELECT c.*, p.name AS project_name
+            FROM chats c
+            LEFT JOIN projects p ON p.project_id = c.project_id
+            WHERE c.archived_at IS NULL
+            ORDER BY c.pinned DESC, c.updated_at DESC, c.rowid DESC
+            """
+        ).fetchall()
+        message_rows = connection.execute(
+            """
+            SELECT m.chat_id, m.role, m.content, m.created_at
+            FROM messages m
+            JOIN chats c ON c.chat_id = m.chat_id
+            WHERE c.archived_at IS NULL
+            ORDER BY m.created_at DESC, m.rowid DESC
+            """
+        ).fetchall()
+
+    results: list[dict[str, Any]] = []
+    for row in project_rows:
+        matching = row["name"] if needle in row["name"].casefold() else row["knowledge"]
+        if needle in (matching or "").casefold():
+            results.append({
+                "type": "project",
+                "project_id": row["project_id"],
+                "title": row["name"],
+                "icon": row["icon"],
+                "snippet": _snippet(matching, needle),
+            })
+
+    messages_by_chat: dict[str, list[sqlite3.Row]] = {}
+    for row in message_rows:
+        messages_by_chat.setdefault(row["chat_id"], []).append(row)
+
+    for row in chat_rows:
+        snippet = ""
+        role: Optional[str] = None
+        if needle in row["title"].casefold():
+            snippet = row["title"]
+        else:
+            for message_row in messages_by_chat.get(row["chat_id"], []):
+                try:
+                    content = json.loads(message_row["content"])
+                except (TypeError, ValueError):
+                    continue
+                text = " ".join(_content_strings(content))
+                if needle in text.casefold():
+                    snippet = _snippet(text, needle)
+                    role = message_row["role"]
+                    break
+        if snippet:
+            results.append({
+                "type": "chat",
+                "chat_id": row["chat_id"],
+                "project_id": row["project_id"],
+                "project_name": row["project_name"],
+                "title": row["title"],
+                "snippet": snippet,
+                "role": role,
+            })
+        if len(results) >= limit:
+            break
+    return results[:limit]
+
+
+def _content_strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for child in value.values() for text in _content_strings(child)]
+    if isinstance(value, list):
+        return [text for child in value for text in _content_strings(child)]
+    return []
+
+
+def _snippet(text: str, needle: str, *, width: int = 150) -> str:
+    clean = " ".join((text or "").split())
+    position = clean.casefold().find(needle)
+    if position < 0 or len(clean) <= width:
+        return clean
+    start = max(0, position - width // 3)
+    end = min(len(clean), start + width)
+    return ("…" if start else "") + clean[start:end] + ("…" if end < len(clean) else "")
+
+
 def supersede(message_ids: list[str]) -> int:
     """Mark turns as compacted away. They stay readable in the transcript."""
     if not message_ids:
@@ -508,6 +641,7 @@ def _project(row: sqlite3.Row) -> Project:
         project_id=row["project_id"], name=row["name"], icon=row["icon"],
         knowledge=row["knowledge"], created_at=row["created_at"],
         updated_at=row["updated_at"],
+        pinned=bool(row["pinned"]) if "pinned" in keys else False,
         chat_count=row["chat_count"] if "chat_count" in keys else 0,
     )
 
@@ -520,6 +654,7 @@ def _chat(row: sqlite3.Row) -> Chat:
         created_at=row["created_at"], updated_at=row["updated_at"],
         archived_at=row["archived_at"], provider=row["provider"],
         model=row["model"], token_estimate=row["token_estimate"],
+        pinned=bool(row["pinned"]) if "pinned" in keys else False,
         message_count=row["message_count"] if "message_count" in keys else 0,
     )
 

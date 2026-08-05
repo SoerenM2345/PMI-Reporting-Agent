@@ -13,6 +13,8 @@ const PROJECT_ICONS = [
   "🎯",
 ];
 
+const CHAT_PREVIEW_LIMIT = 6;
+
 /**
  * Expected data structure:
  *
@@ -43,6 +45,7 @@ export default function Sidebar({
   onOpen,
   onRename,
   onDelete,
+  onPinChat,
 
   onCreateProject,
   onRenameProject,
@@ -50,6 +53,12 @@ export default function Sidebar({
   onDeleteProject,
   onOpenProject,
   onMoveChat,
+  onPinProject,
+
+  searchQuery = "",
+  searchResults = [],
+  searchBusy = false,
+  onSearchQueryChange,
 
   busy = false,
 }) {
@@ -69,8 +78,16 @@ export default function Sidebar({
   const [iconPickerProjectId, setIconPickerProjectId] = useState(null);
   const [draggingChatId, setDraggingChatId] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);
+  const [showAllGeneralChats, setShowAllGeneralChats] = useState(false);
 
-  const chatsWithoutProject = chats.filter((chat) => !chat.project_id);
+  const chatsWithoutProject = pinnedFirst(
+    chats.filter((chat) => !chat.project_id),
+  );
+  const orderedProjects = pinnedFirst(projects);
+  const visibleGeneralChats = showAllGeneralChats
+    ? chatsWithoutProject
+    : chatsWithoutProject.slice(0, CHAT_PREVIEW_LIMIT);
+  const isSearching = Boolean(searchQuery.trim());
 
   const startChatRename = (chat) => {
     setEditingChatId(chat.chat_id);
@@ -183,31 +200,30 @@ export default function Sidebar({
 
   return (
     <>
-      {/* Sidebar open button */}
-      {!isOpen && (
-        <button
-          type="button"
-          onClick={() => setIsOpen(true)}
-          aria-label="Open sidebar"
-          title="Open sidebar"
-          className="fixed left-3 top-3 z-50 flex h-10 w-10 items-center
-                     justify-center rounded-lg border border-slate-200
-                     bg-white text-lg text-slate-700 shadow-sm
-                     transition hover:bg-slate-100"
-        >
-          ☰
-        </button>
-      )}
-
       <aside
         className={`relative flex h-full shrink-0 flex-col border-r
                     border-slate-200 bg-white transition-all duration-300
                     ${
                       isOpen
                         ? "w-72 translate-x-0"
-                        : "w-0 -translate-x-full overflow-hidden border-r-0"
+                        : "w-16 overflow-hidden"
                     }`}
       >
+        {!isOpen ? (
+          <button
+            type="button"
+            onClick={() => setIsOpen(true)}
+            aria-label="Open sidebar"
+            title="Open sidebar"
+            className="mx-auto mt-3 flex h-10 w-10 shrink-0 items-center
+                       justify-center rounded-lg border border-slate-200
+                       bg-white text-lg text-slate-700 shadow-sm
+                       transition hover:bg-slate-100"
+          >
+            ☰
+          </button>
+        ) : (
+          <>
         <SidebarHeader onClose={() => setIsOpen(false)} />
 
         <div className="space-y-2 border-b border-slate-100 p-3">
@@ -237,9 +253,36 @@ export default function Sidebar({
             <span className="text-base">📁</span>
             Create project
           </button>
+
+          <label className="relative block">
+            <span className="sr-only">Search all chats and projects</span>
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
+              ⌕
+            </span>
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => onSearchQueryChange?.(event.target.value)}
+              placeholder="Search everything"
+              className="w-full rounded-lg border border-slate-200 bg-slate-50
+                         py-2 pl-9 pr-3 text-sm text-slate-700 outline-none
+                         placeholder:text-slate-400 focus:border-slate-400
+                         focus:bg-white focus:ring-2 focus:ring-slate-100"
+            />
+          </label>
         </div>
 
         <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
+          {isSearching ? (
+            <SearchResults
+              query={searchQuery}
+              results={searchResults}
+              busy={searchBusy}
+              onOpenChat={onOpen}
+              onOpenProject={handleProjectOpen}
+            />
+          ) : (
+            <>
           <SidebarSectionTitle>Projects</SidebarSectionTitle>
 
           {projects.length === 0 && (
@@ -249,10 +292,10 @@ export default function Sidebar({
           )}
 
           <div className="space-y-1">
-            {projects.map((project) => {
-              const projectChats = chats.filter(
+            {orderedProjects.map((project) => {
+              const projectChats = pinnedFirst(chats.filter(
                 (chat) => chat.project_id === project.project_id,
-              );
+              ));
 
               const isExpanded =
                 expandedProjects[project.project_id] ?? true;
@@ -312,6 +355,9 @@ export default function Sidebar({
                   onDeleteProject={() =>
                     onDeleteProject?.(project.project_id, project.name)
                   }
+                  onPinProject={() =>
+                    onPinProject?.(project.project_id, !project.pinned)
+                  }
                   onStartChatRename={startChatRename}
                   onChatDraftChange={setChatDraft}
                   onCommitChatRename={commitChatRename}
@@ -320,6 +366,7 @@ export default function Sidebar({
                     setChatDraft("");
                   }}
                   onDeleteChat={onDelete}
+                  onPinChat={onPinChat}
                   onChatDragStart={startChatDrag}
                   onChatDragEnd={finishChatDrag}
                 />
@@ -338,7 +385,7 @@ export default function Sidebar({
               </p>
             ) : (
               <div className="space-y-1">
-                {chatsWithoutProject.map((chat) => (
+                {visibleGeneralChats.map((chat) => (
                   <ChatItem
                     key={chat.chat_id}
                     chat={chat}
@@ -359,12 +406,24 @@ export default function Sidebar({
                       setChatDraft("");
                     }}
                     onDelete={() => onDelete?.(chat.chat_id, chat.title)}
+                    onPin={() => onPinChat?.(chat.chat_id, !chat.pinned)}
                   />
                 ))}
+                {chatsWithoutProject.length > CHAT_PREVIEW_LIMIT && (
+                  <ShowMoreButton
+                    expanded={showAllGeneralChats}
+                    hiddenCount={chatsWithoutProject.length - CHAT_PREVIEW_LIMIT}
+                    onClick={() => setShowAllGeneralChats((current) => !current)}
+                  />
+                )}
               </div>
             )}
           </div>
+            </>
+          )}
         </nav>
+          </>
+        )}
       </aside>
 
       {showCreateProject && (
@@ -424,6 +483,73 @@ function SidebarSectionTitle({ children }) {
   );
 }
 
+function SearchResults({ query, results, busy, onOpenChat, onOpenProject }) {
+  return (
+    <div>
+      <SidebarSectionTitle>Search results</SidebarSectionTitle>
+
+      {busy ? (
+        <p className="px-3 py-5 text-center text-xs text-slate-400">
+          Searching…
+        </p>
+      ) : results.length === 0 ? (
+        <p className="px-3 py-5 text-center text-xs text-slate-400">
+          No results for “{query.trim()}”.
+        </p>
+      ) : (
+        <div className="space-y-1">
+          {results.map((result) => (
+            <button
+              key={`${result.type}-${result.chat_id || result.project_id}`}
+              type="button"
+              onClick={() =>
+                result.type === "project"
+                  ? onOpenProject?.(result.project_id)
+                  : onOpenChat?.(result.chat_id)
+              }
+              className="block w-full rounded-lg px-3 py-2 text-left
+                         transition hover:bg-slate-100"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm">
+                  {result.type === "project" ? result.icon || "📁" : "💬"}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700">
+                  {result.title}
+                </span>
+              </div>
+              {result.snippet && result.snippet !== result.title && (
+                <p className="mt-1 line-clamp-2 text-xs leading-4 text-slate-500">
+                  {result.snippet}
+                </p>
+              )}
+              {result.project_name && (
+                <p className="mt-1 truncate text-[11px] text-slate-400">
+                  In {result.project_name}
+                </p>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShowMoreButton({ expanded, hiddenCount, onClick, compact = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full rounded-lg px-3 py-2 text-left text-xs font-medium
+                  text-slate-400 transition hover:bg-slate-50
+                  hover:text-slate-600 ${compact ? "ml-5 w-[calc(100%-1.25rem)]" : ""}`}
+    >
+      {expanded ? "Show less" : `Show more (${hiddenCount})`}
+    </button>
+  );
+}
+
 function ProjectItem({
   project,
   chats,
@@ -451,16 +577,22 @@ function ProjectItem({
   onToggleIconPicker,
   onSelectIcon,
   onDeleteProject,
+  onPinProject,
   onStartChatRename,
   onChatDraftChange,
   onCommitChatRename,
   onCancelChatRename,
   onDeleteChat,
+  onPinChat,
   onChatDragStart,
   onChatDragEnd,
 }) {
   const isEditing = editingProjectId === project.project_id;
   const showIconPicker = iconPickerProjectId === project.project_id;
+  const [showAllChats, setShowAllChats] = useState(false);
+  const visibleChats = showAllChats
+    ? chats
+    : chats.slice(0, CHAT_PREVIEW_LIMIT);
 
   return (
 
@@ -478,7 +610,7 @@ function ProjectItem({
       }`}
     >
 
-      <div className="group flex items-center gap-1 p-1.5">
+      <div className="group/project relative flex items-center gap-1 p-1.5">
         <button
           type="button"
           onClick={onToggle}
@@ -531,9 +663,19 @@ function ProjectItem({
 
         {!isEditing && (
           <div
-            className="flex items-center gap-1 opacity-0 transition
-                       group-hover:opacity-100 focus-within:opacity-100"
+            className="absolute right-1 top-1/2 flex -translate-y-1/2
+                       items-center gap-1 rounded-lg bg-white/95 opacity-0
+                       shadow-sm transition group-hover/project:opacity-100
+                       focus-within:opacity-100"
           >
+            <IconButton
+              label={project.pinned ? "Unpin project" : "Pin project"}
+              onClick={onPinProject}
+              active={project.pinned}
+            >
+              📌
+            </IconButton>
+
             <IconButton
               label="Rename project"
               onClick={onStartProjectRename}
@@ -580,7 +722,7 @@ function ProjectItem({
             </p>
           ) : (
             <div className="space-y-1">
-              {chats.map((chat) => (
+              {visibleChats.map((chat) => (
                 <ChatItem
                   key={chat.chat_id}
                   chat={chat}
@@ -602,8 +744,17 @@ function ProjectItem({
                   onDelete={() =>
                     onDeleteChat?.(chat.chat_id, chat.title)
                   }
+                  onPin={() => onPinChat?.(chat.chat_id, !chat.pinned)}
                 />
               ))}
+              {chats.length > CHAT_PREVIEW_LIMIT && (
+                <ShowMoreButton
+                  compact
+                  expanded={showAllChats}
+                  hiddenCount={chats.length - CHAT_PREVIEW_LIMIT}
+                  onClick={() => setShowAllChats((current) => !current)}
+                />
+              )}
             </div>
           )}
         </div>
@@ -629,6 +780,7 @@ function ChatItem({
   onCommitRename,
   onCancelRename,
   onDelete,
+  onPin,
 }) {
   return (
     <div
@@ -638,7 +790,7 @@ function ChatItem({
       }}
       onDragEnd={onDragEnd}
       aria-label={`Chat: ${chat.title}`}
-      className={`group rounded-lg transition ${
+      className={`group/chat rounded-lg transition ${
         compact ? "ml-5" : ""
       } ${dragging ? "opacity-40" : ""} ${
         active ? "bg-slate-200" : "hover:bg-slate-100"
@@ -661,7 +813,7 @@ function ChatItem({
           />
         </div>
       ) : (
-        <div className="flex items-center gap-1 p-1.5">
+        <div className="relative flex items-center gap-1 p-1.5">
           <button
             type="button"
             onClick={onOpen}
@@ -681,10 +833,19 @@ function ChatItem({
           </button>
 
           <div
-            className="flex shrink-0 items-center gap-1 opacity-0
-                       transition group-hover:opacity-100
+            className="absolute right-1 top-1/2 flex -translate-y-1/2
+                       shrink-0 items-center gap-1 rounded-lg bg-white/95
+                       opacity-0 shadow-sm transition group-hover/chat:opacity-100
                        focus-within:opacity-100"
           >
+            <IconButton
+              label={chat.pinned ? "Unpin chat" : "Pin chat"}
+              onClick={onPin}
+              active={chat.pinned}
+            >
+              📌
+            </IconButton>
+
             <IconButton label="Rename chat" onClick={onStartRename}>
               ✎
             </IconButton>
@@ -838,7 +999,7 @@ function CreateProjectModal({
   );
 }
 
-function IconButton({ label, onClick, children, danger = false }) {
+function IconButton({ label, onClick, children, danger = false, active = false }) {
   return (
     <button
       type="button"
@@ -852,10 +1013,22 @@ function IconButton({ label, onClick, children, danger = false }) {
                   text-base transition ${
                     danger
                       ? "text-slate-400 hover:bg-red-50 hover:text-red-600"
+                      : active
+                      ? "bg-slate-200 text-slate-700 hover:bg-slate-300"
                       : "text-slate-400 hover:bg-slate-200 hover:text-slate-700"
                   }`}
     >
       {children}
     </button>
   );
+}
+
+function pinnedFirst(items) {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) =>
+      Number(Boolean(right.item.pinned)) - Number(Boolean(left.item.pinned)) ||
+      left.index - right.index,
+    )
+    .map(({ item }) => item);
 }

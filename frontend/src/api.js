@@ -163,6 +163,11 @@ export function listProjects() {
   return call("/api/projects");
 }
 
+/** Search project names/knowledge plus titles and text across every live chat. */
+export function searchApp(query) {
+  return call(`/api/search?q=${encodeURIComponent(query)}`);
+}
+
 export function createProject(payload = {}) {
   return call("/api/projects", {
     method: "POST",
