@@ -265,7 +265,10 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
         applied = nl_updates.apply(analysis, text,
                                    focus=knowledge.load(chat.session_id).focus)
         if applied is not None:
-            return preamble.then(_after_update(chat, analysis, applied))
+            return preamble.then(_after_update(
+                chat, analysis, applied,
+                render_format=_requested_update_output(text, turn.output_format),
+            ))
 
     # The agent's own quality findings are often copied, filled in and pasted
     # back as one paragraph. Apply every explicit value rather than treating the
@@ -278,6 +281,7 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
                 chat, analysis, result,
                 refresh_report=_requests_report_refresh(text),
                 show_remaining=True,
+                render_format=_requested_update_output(text, turn.output_format),
             ))
 
     # A pasted list of items — "deliver X — Marco Rossi · due — 01-11-2026" per
@@ -288,7 +292,10 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
         result = nl_updates.apply_bulk(
             analysis, text, focus=knowledge.load(chat.session_id).focus)
         if result is not None and result.applied:
-            return preamble.then(_after_bulk(chat, analysis, result))
+            return preamble.then(_after_bulk(
+                chat, analysis, result,
+                render_format=_requested_update_output(text, turn.output_format),
+            ))
 
     if analysis is None:
         return preamble.then(say(
@@ -1146,7 +1153,8 @@ def _handle_pending(chat: Chat, analysis, pending: dict, text: str):
 
 
 # ------------------------------------------------- value corrections (§6/§7)
-def _after_update(chat: Chat, analysis, applied) -> ChatAnswer:
+def _after_update(chat: Chat, analysis, applied, *,
+                  render_format: Optional[str] = None) -> ChatAnswer:
     """The reply for a natural-language data update.
 
     Says which field changed and offers the one next step that follows from it.
@@ -1175,8 +1183,13 @@ def _after_update(chat: Chat, analysis, applied) -> ChatAnswer:
         ))
         knowledge.save(kb)
 
-    answer = say(fmt_chat.reply(applied.message,
-                                body=_consequence_of(applied), action=""))
+    body = []
+    if applied.warning:
+        body.append(f"**Warning:** {applied.warning}")
+    body += _consequence_of(applied)
+    answer = say(fmt_chat.reply(applied.message, body=body, action=""))
+    if render_format:
+        return answer.then(_regenerate(chat, analysis, render_format))
     return answer.then(_offer_regeneration(chat))
 
 
@@ -1204,7 +1217,8 @@ def _consequence_of(applied) -> list[str]:
 
 def _after_bulk(chat: Chat, analysis, result, *,
                 refresh_report: bool = False,
-                show_remaining: bool = False) -> ChatAnswer:
+                show_remaining: bool = False,
+                render_format: Optional[str] = None) -> ChatAnswer:
     """The reply for a pasted, multi-item update.
 
     Says how many values landed and — just as importantly — names the lines it
@@ -1231,6 +1245,8 @@ def _after_bulk(chat: Chat, analysis, result, *,
     ))
     if not result.applied:
         return answer
+    if render_format:
+        return answer.then(_regenerate(chat, analysis, render_format))
     if refresh_report:
         return answer.then(_refresh_current_report(chat, analysis))
     return answer.then(_offer_regeneration(chat))
@@ -1277,6 +1293,20 @@ def _requests_report_refresh(text: str) -> bool:
     action_words = ("include", "use", "apply", "incorporate", "reflect", "update")
     return any(word in lowered for word in report_words) \
         and any(word in lowered for word in action_words)
+
+
+def _requested_update_output(text: str,
+                             output_format: Optional[str]) -> Optional[str]:
+    """The format requested as the second half of a data-edit instruction."""
+    if not output_format:
+        return None
+    lowered = (text or "").casefold()
+    requested = re.search(
+        r"\b(updated?|redo|regenerate|rebuild|export|generate|render|produce|"
+        r"download|give\s+me|send\s+me|return)\b",
+        lowered,
+    )
+    return output_format if requested else None
 
 
 def _refresh_current_report(chat: Chat, analysis) -> ChatAnswer:
@@ -1336,8 +1366,11 @@ def _regenerate(chat: Chat, analysis, output_format: Optional[str]) -> ChatAnswe
     the staleness the correction introduced; rendering then produces the file in
     whatever format was last generated (default PowerPoint)."""
     fresh = json_store.load_analysis(chat.session_id) or analysis
+    existing = session_plan.load(chat.session_id)
+    request_text = ((existing.request_text if existing else "")
+                    or fresh.request_text or "")
     turn = TurnIntent(intent="request_report", audience=fresh.audience)
-    answer = _plan(chat, fresh, turn, fresh.request_text or "", collect_gaps=False)
+    answer = _plan(chat, fresh, turn, request_text, collect_gaps=False)
 
     # Only render when a draft actually came out of that — `_plan` returns the
     # audience question instead when §4's gate is still open.

@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -64,6 +65,9 @@ class Applied(BaseModel):
     label: str = ""
     field: str = ""
     value: str = ""
+    old_value: str = ""
+    warning: str = ""
+    source_files: list[str] = []
     #: Candidate labels to name when nothing resolved. "I didn't change
     #: anything" is not an answer; "did you mean one of these?" is.
     candidates: list[str] = []
@@ -105,6 +109,16 @@ _CORRECTION_PREFIX = re.compile(
     r"^\s*(?:correction|to be clear|just to be clear|actually|in fact|"
     r"i meant|i said|sorry|no)\s*[,:—-]?\s+", re.I)
 
+# ``change X to Y and give me back an updated PDF`` contains one data value;
+# the trailing export request is not part of it.  Splitting at the parser keeps
+# pending-gap answers and ordinary turns on the same correction path.
+_FOLLOWUP_ACTION = re.compile(
+    r"\s+(?:and|then)\s+(?:please\s+)?"
+    r"(?:give|send|return|export|generate|render|produce|create|make|"
+    r"rebuild|regenerate|redo)\b.*$",
+    re.I,
+)
+
 
 def strip_correction_prefix(text: str) -> tuple[str, bool]:
     """`(sentence, was_a_correction)`.
@@ -125,6 +139,7 @@ def parse(text: str) -> Optional[Update]:
     """The sentence as an intended update, or `None` if it is not one."""
     stripped, _ = strip_correction_prefix(text)
     stripped = stripped.strip().rstrip(".!")
+    stripped = _FOLLOWUP_ACTION.sub("", stripped).strip().rstrip(".!")
     if not stripped:
         return None
 
@@ -662,6 +677,16 @@ def apply(analysis, text: str, focus=None) -> Optional[Applied]:
             candidates=candidates,
         )
 
+    collection, id_attr, _label_attr = LABELS[issue.entity_type]
+    entity = next(
+        (candidate for candidate in getattr(model, collection, []) or []
+         if getattr(candidate, id_attr, None) == issue.entity_id),
+        None,
+    )
+    old = getattr(entity, issue.field, None) if entity is not None else None
+    old_text = _value_text(old)
+    source_files = list(getattr(entity, "source_files", []) or [])
+
     from app.agent.corrections import apply_and_persist
     from app.agent.knowledge import UserValue
     from app.agent.knowledge import load as load_kb
@@ -680,11 +705,20 @@ def apply(analysis, text: str, focus=None) -> Optional[Applied]:
                        entity_type=issue.entity_type, entity_id=issue.entity_id,
                        label=issue.entity_label or "", field=issue.field or "")
 
+    current = getattr(entity, issue.field, None) if entity is not None else raw
+    current_text = _value_text(current)
+    percentage = (re.search(r"\b\d+(?:\.\d+)?%", update.target)
+                  if issue.field == "status" else None)
+    warning = _override_warning(
+        old, old_text, current_text, source_files,
+        percentage_in_status=(percentage.group(0) if percentage else ""),
+    )
+
     kb = load_kb(analysis.session_id)
     kb.record_value(UserValue(
         entity_type=issue.entity_type, entity_id=issue.entity_id,
         label=issue.entity_label or "", field=issue.field or "",
-        value=result.value, raw=update.value,
+        value=current_text, raw=update.value, old_value=old_text or None,
     ))
     save_kb(kb)
 
@@ -692,8 +726,41 @@ def apply(analysis, text: str, focus=None) -> Optional[Applied]:
         applied=True, message=result.message,
         entity_type=issue.entity_type, entity_id=issue.entity_id,
         label=issue.entity_label or "", field=issue.field or "",
-        value=result.value or "",
+        value=current_text, old_value=old_text, warning=warning,
+        source_files=source_files,
     )
+
+
+def _value_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Enum):
+        return str(value.value)
+    return _display(value)
+
+
+def _override_warning(old: Any, old_text: str, new_text: str,
+                      source_files: list[str], *,
+                      percentage_in_status: str = "") -> str:
+    """Explain a mismatch while still applying the user's correction."""
+    parts: list[str] = []
+    if percentage_in_status:
+        parts.append(
+            f"{percentage_in_status} is a readiness/progress measure, "
+            "not the workflow status field, so the percentage remains unchanged."
+        )
+
+    meaningful = old is not None and old_text.casefold() not in {
+        "", "unknown", "not reported"
+    }
+    if meaningful and old_text != new_text:
+        source = (" from " + ", ".join(source_files)) if source_files else ""
+        parts.append(
+            f"The current consolidated value is {old_text}{source}, while you "
+            f"asked for {new_text}. Your explicit correction overrides that "
+            "value in the report; the source file itself is unchanged."
+        )
+    return " ".join(parts)
 
 
 class BulkResult(BaseModel):
@@ -739,8 +806,10 @@ _EMBEDDED_VALUE_PATTERNS: tuple[tuple[str, str, re.Pattern], ...] = (
         re.compile(
             r"\bRisk\s+['\"“‘](?P<label>.+?)['\"”’]\s+"
             r"(?:has a mitigation action but (?:nobody is )?assigned to|"
-            r"has (?:a )?mitigation owner|mitigation owner(?:\s+is|\s*:))\s+"
+            r"has (?:a )?mitigation owner|mitigation owner(?:\s+is|\s*:)|"
+            r"(?:is\s+)?assigned\s+to)\s+"
             r"(?P<value>.+?)(?=\s+(?:Critical|High|Medium|Low)\s*[—–-]|"
+            r"\s+(?:Risk|Decision|Dependency|Task)\s+['\"“‘]|"
             r"\s+Source\s*:|[.;\n]|$)",
             re.I,
         ),
@@ -770,6 +839,23 @@ _EMBEDDED_VALUE_PATTERNS: tuple[tuple[str, str, re.Pattern], ...] = (
             rf"\bTask\s+['\"“‘](?P<label>.+?)['\"”’][^;\n]{{0,100}}?"
             rf"\bcompletion date(?:\s+(?:of|is|:))?\s+"
             rf"(?P<value>{_BULK_DATE})",
+            re.I,
+        ),
+    ),
+    (
+        "synergy", "planned_realization_date",
+        re.compile(
+            rf"\bSynergy\s+['\"“‘](?P<label>.+?)['\"”’][^;\n]{{0,100}}?"
+            rf"\b(?:planned\s+)?reali[sz]ation date"
+            rf"(?:\s+(?:of|is|:))?\s+(?P<value>{_BULK_DATE})",
+            re.I,
+        ),
+    ),
+    (
+        "project", "reporting_date",
+        re.compile(
+            rf"\b(?:No\s+)?(?P<label>reporting date)\s+"
+            rf"(?:is|=|:)\s+(?P<value>{_BULK_DATE})",
             re.I,
         ),
     ),
@@ -825,8 +911,11 @@ def apply_embedded(analysis, text: str, focus=None) -> Optional[BulkResult]:
     result = BulkResult(count=len(values))
     for item in values:
         field = item.field.replace("_", " ")
-        sentence = (f"the {field} for {item.entity_type} {item.label} "
-                    f"is {item.value}")
+        if item.entity_type == "project":
+            sentence = f"the {field} is {item.value}"
+        else:
+            sentence = (f"the {field} for {item.entity_type} {item.label} "
+                        f"is {item.value}")
         applied = apply(analysis, sentence, focus=focus)
         if applied is not None and applied.applied:
             result.applied.append(applied.message)

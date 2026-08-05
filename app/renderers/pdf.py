@@ -173,9 +173,11 @@ def render(deliverable: Deliverable, context: GenerationContext,
     _cover(story, deliverable, context, brand, sheet)
     _contents(story, deliverable, sheet)
 
-    for page in deliverable.pages:
-        if page.purpose == "cover":
-            continue
+    planned_pages = [page for page in deliverable.pages
+                     if page.purpose != "cover"]
+    for index, page in enumerate(planned_pages):
+        if index:
+            story.append(PageBreak())
         boxes.extend(_section(story, page, deliverable, brand, sheet, assets,
                               figure_number, regular))
 

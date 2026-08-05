@@ -389,6 +389,26 @@ def test_word_headings_carry_an_outline_level(built):
     assert "outlineLvl" in document.styles["PMI Heading 1"].element.xml
 
 
+def test_word_starts_every_planned_chapter_on_a_new_page(built):
+    """Divider pages count as chapters and must not swallow the next heading."""
+    import docx
+
+    deliverable, _context, results = built
+    document = docx.Document(str(results["docx"].path))
+    planned = [page for page in deliverable.pages if page.purpose != "cover"]
+
+    for page in planned:
+        matches = [index for index, paragraph in enumerate(document.paragraphs)
+                   if paragraph.text == page.title]
+        assert matches, page.title
+        index = matches[-1]  # skip the cached contents entry
+        assert index > 0
+        before = document.paragraphs[index - 1]
+        assert any(node.tag.endswith("}br") and
+                   node.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type") == "page"
+                   for node in before._p.iter()), page.title
+
+
 # ======================================================================== PDF
 def test_the_pdf_has_readable_pages_and_a_contents(built):
     import fitz
@@ -402,6 +422,22 @@ def test_the_pdf_has_readable_pages_and_a_contents(built):
                 continue
             assert f"Page {index + 1}" in page.get_text(), \
                 f"page {index + 1} has no footer"
+
+
+def test_pdf_starts_every_planned_chapter_on_a_new_page(built):
+    import fitz
+
+    deliverable, _context, results = built
+    planned = [page for page in deliverable.pages if page.purpose != "cover"]
+    with fitz.open(str(results["pdf"].path)) as document:
+        starts = []
+        for planned_page in planned:
+            wanted = normalized(planned_page.title)
+            occurrences = [index for index, page in enumerate(document)
+                           if wanted in normalized(page.get_text())]
+            assert occurrences, planned_page.title
+            starts.append(occurrences[-1])  # skip the contents occurrence
+    assert len(set(starts)) == len(planned), starts
 
 
 def test_the_pdf_embeds_a_unicode_font_not_a_core_font(built):
