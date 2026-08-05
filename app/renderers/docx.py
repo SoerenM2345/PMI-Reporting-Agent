@@ -78,9 +78,11 @@ def render(deliverable: Deliverable, context: GenerationContext,
     _cover(document, deliverable, context, brand)
     _contents(document, deliverable, brand)
 
-    for page in deliverable.pages:
-        if page.purpose == "cover":
-            continue
+    planned_pages = [page for page in deliverable.pages
+                     if page.purpose != "cover"]
+    for index, page in enumerate(planned_pages):
+        if index:
+            document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         boxes.extend(_section(document, page, deliverable, context, brand,
                               assets, figure_number))
 
@@ -244,10 +246,6 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
     if page.source_note:
         _para(document, page.source_note, styles.SOURCE_NOTE)
 
-    # A page break between top-level sections, so a section starts where the
-    # reader expects it rather than four lines down the previous page.
-    if page is not deliverable.pages[-1]:
-        document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
     return boxes
 
 

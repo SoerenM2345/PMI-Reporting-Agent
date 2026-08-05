@@ -498,6 +498,173 @@ def test_filled_findings_are_applied_together_and_refresh_the_report(
     assert session_plan.load(session_id).version > before.version
 
 
+def test_shorthand_answers_to_several_findings_are_all_applied(
+        client, sample_files):
+    """The compact wording from the chat UI is still a four-value answer.
+
+    The findings card already supplies the missing-field context, so people
+    naturally answer ``Risk '…' assigned to Name`` instead of repeating the
+    full ``has a mitigation action but nobody is assigned`` sentence.  The old
+    parser recognised only the decision deadline at the end of this paste and
+    silently discarded all three risk owners.
+    """
+    from datetime import date
+
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx",
+                                 "steerco_meeting_notes.docx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a PMO status report"})
+
+    text = (
+        "Risk 'Key engineer attrition in target company' assigned to Marco "
+        "Rossi High — Risk 'ERP cutover slips past Q3' assigned to Marco "
+        "Russo High — Risk 'Customer churn during rebranding' assigned to "
+        "Marco Rossi Decision 'rebranding budget overrun of 40k EUR approved.' "
+        "is open, has deadline 08.08.2026"
+    )
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": text}))
+
+    assert "saved 4 value" in prose(reply).lower()
+    model = json_store.load_analysis(session_id).data_model
+    owners = {risk.title: risk.mitigation_owner for risk in model.risks}
+    assert owners["Key engineer attrition in target company"] == "Marco Rossi"
+    assert owners["ERP cutover slips past Q3"] == "Marco Russo"
+    assert owners["Customer churn during rebranding"] == "Marco Rossi"
+    decision = next(d for d in model.decisions
+                    if d.title == "rebranding budget overrun of 40k EUR approved.")
+    assert decision.decision_deadline == date(2026, 8, 8)
+
+
+def test_mixed_decision_synergy_and_project_dates_are_all_applied(
+        client, sample_files):
+    """One recognised finding must not hide the other supplied values.
+
+    This exact user message mixes two entity fields with a project field.  The
+    old embedded parser recognised the decision deadline, selected the batch
+    route, and then ignored both values it did not have dedicated patterns for.
+    """
+    from datetime import date
+
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "steerco_meeting_notes.docx",
+                                 "synergy_tracker.xlsx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a PMO status report"})
+
+    text = (
+        "Decision 'rebranding budget overrun of 40k EUR approved.' has "
+        "deadline 01-09-2026  Synergy 'Real estate footprint reduction' has "
+        "realization date 10-09-2026  No reporting date is 04.08.2026"
+    )
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": text}))
+
+    written = prose(reply).lower()
+    assert "saved 3 value" in written
+    assert "no unresolved data-quality problems remain" in written
+
+    analysis = json_store.load_analysis(session_id)
+    decision = next(item for item in analysis.data_model.decisions
+                    if item.title ==
+                    "rebranding budget overrun of 40k EUR approved.")
+    synergy = next(item for item in analysis.data_model.synergies
+                   if item.title == "Real estate footprint reduction")
+    assert decision.decision_deadline == date(2026, 9, 1)
+    assert synergy.planned_realization_date == date(2026, 9, 10)
+    assert analysis.data_model.project.reporting_date == date(2026, 8, 4)
+    assert json_store.load_project(session_id).reporting_date == date(2026, 8, 4)
+
+
+def test_shorthand_finding_answers_also_work_step_by_step(client, sample_files):
+    """A regeneration offer must not make the next supplied answer generic."""
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a PMO status report"})
+
+    first = agent_reply(client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Risk 'Key engineer attrition in target company' assigned to "
+                "Marco Rossi",
+    }))
+    second = agent_reply(client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Risk 'ERP cutover slips past Q3' assigned to Marco Russo",
+    }))
+
+    assert "recorded mitigation owner" in prose(first).lower() \
+        or "saved 1 value" in prose(first).lower()
+    assert "recorded mitigation owner" in prose(second).lower() \
+        or "saved 1 value" in prose(second).lower()
+    assert "i can answer from what the files hold" not in prose(second).lower()
+    model = json_store.load_analysis(session_id).data_model
+    owners = {risk.title: risk.mitigation_owner for risk in model.risks}
+    assert owners["Key engineer attrition in target company"] == "Marco Rossi"
+    assert owners["ERP cutover slips past Q3"] == "Marco Russo"
+
+
+def test_a_data_change_and_updated_pdf_are_completed_in_the_same_turn(
+        client, sample_files):
+    """An edit plus an export is one request, not a new generic report brief."""
+    from app.deliverable import session as session_plan
+    from app.models.pmi import Status
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx",
+                                 "milestone_tracker.csv",
+                                 "portal_dashboard_export.html")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    original_request = (
+        "Create a PMO Status Report for the Integration Management Office. "
+        "Include slides on Overall Progress, Workstream Status, Milestones, "
+        "Dependencies, Risks & Issues, Decision Log, and Next Steps."
+    )
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": original_request})
+
+    reply = agent_reply(client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "change status of Day 1 readiness: 92% to in_progress and "
+                "give me back updated pdf",
+    }))
+
+    pdf_artifact = next(item for item in artifacts(reply)
+                        if item["filename"].endswith(".pdf"))
+    written = prose(reply).lower()
+    assert "warning" in written
+    assert "92%" in written and "status" in written
+    assert "please provide the mitigation owner" not in written
+
+    model = json_store.load_analysis(session_id).data_model
+    milestone = next(m for m in model.milestones
+                     if m.name.casefold() == "day 1 readiness: 92%")
+    assert milestone.status == Status.IN_PROGRESS
+
+    refreshed = session_plan.load(session_id)
+    assert refreshed.request_text == original_request
+    assert {"Overall Progress", "Workstream Status", "Milestones",
+            "Dependencies", "Risks & Issues", "Decision Log", "Next Steps"} \
+        <= set(refreshed.covered_sections)
+
+    import fitz
+
+    downloaded = client.get(pdf_artifact["download_url"])
+    assert downloaded.status_code == 200
+    with fitz.open(stream=downloaded.content, filetype="pdf") as pdf:
+        pdf_text = " ".join(" ".join(page.get_text().split()) for page in pdf)
+    assert "Day 1 readiness: 92%" in pdf_text
+    assert "in_progress" in pdf_text
+
+
 def test_editing_a_card_saves_the_users_text_and_survives_a_replan(
         client, sample_files):
     """§ editable prose. A card's narrative is the user's to rewrite, and the

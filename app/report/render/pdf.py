@@ -61,6 +61,7 @@ def render(content: ReportContent, out_dir: Path) -> Path:
     pdf.ln(3)
 
     for section in content.narrative():
+        pdf.add_page()
         _section(pdf, section, content)
 
     out_dir.mkdir(parents=True, exist_ok=True)
