@@ -131,14 +131,100 @@ _INLINE_ITEM = re.compile(r"\d+[.)]\s*(?P<title>.+?)(?=\s+\d+[.)]|\s*$)")
 
 def _detect_deterministically(text: str) -> Optional[StructureSpec]:
     """A numbered or bulleted list, when something in the text says it is one."""
-    if not _INTRODUCES.search(text):
+    bare = bare_topic_titles(text)
+    if not _INTRODUCES.search(text) and not bare:
         return None
 
-    titles = _multiline_titles(text) or _inline_titles(text)
+    titles = (_multiline_titles(text) or _inline_titles(text)
+              or bare)
     if len(titles) < 2:
         # One "section" is a mention, not a structure.
         return None
     return StructureSpec(sections=[SectionSpec(title=t) for t in titles])
+
+
+# People often type a title-cased contents list without punctuation:
+# ``Include Retention Works Council Organization Design Talent Risks``.  A
+# general word splitter cannot know whether "Works Council Organization" is one
+# title or two. This vocabulary makes the safe cases deterministic: parsing is
+# accepted only when two or more known PMI/report topics cover the entire
+# include-clause. Ordinary prose, or a clause containing unknown words, remains
+# untouched and can be interpreted semantically by the report planner.
+_BARE_TOPIC_INTRO = re.compile(
+    r"\b(?:include|including|cover|covering|sections?|topics?)\b\s*:?[ \t]+",
+    re.I,
+)
+
+_COMMON_TOPIC_TITLES = (
+    # Human capital / CHRO
+    "Retention", "Talent Retention", "Works Council", "Organization Design",
+    "Organisation Design", "Talent Risks", "Compensation", "Benefits",
+    "Payroll", "Workforce Planning", "Employee Engagement", "HR Operations",
+    "Change Management", "Culture", "Communications", "Leadership",
+    "Operating Model",
+    # Cross-functional PMI topics commonly written as an unpunctuated run
+    "Executive Summary", "Overall Integration Status", "Workstream Status",
+    "Critical Milestones", "Key Milestones", "Critical Risks and Issues",
+    "Open Risks", "Open Issues", "Budget Position", "Synergy Realisation",
+    "Synergy Realization", "Decisions Required", "Recommended Next Steps",
+    "Recommendations", "Next Steps", "Data Quality and Limitations",
+    "Dependencies", "Actions",
+)
+
+
+def bare_topic_titles(text: str) -> list[str]:
+    """Read a fully recognisable, unpunctuated title run after ``include``.
+
+    The last valid clause wins, which matters for a revision request appended
+    to the report's original brief: the new structure is the user's latest
+    contract, not an addition to the old default.
+    """
+    for intro in reversed(list(_BARE_TOPIC_INTRO.finditer(text or ""))):
+        tail = (text or "")[intro.end():]
+        # A following sentence is another instruction, not another title. The
+        # user's final include-clause naturally runs to the end.
+        tail = re.split(r"\.\s+(?=[A-Z])|\n\s*\n", tail, maxsplit=1)[0]
+        titles = _segment_known_topics(tail)
+        if len(titles) >= 2:
+            return titles
+    return []
+
+
+def _segment_known_topics(tail: str) -> list[str]:
+    phrases = set(_COMMON_TOPIC_TITLES)
+    # Reuse the report's established aliases as vocabulary too. ``ALIASES`` is
+    # defined later in this module but is available whenever this function is
+    # called after import has completed.
+    for aliases in globals().get("ALIASES", {}).values():
+        phrases.update(aliases)
+
+    candidates: list[tuple[int, int, str]] = []
+    for phrase in phrases:
+        escaped = re.escape(phrase).replace("\\ ", r"\s+")
+        pattern = re.compile(rf"(?<!\w){escaped}(?!\w)", re.I)
+        for found in pattern.finditer(tail):
+            candidates.append((found.start(), found.end(), found.group(0)))
+
+    # Earlier starts win; at one start, take the longest title so "Talent
+    # Risks" is not reduced to "Risks".
+    candidates.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    selected: list[tuple[int, int, str]] = []
+    cursor = 0
+    for start, end, title in candidates:
+        if start < cursor:
+            continue
+        between = tail[cursor:start]
+        if re.sub(r"[\s,;:&/\-–—]+|\b(?:and|then|also)\b", "", between,
+                  flags=re.I):
+            continue
+        selected.append((start, end, " ".join(title.split())))
+        cursor = end
+
+    remainder = tail[cursor:]
+    if re.sub(r"[\s,;:.!?&/\-–—]+|\b(?:and|then|also|please)\b", "", remainder,
+              flags=re.I):
+        return []
+    return [title for _start, _end, title in selected]
 
 
 # A later turn often edits a structure rather than restating it: “add Budget and

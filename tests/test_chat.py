@@ -853,6 +853,43 @@ def _topic_order(deliverable, *topics) -> list:
             for topic in topics]
 
 
+def test_a_chro_revision_replaces_the_default_outline_with_requested_topics(
+        client, sample_files):
+    """Regression for a user listing title-cased sections without commas."""
+    from app.agent import knowledge
+    from app.deliverable import session as session_plan
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Create an HTML status report for the CHRO",
+    })
+
+    requested = [
+        "Retention", "Works Council", "Organization Design", "Talent Risks",
+        "Compensation", "Critical Milestones", "Recommendations",
+    ]
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": (
+            "no I need this report CHRO report. Focus on Human Capital. Include "
+            "Retention Works Council Organization Design Talent Risks "
+            "Compensation Critical Milestones Recommendations"
+        )},
+    ))
+
+    assert actions(reply, "open_preview")
+    reply_text = prose(reply)
+    assert all(title in reply_text for title in requested), reply_text
+    deliverable = session_plan.load(session_id)
+    assert deliverable.requested_sections == requested
+    assert set(deliverable.covered_sections) >= set(requested)
+    assert _topic_order(deliverable, *requested) == sorted(
+        _topic_order(deliverable, *requested))
+    assert [section["title"] for section in
+            knowledge.load(session_id).structure["sections"]] == requested
+
+
 def test_a_structure_survives_a_later_turn_that_does_not_repeat_it(
         client, sample_files):
     """§17. "Now make it a Word document" names no sections, and must not have

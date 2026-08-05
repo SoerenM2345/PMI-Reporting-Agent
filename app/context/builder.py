@@ -407,6 +407,16 @@ def requested_sections(request: str) -> list[str]:
     semis = [s for s in semis if s and 2 <= len(s.split()) <= 8]
     if len(semis) >= 3:
         return _dedupe(semis)
+
+    # A title-cased run without commas is still an explicit structure when the
+    # whole include-clause can be segmented into known report topics. The
+    # guarded parser rejects partial/ambiguous prose rather than inventing a
+    # table of contents from it.
+    from app.report.structure import bare_topic_titles
+
+    bare = bare_topic_titles(request)
+    if len(bare) >= 2:
+        return _dedupe(bare)
     return []
 
 
