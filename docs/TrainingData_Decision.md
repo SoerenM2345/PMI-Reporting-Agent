@@ -45,11 +45,18 @@ unresolved.
 
 1. **D1 — Scope:** Is transcript ingestion in V2? (Gates QMSum + AMI entirely.)
 2. **D2 — Gap data:** Fill gaps 1–2 with **synthetic** data, a **proxy**
-   corpus (SEC EDGAR), or a **hybrid**?
+   corpus (SEC EDGAR), or a **hybrid**? — **Reframed by §8 (2026-07-24):** the
+   underlying premise (a fine-tuning-style train/test split over labeled
+   proxy data) doesn't match this agent's actual architecture, which has no
+   training loop at all. See §8 for the revised recommendation.
 3. **D3 — Rigor:** Run D2 through the full `pmi-deep-research` 8-step protocol
-   (Xiao & Watson 2017) before treating it as settled?
+   (Xiao & Watson 2017) before treating it as settled? — **Resolved
+   2026-07-24, see §8.**
 4. **D4 — Split hygiene:** Accept ECTSum ticker overlap or re-split
-   ticker-disjoint for a stricter generalization test?
+   ticker-disjoint for a stricter generalization test? — Still applies to any
+   ECTSum-based benchmark number specifically; superseded as the *primary*
+   evaluation question by §8's prequential/rolling-origin finding for the
+   continuously-growing SM-review corpus.
 5. **D5 — License gate:** ECTSum is GPL-3.0 — internal fine-tuning/eval OK;
    re-check before redistributing weights or repackaged data.
 
@@ -138,6 +145,62 @@ gap exceeds tolerance → the proxy choice failed for that sub-skill: add
 PMI-register synthetic data or reconsider (loop back to D2). In production,
 track SM-review correction rate per report as the ongoing metric.
 
+## 8. D3 executed — pmi-deep-research 8-step protocol on the data-utilization strategy (2026-07-24)
+
+**Trigger:** user linked `H2_Dataset_Comparison` (Google Sheet), which extends §1–§7's ECTSum/QMSum
+comparison to 5 corpora (adds GovReport, Multi-LexSum, MeetingBank) and shows **every one Gap on
+all six PMI-specific rows** (task/action-item extraction, overdue flagging, KPI benchmarking,
+cross-workstream schema, multi-format extraction, cross-source conflict detection). User proposed
+unsupervised/statistical pattern-finding with continuous learning as an alternative to forcing
+supervised training onto weak-fit labels, and asked whether a fixed split, k-fold, or one pooled
+dataset is the right evaluation scheme — researched via the full 8-step protocol, explicitly
+instructed not to weight this project's own prior conclusions above neutral external research.
+
+**Reframing:** this agent has no training loop (`MASTER.md`: LLM only classifies/words, never
+invents numbers) — the real decision is data-utilization + evaluation methodology, not a
+train/test split for model fine-tuning.
+
+**Top 3, ranked by fit to short-timeframe + current architecture:**
+1. **RAG / in-context learning** — Lewis et al. (2020), NeurIPS, arXiv:2005.11401 (7,453 citations)
+   + Gao et al. (2023/24) survey, arXiv:2312.10997. Matches the *current* architecture exactly (no
+   training loop); retrieve SM-approved past reports as few-shot exemplars instead of relying on
+   zero-shot judgment. No new infrastructure beyond an embeddings index.
+2. **Human-in-the-loop active learning / data flywheel** — Settles (2009) canonical survey, 6,623
+   citations; "Agent-in-the-Loop" (2025, arXiv:2510.06674) as an applied case study (trend/adoption
+   tier, not yet peer-reviewed-confirmed). The mandatory SM-review gate (`OPEN_POINTS.md` #7)
+   *already* generates real, gold, target-domain examples as a byproduct — turns an existing
+   compliance requirement into the data mechanism, rather than adding one.
+3. **Weak/programmatic supervision** — Ratner et al. (2017), Snorkel, PVLDB, 479 citations, deployed
+   at Google/Intel/Apple/IBM. Reuses the extractors already in `app/extractors/base.py` as labeling
+   functions over real unlabeled documents. Right second-stage move if the team later wants a
+   smaller trained extraction model instead of an LLM API call indefinitely.
+
+**Screened out, explicitly:** pure unsupervised pattern-finding (clustering/autoencoding raw
+documents) as a standalone solution. No literature found treating it as viable for structured
+business-document extraction — the schema (task owner, % progress, risk vs. milestone) is imposed,
+not a latent statistical pattern text alone reveals. Every credible label-scarce approach found
+still injects some supervision signal (heuristic, human, or retrieved).
+
+**Evaluation methodology (the split/k-fold/pool question):** k-fold assumes a fixed, i.i.d. dataset
+— doesn't fit continuously-arriving SM-reviewed data. Gama, Žliobaitė, Bifet, Pechenizkiy &
+Bouchachia (2014), "A survey on concept drift adaptation," *ACM Computing Surveys* 46(4), and a 2024
+evaluation-standardization paper (arXiv:2204.13625) both point to **prequential ("test-then-train")
+or rolling-origin evaluation** for streaming data instead. Pooling everything into one dataset with
+no held-out set is what this literature argues against hardest. This **independently corroborates**
+(not just repeats) §6's frozen 15–30-example held-out set — verified against external literature per
+the user's explicit instruction not to over-weight prior internal conclusions.
+
+**Recommendation:** combine candidates 1 and 2 — RAG at generation time, fed continuously by the
+SM-review step, evaluated prequentially against the frozen gold set (§6, still stands, now
+externally verified). Candidate 3 (Snorkel-style weak supervision) stays on the roadmap for a later
+"train our own smaller model" phase, not the immediate pick. Full brief with all sources given to
+user in chat 2026-07-24; not duplicated here in full to avoid file sprawl — see `PROJECT_MEMORY.md`
+2026-07-24 entry for the complete writeup.
+
+**New open decision surfaced:** does the team want to eventually train a specialized extraction
+model (→ revisits candidate 3 / Gap-1 EDGAR data), or stay RAG/ICL-only indefinitely? Added to
+`OPEN_POINTS.md`.
+
 ## Sources
 
 - Google Doc: H2 — Deep Dive (doc id 1Giifm-klkodBr2vGkkHlxJC6Fx2VXosFnfoxj-ZcfiU), 2026-07-08
@@ -148,3 +211,11 @@ track SM-review correction rate per report as the ongoing metric.
 - Synthetic-data scaling/pitfalls — https://arxiv.org/html/2510.01631v1
 - SEC EDGAR access & APIs — https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data ; https://www.sec.gov/about/developer-resources
 - 8-K Exhibit 99 content characteristics — https://sec-api.io/datasets/form-8k-exhibit-99-content
+- H2_Dataset_Comparison (Google Sheet) — https://docs.google.com/spreadsheets/d/1kDtgsEKNNPo5cKBKaUIP7ZFmq-Nr5_3oCeJINF5zRps/
+- Ratner, A. et al. (2017), Snorkel, PVLDB 11(3) — https://dl.acm.org/doi/10.14778/3157794.3157797
+- Settles, B. (2009), Active Learning Literature Survey, UW-Madison TR1648 — https://minds.wisconsin.edu/handle/1793/60660
+- Agent-in-the-Loop (2025) — arXiv:2510.06674
+- Lewis, P. et al. (2020), RAG, NeurIPS — arXiv:2005.11401
+- Gao, Y. et al. (2023/24), RAG for LLMs: A Survey — arXiv:2312.10997
+- Gama, J. et al. (2014), A survey on concept drift adaptation, ACM Computing Surveys 46(4) — https://dl.acm.org/doi/10.1145/2523813
+- Standardized Evaluation of ML for Evolving Data Streams (2024) — arXiv:2204.13625

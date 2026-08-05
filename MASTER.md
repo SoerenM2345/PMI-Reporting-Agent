@@ -98,6 +98,18 @@ data/samples/              generated sample inputs
 - **ECTSum** is included for later evaluation of the generation step (see
   `data/README.md`), not wired into runtime.
 
+## Roadmap — planned, not yet implemented
+
+- **RAG + SM-review flywheel** (2026-07-24 decision, `docs/TrainingData_Decision.md` §8):
+  replaces training on weak-fit proxy datasets with retrieval-augmented generation
+  fed by the Senior Manager review step. Full build plan, milestones, and
+  acceptance criteria: `docs/RAG_Flywheel_Engineering_Handoff.md`. Design
+  reference for the review UI (static mockup, not wired): `static/review_mockup.html`.
+  None of M1–M8 in that plan exist in this codebase yet — the "Key design
+  decisions" and module map above describe the system as it runs today, not
+  this roadmap. Check `OPEN_POINTS.md` #7/#15/#16 for current status before
+  assuming any part of it is built.
+
 ## Testing
 
 `pytest -q` from repo root: header/status/percent normalization units,

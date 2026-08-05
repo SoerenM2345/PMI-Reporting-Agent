@@ -14,22 +14,27 @@ from pydantic import BaseModel, Field
 
 class SourceFormat(str, Enum):
     """Input formats, ordered by conflict-resolution priority (slide 5, step 6):
-    Excel > Word/PDF > PowerPoint > HTML."""
+    Excel > Word/PDF > PowerPoint > HTML > Image."""
 
     EXCEL = "excel"
     WORD = "word"
     PDF = "pdf"
     POWERPOINT = "powerpoint"
     HTML = "html"
+    IMAGE = "image"
 
 
 #: Lower number = higher trust when resolving conflicts.
+#: Images rank last: their content is inferred by OCR or a vision model rather than
+#: read from structured markup, so an image never overrides a figure from any other
+#: source. It can still surface a fact that exists nowhere else, which is its purpose.
 SOURCE_PRIORITY: dict[SourceFormat, int] = {
     SourceFormat.EXCEL: 1,
     SourceFormat.WORD: 2,
     SourceFormat.PDF: 2,
     SourceFormat.POWERPOINT: 3,
     SourceFormat.HTML: 4,
+    SourceFormat.IMAGE: 5,
 }
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.extractors import excel, html, pdf, powerpoint, word
+from app.extractors import excel, html, image, pdf, powerpoint, word
 
 EXTENSION_MAP = {
     ".xlsx": excel.extract,
@@ -14,6 +14,9 @@ EXTENSION_MAP = {
     ".pdf": pdf.extract,
     ".html": html.extract,
     ".htm": html.extract,
+    ".png": image.extract,
+    ".jpg": image.extract,
+    ".jpeg": image.extract,
 }
 
 SUPPORTED_EXTENSIONS = set(EXTENSION_MAP)

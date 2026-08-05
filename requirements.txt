@@ -14,5 +14,6 @@ pdfplumber>=0.11
 beautifulsoup4>=4.12
 matplotlib>=3.8
 Pillow>=10.2
+pytesseract>=0.3.10  # image extractor stage 1; needs the tesseract binary + tesseract-ocr-deu
 pytest>=8.0
 httpx>=0.27
