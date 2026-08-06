@@ -180,6 +180,22 @@ def test_a_source_that_says_nothing_is_not_disagreeing():
     assert not [c for c in run_checks(model).conflicts if c.check_id == "PMI-003"]
 
 
+# ------------------------------------------------------------ §5 traceability (REQ-2)
+def test_a_record_with_no_source_reference_is_flagged_completeness():
+    """REQ-2: every extracted record must carry a SourceRef. The schema itself does not
+    enforce this (`source_references` defaults to an empty list, not a required field —
+    see docs/known_limitations.md and the REQ-2 coverage audit), so this proves the soft
+    detection side at least works: COMP-009 must fire for a task with no source at all.
+    Hard enforcement (blocking such a record from ever reaching a generated report) is not
+    implemented and is out of scope here — this test only proves the check that exists."""
+    model = PMIDataModel(tasks=[
+        Task(task_id="T1", title="Untraceable task", source_references=[]),
+    ])
+    issues = [i for i in run_checks(model).issues if i.check_id == "COMP-009"]
+    assert issues, "COMP-009 should flag a task with an empty source_references list"
+    assert issues[0].entity_id == "T1"
+
+
 # --------------------------------------------------------------- §8.3 temporal
 def test_a_day_1_task_scheduled_after_day_1_is_critical():
     day_1 = date(2026, 6, 15)

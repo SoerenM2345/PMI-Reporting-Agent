@@ -45,6 +45,27 @@ def test_unsupported_files_are_rejected_with_a_reason(client, tmp_path):
     assert "unsupported type" in body["rejected"][0]["reason"]
 
 
+@pytest.mark.parametrize("filename", ["meeting.msg", "note.eml", "plan.mpp"])
+def test_msg_eml_mpp_are_explicitly_rejected_not_silently_skipped(client, tmp_path, filename):
+    """REQ-5: .msg/.eml/.mpp must return a clear 'unsupported format' message, never a
+    silent failure. The rejection mechanism is generic (any extension outside
+    SUPPORTED_EXTENSIONS), but these three specific extensions were never named in any
+    test or doc before this — see the REQ-5 coverage audit."""
+    sid = client.post("/api/session").json()["session_id"]
+    bad = tmp_path / filename
+    bad.write_bytes(b"not a real file, just proving the extension is rejected")
+
+    with open(bad, "rb") as handle:
+        body = client.post(
+            f"/api/upload?session_id={sid}",
+            files={"files": (filename, handle, "application/octet-stream")},
+        ).json()
+
+    assert body["saved"] == []
+    assert body["rejected"][0]["file"] == filename
+    assert "unsupported type" in body["rejected"][0]["reason"]
+
+
 def test_analyze_requires_files(client):
     sid = client.post("/api/session").json()["session_id"]
     response = client.post("/api/analyze",
