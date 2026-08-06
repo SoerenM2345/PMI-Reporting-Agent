@@ -10,6 +10,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "live: hits a real LLM API; requires a key. Deselected by default with -m 'not live'.",
+    "corpus: exercises the Dell-EMC v1.0 evaluation corpus (data/corpus/dellemc_vcio). Deselected by default with -m 'not corpus'. The keyless smoke checks in this group need no API key; the full-run tier is additionally marked 'live'.",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:starlette.*",
