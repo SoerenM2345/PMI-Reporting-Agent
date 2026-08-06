@@ -11,6 +11,21 @@ stakeholder.** It is printed on every slide, in every report, and in the UI. It 
 boilerplate: the system reads files written by people, and people write things down
 wrong.
 
+## Explicit V2 scope exclusions
+
+Stated here, not just implied by absence, per REQ-10 and REQ-28:
+
+- **No automated status collection from workstream leads.** V2 presumes a human has
+  already uploaded files; it never polls or pulls status directly from a workstream lead.
+  Any claim that this system "reduces manual effort" is bounded by that: it reduces the
+  effort of *reconciling and reporting* files that already exist, not the effort of
+  *producing* status updates in the first place. No code path in `app/` attempts such a
+  pull.
+- **No sentiment, tone, or cultural-signal enrichment.** The system extracts stated facts
+  (dates, owners, figures, statuses) and never analyses how something was said. This was
+  floated by interviewees as a possible future direction, not a near-term requirement; if
+  revisited, it needs a named data source and method first, not a default-on heuristic.
+
 ## Deviations from the spec
 
 | # | Spec says | We did | Why |
@@ -68,6 +83,43 @@ avoid is a report that looks identical whether or not the model ever ran.
   periods. A deck that is silently three weeks stale, with no date on it, cannot be
   detected as stale by any means available to us — and this is a real and common failure
   mode in PMI reporting.
+- **A stated aggregate figure is not compared against its own computed roll-up.**
+  `derive_workstreams()` (`app/agent/standardize.py`) already computes each workstream's
+  progress as the mean of its tasks' `progress_percentage` — in Python, correctly, exactly
+  as designed. But that computed value lives on the `Workstream` entity, a different
+  collection from the `KPI` entities other documents' stated figures would standardize
+  into, and cross-source matching does not currently compare across entity types. A
+  workstream one-pager or dashboard that directly *states* "66% complete" is never checked
+  against the tracker's own computed 59% — confirmed empirically: run the Dell-EMC v1.0
+  corpus (`data/corpus/dellemc_vcio/v1.0/`) through the deterministic (Z) condition and
+  conflict C1 (three documents stating three different WS3 progress figures) is not
+  detected, with zero `kpi`-type records extracted from either the tracker or the
+  workstream one-pager despite the "Progress vs. plan\n66%" text being present verbatim in
+  the one-pager's extracted text. The gap is not extraction — the text is there — it is
+  that nothing looks for it, and nothing would compare it against the derived figure if it
+  were found.
+- **A source's own text stating "this record is out of date" is not wired into
+  conflict resolution.** The Dell-EMC corpus's escalation mail contains, verbatim,
+  *"Das unterzeichnete Protokoll der Sitzung 01 fuehrt weiterhin D. Okonjo; ein
+  Korrigendum reiche ich nicht nach"* ("the signed minutes still list D. Okonjo; I will
+  not file a correction for that") — an explicit, machine-detectable admission that a
+  higher-priority formal record was never amended. That text is extracted (it lands in a
+  free-text `note` record), but conflict resolution (`app/agent/consistency/resolution.py`)
+  only ever sees structured entity fields (e.g. `Task.owner`), which are evaluated with no
+  connection back to the surrounding prose they were pulled from. Even a resolution rule
+  built to detect "superseded"/"will not correct" language (a real, generalizable signal —
+  not specific to this corpus) has nothing to attach it to under the current data flow. C6
+  (the "was OP-01 reassigned without amending the signed minutes" conflict) fails for this
+  reason, not for lack of a stale/critical severity concept.
+
+  Both of the above were investigated and left unfixed deliberately rather than patched
+  narrowly: a fix confined to this corpus's exact wording or entity names would be
+  overfitting the detector to the test, not fixing the underlying gap. The real fix is
+  cross-entity-type matching (compare a `KPI` against a `Workstream`'s computed value) and
+  a link from free-text signals back to the structured conflicts they qualify — both
+  genuine, multi-file changes to the extraction/matching layer, out of scope for a
+  single-session patch. See `docs/PROTOCOL.md` "Infrastructure status" for how this affects
+  the evaluation study specifically.
 
 ## Scale
 
@@ -97,6 +149,25 @@ of the document.
   the container: correct uid, `pytest` absent, `/app/storage_data` writable, the full
   upload → analyse → preview → PDF flow working, and chats surviving a `docker restart`.
 - **The live vision path has not been run against a real model.** See "Testing" below.
+
+## Functional requirements not yet met
+
+Against `Functional_Test_Requirements.md`'s 28 machine-verifiable requirements. The gap
+column states what's actually missing, not just "no test" — most of these need a feature,
+not a test.
+
+| REQ | What's missing | Size |
+|---|---|---|
+| REQ-4 | German OCR (`pytesseract` call has no `lang=` argument — English only), and the fallback order is inverted from spec: vision runs first, OCR is the fallback, not "OCR primary, vision fallback on low confidence" (`_OCR_CONFIDENCE` is a hardcoded constant, never measured against a real score) | Medium — two independent fixes in `app/extractors/image.py` |
+| REQ-41 | No role-based access control anywhere. No roles, no permission checks, no login | Large — a real auth/RBAC system, currently entirely absent |
+| REQ-45 | No network-egress allowlist or infra-level sandbox enforcement; relies on convention (the corpus being synthetic) rather than a technical control | Large — infra/deployment work, not application code |
+| REQ-47 | No second, independently-annotated 15-30 case gold set with Cohen's kappa agreement exists. The Dell-EMC corpus (`data/corpus/dellemc_vcio/`) is a different artifact: one generator process, audited by its own author, not cross-annotated — it does not satisfy this requirement even though it looks similar | Large — needs a second annotator's time, not code |
+| REQ-63 | No benchmark against an externally deployed rule-based PM tool. The closest analog is this project's own internal "Z" no-LLM condition (`docs/evaluation_study_design.md` Design A), which measures this system's own floor, not incremental value over a competing product | Needs access to a comparison tool, not code |
+
+REQ-44 (no OpenAI in production) and REQ-48 (manual-baseline timing study) are governance
+sign-offs and human-participant studies respectively — not code gaps, see
+`docs/PROTOCOL.md` and `docs/evaluation_study_design.md` §4 "Cost and effort" for where
+each is tracked.
 
 ## Testing
 
