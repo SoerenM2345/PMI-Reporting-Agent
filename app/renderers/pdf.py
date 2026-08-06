@@ -173,9 +173,11 @@ def render(deliverable: Deliverable, context: GenerationContext,
     _cover(story, deliverable, context, brand, sheet)
     _contents(story, deliverable, sheet)
 
-    for page in deliverable.pages:
-        if page.purpose == "cover":
-            continue
+    planned_pages = [page for page in deliverable.pages
+                     if page.purpose != "cover"]
+    for index, page in enumerate(planned_pages):
+        if index:
+            story.append(PageBreak())
         boxes.extend(_section(story, page, deliverable, brand, sheet, assets,
                               figure_number, regular))
 
@@ -486,7 +488,7 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
                if column.kind in ("number", "currency", "percent")}
 
     rows = [header]
-    for row in spec.rows:
+    for row in spec.displayed_rows:
         rendered = []
         for index, cell in enumerate(row[:len(spec.columns)]):
             style = sheet["cell_num"] if index in numeric else sheet["cell"]
@@ -513,6 +515,8 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
             commands.append(("BACKGROUND", (0, index), (-1, index),
                              colors.HexColor(brand.color("surface_alt"))))
     for index in spec.emphasis_rows:
+        if index >= spec.displayed_row_count:
+            continue
         commands.append(("BACKGROUND", (0, index + 1), (-1, index + 1),
                          colors.HexColor(brand.color("surface_alt"))))
     table.setStyle(TableStyle(commands))
@@ -520,8 +524,8 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
     out: list = [table]
     if spec.caption:
         out.append(Paragraph(_x(spec.caption), sheet["caption"]))
-    if spec.is_truncated:
-        out.append(Paragraph(_x(spec.truncation_note()), sheet["source"]))
+    if spec.has_note:
+        out.append(Paragraph(_x(spec.note()), sheet["source"]))
     return out
 
 

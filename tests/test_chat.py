@@ -124,6 +124,42 @@ def test_a_chat_can_be_renamed_and_closed_and_reopened(client):
     assert chat_id in [c["chat_id"] for c in client.get("/api/chats").json()["chats"]]
 
 
+def test_chats_and_projects_can_be_pinned(client):
+    project = client.post("/api/projects", json={"name": "Aurora"}).json()["project"]
+    chat = client.post("/api/chats", json={"title": "Budget"}).json()["chat"]
+
+    pinned_project = client.patch(
+        f"/api/projects/{project['project_id']}", json={"pinned": True}
+    ).json()["project"]
+    pinned_chat = client.patch(
+        f"/api/chats/{chat['chat_id']}", json={"pinned": True}
+    ).json()["chat"]
+
+    assert pinned_project["pinned"] is True
+    assert pinned_chat["pinned"] is True
+    assert client.get("/api/projects").json()["projects"][0]["project_id"] == project["project_id"]
+    assert client.get("/api/chats").json()["chats"][0]["chat_id"] == chat["chat_id"]
+
+
+def test_app_search_finds_chat_text_and_project_knowledge(client):
+    project = client.post(
+        "/api/projects",
+        json={"name": "Aurora", "knowledge": "Separation deadline is October"},
+    ).json()["project"]
+    chat = client.post(
+        "/api/chats", json={"title": "Weekly update", "project_id": project["project_id"]}
+    ).json()["chat"]
+    chat_store.add_message(
+        chat["chat_id"], "user", {"text": "The synergy baseline needs review"}
+    )
+
+    text_results = client.get("/api/search", params={"q": "synergy baseline"}).json()["results"]
+    knowledge_results = client.get("/api/search", params={"q": "October"}).json()["results"]
+
+    assert any(result.get("chat_id") == chat["chat_id"] for result in text_results)
+    assert any(result.get("project_id") == project["project_id"] for result in knowledge_results)
+
+
 def test_an_existing_chat_can_be_added_to_a_project_with_its_context(client):
     project = client.post("/api/projects", json={"name": "Aurora"}).json()["project"]
     chat = client.post("/api/chats", json={"title": "Budget discussion"}).json()["chat"]
@@ -498,6 +534,177 @@ def test_filled_findings_are_applied_together_and_refresh_the_report(
     assert session_plan.load(session_id).version > before.version
 
 
+def test_shorthand_answers_to_several_findings_are_all_applied(
+        client, sample_files):
+    """The compact wording from the chat UI is still a four-value answer.
+
+    The findings card already supplies the missing-field context, so people
+    naturally answer ``Risk '…' assigned to Name`` instead of repeating the
+    full ``has a mitigation action but nobody is assigned`` sentence.  The old
+    parser recognised only the decision deadline at the end of this paste and
+    silently discarded all three risk owners.
+    """
+    from datetime import date
+
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx",
+                                 "steerco_meeting_notes.docx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a PowerPoint PMO status report"})
+
+    text = (
+        "Risk 'Key engineer attrition in target company' assigned to Marco "
+        "Rossi High — Risk 'ERP cutover slips past Q3' assigned to Marco "
+        "Russo High — Risk 'Customer churn during rebranding' assigned to "
+        "Marco Rossi Decision 'rebranding budget overrun of 40k EUR approved.' "
+        "is open, has deadline 08.08.2026"
+    )
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": text}))
+
+    assert "saved 4 value" in prose(reply).lower()
+    model = json_store.load_analysis(session_id).data_model
+    owners = {risk.title: risk.mitigation_owner for risk in model.risks}
+    assert owners["Key engineer attrition in target company"] == "Marco Rossi"
+    assert owners["ERP cutover slips past Q3"] == "Marco Russo"
+    assert owners["Customer churn during rebranding"] == "Marco Rossi"
+    decision = next(d for d in model.decisions
+                    if d.title == "rebranding budget overrun of 40k EUR approved.")
+    assert decision.decision_deadline == date(2026, 8, 8)
+
+
+def test_mixed_decision_synergy_and_project_dates_are_all_applied(
+        client, sample_files):
+    """One recognised finding must not hide the other supplied values.
+
+    This exact user message mixes two entity fields with a project field.  The
+    old embedded parser recognised the decision deadline, selected the batch
+    route, and then ignored both values it did not have dedicated patterns for.
+    """
+    from datetime import date
+
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "steerco_meeting_notes.docx",
+                                 "synergy_tracker.xlsx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a PowerPoint PMO status report"})
+
+    text = (
+        "Decision 'rebranding budget overrun of 40k EUR approved.' has "
+        "deadline 01-09-2026  Synergy 'Real estate footprint reduction' has "
+        "realization date 10-09-2026  No reporting date is 04.08.2026"
+    )
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": text}))
+
+    written = prose(reply).lower()
+    assert "saved 3 value" in written
+    assert "no unresolved data-quality problems remain" in written
+
+    analysis = json_store.load_analysis(session_id)
+    decision = next(item for item in analysis.data_model.decisions
+                    if item.title ==
+                    "rebranding budget overrun of 40k EUR approved.")
+    synergy = next(item for item in analysis.data_model.synergies
+                   if item.title == "Real estate footprint reduction")
+    assert decision.decision_deadline == date(2026, 9, 1)
+    assert synergy.planned_realization_date == date(2026, 9, 10)
+    assert analysis.data_model.project.reporting_date == date(2026, 8, 4)
+    assert json_store.load_project(session_id).reporting_date == date(2026, 8, 4)
+
+
+def test_shorthand_finding_answers_also_work_step_by_step(client, sample_files):
+    """A regeneration offer must not make the next supplied answer generic."""
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "give me a PowerPoint PMO status report"})
+
+    first = agent_reply(client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Risk 'Key engineer attrition in target company' assigned to "
+                "Marco Rossi",
+    }))
+    second = agent_reply(client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Risk 'ERP cutover slips past Q3' assigned to Marco Russo",
+    }))
+
+    assert "recorded mitigation owner" in prose(first).lower() \
+        or "saved 1 value" in prose(first).lower()
+    assert "recorded mitigation owner" in prose(second).lower() \
+        or "saved 1 value" in prose(second).lower()
+    assert "i can answer from what the files hold" not in prose(second).lower()
+    model = json_store.load_analysis(session_id).data_model
+    owners = {risk.title: risk.mitigation_owner for risk in model.risks}
+    assert owners["Key engineer attrition in target company"] == "Marco Rossi"
+    assert owners["ERP cutover slips past Q3"] == "Marco Russo"
+
+
+def test_a_data_change_and_updated_pdf_are_completed_in_the_same_turn(
+        client, sample_files):
+    """An edit plus an export is one request, not a new generic report brief."""
+    from app.deliverable import session as session_plan
+    from app.models.pmi import Status
+    from app.storage import json_store
+
+    chat_id = _chat_with_samples(client, sample_files,
+                                 "integration_tracker.xlsx",
+                                 "milestone_tracker.csv",
+                                 "portal_dashboard_export.html")
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    original_request = (
+        "Create a PowerPoint PMO Status Report for the Integration Management Office. "
+        "Include slides on Overall Progress, Workstream Status, Milestones, "
+        "Dependencies, Risks & Issues, Decision Log, and Next Steps."
+    )
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": original_request})
+
+    reply = agent_reply(client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "change status of Day 1 readiness: 92% to in_progress and "
+                "give me back updated pdf",
+    }))
+
+    assert actions(reply, "open_preview"), \
+        "the changed data and PDF layout must be reviewed before generation"
+    generated = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "generate now"}))
+    pdf_artifact = next(item for item in artifacts(generated)
+                        if item["filename"].endswith(".pdf"))
+    written = prose(reply).lower()
+    assert "warning" in written
+    assert "92%" in written and "status" in written
+    assert "please provide the mitigation owner" not in written
+
+    model = json_store.load_analysis(session_id).data_model
+    milestone = next(m for m in model.milestones
+                     if m.name.casefold() == "day 1 readiness: 92%")
+    assert milestone.status == Status.IN_PROGRESS
+
+    refreshed = session_plan.load(session_id)
+    assert refreshed.request_text == original_request
+    assert {"Overall Progress", "Workstream Status", "Milestones",
+            "Dependencies", "Risks & Issues", "Decision Log", "Next Steps"} \
+        <= set(refreshed.covered_sections)
+
+    import fitz
+
+    downloaded = client.get(pdf_artifact["download_url"])
+    assert downloaded.status_code == 200
+    with fitz.open(stream=downloaded.content, filetype="pdf") as pdf:
+        pdf_text = " ".join(" ".join(page.get_text().split()) for page in pdf)
+    assert "Day 1 readiness: 92%" in pdf_text
+    assert "in_progress" in pdf_text
+
+
 def test_editing_a_card_saves_the_users_text_and_survives_a_replan(
         client, sample_files):
     """§ editable prose. A card's narrative is the user's to rewrite, and the
@@ -612,7 +819,7 @@ def test_a_requested_structure_drives_the_order_in_every_format(client, sample_f
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
 
     client.post(f"/api/chats/{chat_id}/messages", json={
-        "text": "Create a status report for the steering committee with the "
+        "text": "Create a PowerPoint status report for the steering committee with the "
                 "following sections: 1. Risks 2. Budget 3. Milestones",
     })
 
@@ -646,6 +853,43 @@ def _topic_order(deliverable, *topics) -> list:
             for topic in topics]
 
 
+def test_a_chro_revision_replaces_the_default_outline_with_requested_topics(
+        client, sample_files):
+    """Regression for a user listing title-cased sections without commas."""
+    from app.agent import knowledge
+    from app.deliverable import session as session_plan
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages", json={
+        "text": "Create an HTML status report for the CHRO",
+    })
+
+    requested = [
+        "Retention", "Works Council", "Organization Design", "Talent Risks",
+        "Compensation", "Critical Milestones", "Recommendations",
+    ]
+    reply = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": (
+            "no I need this report CHRO report. Focus on Human Capital. Include "
+            "Retention Works Council Organization Design Talent Risks "
+            "Compensation Critical Milestones Recommendations"
+        )},
+    ))
+
+    assert actions(reply, "open_preview")
+    reply_text = prose(reply)
+    assert all(title in reply_text for title in requested), reply_text
+    deliverable = session_plan.load(session_id)
+    assert deliverable.requested_sections == requested
+    assert set(deliverable.covered_sections) >= set(requested)
+    assert _topic_order(deliverable, *requested) == sorted(
+        _topic_order(deliverable, *requested))
+    assert [section["title"] for section in
+            knowledge.load(session_id).structure["sections"]] == requested
+
+
 def test_a_structure_survives_a_later_turn_that_does_not_repeat_it(
         client, sample_files):
     """§17. "Now make it a Word document" names no sections, and must not have
@@ -659,7 +903,7 @@ def test_a_structure_survives_a_later_turn_that_does_not_repeat_it(
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
 
     client.post(f"/api/chats/{chat_id}/messages", json={
-        "text": "Create a status report for the steering committee with the "
+        "text": "Create a PowerPoint status report for the steering committee with the "
                 "following sections: 1. Risks 2. Budget 3. Milestones",
     })
     first = session_plan.load(session_id)
@@ -931,6 +1175,13 @@ def test_an_obvious_audience_is_never_asked_about():
     assert _match_audience("create an IT integration presentation for the CIO") \
         is Audience.EXECUTIVE
     assert _match_audience("chief information officer") is Audience.EXECUTIVE
+    assert _match_audience("CHRO") is Audience.EXECUTIVE
+    assert _match_audience("Chief HR Officer") is Audience.EXECUTIVE
+    assert _match_audience("Chief People and Culture Officer") is Audience.EXECUTIVE
+    assert _match_audience("Chief Financial Officer") is Audience.FINANCE
+    assert _match_audience("Finance Director") is Audience.FINANCE
+    assert _match_audience("Senior Program Manager") is Audience.PMO
+    assert _match_audience("HR Business Partner") is Audience.WORKSTREAM
     assert _match_audience("the imo needs this") is Audience.PMO
     # "workstream" used to be filed under PMO, so every workstream request
     # produced an IMO document.
@@ -948,6 +1199,78 @@ def test_cio_is_accepted_as_a_standalone_audience_answer():
     assert turn.intent == "set_audience"
     assert turn.audience is Audience.EXECUTIVE
     assert _audience_label("CIO") == "CIO"
+
+
+def test_chro_titles_are_accepted_as_standalone_audience_answers():
+    """Free-text audience answers may be acronyms or expanded job titles."""
+    from app.agent.conversation import _audience_label, _classify_by_keyword
+    from app.models.pmi import Audience
+
+    for label in ("CHRO", "Chief HR Officer", "Chief Human Resources Officer"):
+        turn = _classify_by_keyword(label)
+        assert turn.intent == "set_audience"
+        assert turn.audience is Audience.EXECUTIVE
+        assert _audience_label(label) == label
+
+    assert _audience_label("Senior Vice President of Human Resources") == \
+        "Senior Vice President of Human Resources"
+    assert _audience_label(
+        "Create a report for the Chief Human Resources Officer"
+    ) == "Chief Human Resources Officer"
+
+
+def test_chro_answer_continues_past_the_audience_question(client, sample_files):
+    """Regression for the repeated audience card shown after entering CHRO."""
+    from app.deliverable import session as session_plan
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+
+    format_reply = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "build me a report"},
+    ).json()["messages"][-1]
+    assert actions(format_reply, "choose_format")
+
+    audience_reply = client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "PowerPoint"}
+    ).json()["messages"][-1]
+    assert actions(audience_reply, "choose_audience")
+
+    reply = client.post(
+        f"/api/chats/{chat_id}/messages", json={"text": "CHRO"}
+    ).json()["messages"][-1]
+
+    assert not actions(reply, "choose_audience")
+    assert actions(reply, "open_preview")
+    deliverable = session_plan.load(session_id)
+    assert deliverable.audience_label == "CHRO"
+    assert "build me a report" in deliverable.request_text
+
+
+def test_a_new_role_is_accepted_instead_of_repeating_the_question(
+        client, sample_files):
+    """The free-text control is not a disguised four-value dropdown."""
+    from app.deliverable import session as session_plan
+    from app.storage import json_store
+    from app.models.pmi import Audience
+
+    chat_id = _chat_with_samples(client, sample_files)
+    session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "build me a report"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": "PowerPoint"})
+
+    reply = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "Quality Assurance Partner"},
+    ).json()["messages"][-1]
+
+    assert not actions(reply, "choose_audience")
+    assert actions(reply, "open_preview")
+    deliverable = session_plan.load(session_id)
+    assert json_store.load_analysis(session_id).audience is Audience.WORKSTREAM
+    assert deliverable.audience_label == "Quality Assurance Partner"
 
 
 def test_cio_in_the_first_prompt_does_not_trigger_an_audience_question(
@@ -986,9 +1309,14 @@ def test_the_users_own_words_title_the_report(client, sample_files):
     chat_id = _chat_with_samples(client, sample_files)
     session_id = client.get(f"/api/chats/{chat_id}").json()["chat"]["session_id"]
 
-    # The agent asks who it is for, openly rather than as a closed list…
+    # Format is confirmed first, then the agent asks who it is for openly
+    # rather than as a closed list.
+    format_asked = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "build me a report"}).json()["messages"][-1]
+    assert actions(format_asked, "choose_format")
     asked = client.post(f"/api/chats/{chat_id}/messages",
-                        json={"text": "build me a report"}).json()["messages"][-1]
+                        json={"text": "PowerPoint"}).json()["messages"][-1]
     chosen = actions(asked, "choose_audience")
     assert chosen and chosen[0]["free_text"] is True
 
@@ -1009,6 +1337,12 @@ def test_an_edit_instruction_is_read_as_a_revision_not_a_new_report():
     assert _classify_by_keyword("put risks first").intent == "revise_content"
     assert _classify_by_keyword(
         "instead of Employee Risks I would like to have Employee Budget"
+    ).intent == "revise_content"
+    assert _classify_by_keyword(
+        "show all 26 of 26 rows in Data quality and limitations"
+    ).intent == "revise_content"
+    assert _classify_by_keyword(
+        "show all rows in Data quality and limitations"
     ).intent == "revise_content"
     assert _classify_by_keyword(
         "why does the HTML report show UNKNOWN here?"
@@ -1086,7 +1420,7 @@ def test_a_project_chat_keeps_its_draft_and_accepts_a_rename(client, sample_file
 
     drafted = agent_reply(client.post(
         f"/api/chats/{chat_id}/messages",
-        json={"text": "Create a SteerCo status report"},
+        json={"text": "Create a PowerPoint SteerCo status report"},
     ))
     assert actions(drafted, "open_preview")
     assert session_plan.load(session_id) is not None
@@ -1208,8 +1542,13 @@ def test_a_generate_reply_never_claims_work_it_did_not_do(client, loaded):
     client.post(f"/api/chats/{chat_id}/messages",
                 json={"text": "give me a SteerCo deck"})
 
+    changed_format = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "generate it as word"}).json()["messages"][-1]
+    assert actions(changed_format, "open_preview")
+    assert not artifacts(changed_format), "a changed format needs fresh approval"
     reply = client.post(f"/api/chats/{chat_id}/messages",
-                        json={"text": "generate it as word"}).json()["messages"][-1]
+                        json={"text": "generate now"}).json()["messages"][-1]
 
     outputs = [a["filename"] for a in artifacts(reply)]
     assert any(name.endswith(".docx") for name in outputs), outputs
@@ -1224,8 +1563,12 @@ def test_generating_over_open_conflicts_says_so_in_the_reply(client, loaded):
     client.post(f"/api/chats/{chat_id}/messages",
                 json={"text": "give me a SteerCo deck"})
 
+    changed_format = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "generate it as pdf"}).json()["messages"][-1]
+    assert actions(changed_format, "open_preview")
     reply = client.post(f"/api/chats/{chat_id}/messages",
-                        json={"text": "generate it as pdf"}).json()["messages"][-1]
+                        json={"text": "generate now"}).json()["messages"][-1]
 
     assert "unresolved critical conflict" in prose(reply)
 
@@ -1458,7 +1801,7 @@ def test_no_phrasing_of_a_first_request_dead_ends(client, loaded, message):
 
     offered = [a["type"] for a in actions(reply)]
     assert (actions(reply, "open_preview") or actions(reply, "choose_audience")
-            or artifacts(reply)), \
+            or actions(reply, "choose_format") or artifacts(reply)), \
         f"{message!r} dead-ended with {offered} / {prose(reply)[:120]!r}"
     assert "haven't read" not in prose(reply), \
         f"{message!r} still tells the user to do something they cannot do"
@@ -1557,7 +1900,8 @@ def test_a_chat_drafted_report_has_an_executive_summary(client, loaded):
     # and it survives the section ids becoming the planner's to choose.
     sections = draft["blocks"]
     assert sections, "the draft has no sections at all"
-    opening = sections[0]
+    opening = next(section for section in sections
+                   if not section.get("is_divider"))
     kinds = [b["kind"] for b in opening["blocks"]]
     assert kinds, f"the opening section “{opening['headline']}” is empty"
     assert not opening["empty_explanation"], opening["empty_explanation"]

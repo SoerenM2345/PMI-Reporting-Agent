@@ -78,9 +78,11 @@ def render(deliverable: Deliverable, context: GenerationContext,
     _cover(document, deliverable, context, brand)
     _contents(document, deliverable, brand)
 
-    for page in deliverable.pages:
-        if page.purpose == "cover":
-            continue
+    planned_pages = [page for page in deliverable.pages
+                     if page.purpose != "cover"]
+    for index, page in enumerate(planned_pages):
+        if index:
+            document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         boxes.extend(_section(document, page, deliverable, context, brand,
                               assets, figure_number))
 
@@ -244,10 +246,6 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
     if page.source_note:
         _para(document, page.source_note, styles.SOURCE_NOTE)
 
-    # A page break between top-level sections, so a section starts where the
-    # reader expects it rather than four lines down the previous page.
-    if page is not deliverable.pages[-1]:
-        document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
     return boxes
 
 
@@ -303,7 +301,7 @@ def _table(document, spec, brand: BrandSystem) -> None:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         styles.shade_cell(cell, brand.color("primary"))
 
-    for row_index, row in enumerate(spec.rows):
+    for row_index, row in enumerate(spec.displayed_rows):
         cells = table.add_row()
         styles.cannot_split(cells)
         emphasised = row_index in spec.emphasis_rows
@@ -327,8 +325,8 @@ def _table(document, spec, brand: BrandSystem) -> None:
 
     if spec.caption:
         _para(document, spec.caption, styles.CAPTION)
-    if spec.is_truncated:
-        _para(document, spec.truncation_note(), styles.SOURCE_NOTE)
+    if spec.has_note:
+        _para(document, spec.note(), styles.SOURCE_NOTE)
 
 
 def _emphasis_colour(emphasis: str, brand: BrandSystem) -> Optional[str]:

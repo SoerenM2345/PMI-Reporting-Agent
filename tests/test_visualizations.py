@@ -605,6 +605,8 @@ def test_a_truncated_table_says_how_much_it_is_showing(evidence):
     spec = tables.build_table("t6", list(evidence.of_kind("budget")),
                               row_limit=12)
     assert spec.is_truncated
+    assert len(spec.rows) > 12, "the hidden rows must survive a later revision"
+    assert len(spec.displayed_rows) == 12
     assert "Showing 12 of" in spec.truncation_note()
     assert validator.validate_table(spec, evidence).ok
 

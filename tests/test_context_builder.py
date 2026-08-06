@@ -159,6 +159,30 @@ def test_sections_are_also_read_from_an_inline_list(model):
                                           "next steps"]
 
 
+def test_an_unpunctuated_chro_section_run_is_kept_verbatim(model):
+    request = (
+        "No, I need a CHRO report. Focus on Human Capital. Include Retention "
+        "Works Council Organization Design Talent Risks Compensation Critical "
+        "Milestones Recommendations"
+    )
+
+    context = build(model, request)
+
+    assert context.requested_sections == [
+        "Retention", "Works Council", "Organization Design", "Talent Risks",
+        "Compensation", "Critical Milestones", "Recommendations",
+    ]
+
+
+def test_an_ambiguous_include_sentence_is_not_invented_as_structure(model):
+    context = build(
+        model,
+        "Include a concise explanation of what changed and why it matters.",
+    )
+
+    assert context.requested_sections == []
+
+
 def test_slides_on_preserves_the_cfo_outline_verbatim(model):
     context = build(
         model,
@@ -276,6 +300,9 @@ def test_the_chat_summary_is_deterministic_and_needs_no_model(model):
 @pytest.mark.parametrize("request_text,expected", [
     ("Prepare a pack for the Steering Committee", "Steering Committee"),
     ("A one-pager for the CFO please", "CFO"),
+    ("Prepare a report for the CHRO", "CHRO"),
+    ("Prepare a report for the Chief Human Resources Officer", "Chief Human Resources Officer"),
+    ("Prepare a report for the HR Business Partner", "HR Business Partner"),
     ("Give the IMO a status update", None),
     ("board update on synergies", "board"),
 ])

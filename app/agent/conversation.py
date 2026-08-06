@@ -34,6 +34,7 @@ from app.agent import answers, knowledge, nl_updates
 from app.agent.replies import (
     ChatAnswer,
     ChooseAudienceAction,
+    ChooseFormatAction,
     LowConfidenceItem,
     OpenPreviewAction,
     ResolveConflictAction,
@@ -78,7 +79,7 @@ FORMAT_ALIASES = {"image": "chart", "images": "chart", "picture": "chart",
 
 #: Offered under every preview. One list, so the buttons and what the classifier
 #: accepts cannot drift.
-PREVIEW_FORMATS = ["powerpoint", "word", "pdf", "html", "excel", "chart"]
+PREVIEW_FORMATS = ["powerpoint", "pdf", "word", "html", "chart"]
 
 
 class TurnIntent(BaseModel):
@@ -90,7 +91,7 @@ class TurnIntent(BaseModel):
         description="Only when the message clearly names one. Never guess.",
     )
     output_format: Optional[str] = Field(
-        default=None, description="powerpoint | word | pdf | html | excel"
+        default=None, description="powerpoint | word | pdf | html | chart"
     )
 
 
@@ -181,6 +182,14 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
             "• Steering Presentation — Progress, Financial Impact, Open Decisions, Next Steps"
         )
 
+    # Format is the first report decision.  Resolve a previous explicit choice
+    # from durable workflow state; otherwise ask and stop before analysis or
+    # audience collection.  The transcript is not authoritative because it may
+    # be compacted, so the latest explicit choice is recorded separately.
+    text, format_answer = _format_gate(chat, text)
+    if format_answer is not None:
+        return format_answer
+
     uploaded = _uploaded_files(chat)
     if not uploaded:
         # A report request can arrive before its evidence. Keep the request as
@@ -206,6 +215,8 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
     # "regenerate?" prompt. `_handle_pending` returns an answer when it consumed
     # the turn, or None when the user issued an instruction that abandons it.
     pending = json_store.load_pending(chat.session_id)
+    if pending and pending.get("mode") == "awaiting_audience":
+        return _resume_with_audience(chat, pending, text, cancel=cancel)
     if pending and analysis is not None:
         handled = _handle_pending(chat, analysis, pending, text)
         if handled is not None:
@@ -265,7 +276,10 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
         applied = nl_updates.apply(analysis, text,
                                    focus=knowledge.load(chat.session_id).focus)
         if applied is not None:
-            return preamble.then(_after_update(chat, analysis, applied))
+            return preamble.then(_after_update(
+                chat, analysis, applied,
+                render_format=_requested_update_output(text, turn.output_format),
+            ))
 
     # The agent's own quality findings are often copied, filled in and pasted
     # back as one paragraph. Apply every explicit value rather than treating the
@@ -278,6 +292,7 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
                 chat, analysis, result,
                 refresh_report=_requests_report_refresh(text),
                 show_remaining=True,
+                render_format=_requested_update_output(text, turn.output_format),
             ))
 
     # A pasted list of items — "deliver X — Marco Rossi · due — 01-11-2026" per
@@ -288,7 +303,10 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
         result = nl_updates.apply_bulk(
             analysis, text, focus=knowledge.load(chat.session_id).focus)
         if result is not None and result.applied:
-            return preamble.then(_after_bulk(chat, analysis, result))
+            return preamble.then(_after_bulk(
+                chat, analysis, result,
+                render_format=_requested_update_output(text, turn.output_format),
+            ))
 
     if analysis is None:
         return preamble.then(say(
@@ -305,6 +323,21 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
         return preamble.then(
             _render(chat, analysis, turn.output_format, cancel=cancel))
 
+    if turn.intent == "revise_content" and _requires_replan_revision(text):
+        from app.deliverable import workflow
+
+        existing = session_plan.load(chat.session_id)
+        selected = (workflow.normalize_format(existing.primary_format)
+                    if existing else workflow.load(chat.session_id).selected_format)
+        combined = (((existing.request_text if existing else "")
+                     or analysis.request_text or "")
+                    + "\nRevision instruction: " + text)
+        return preamble.then(_plan(
+            chat, analysis,
+            TurnIntent(intent="request_report", audience=analysis.audience,
+                       output_format=selected),
+            combined, collect_gaps=False, cancel=cancel,
+        ))
     if turn.intent == "revise_content" and _remember_structure(chat, text):
         # A structural edit is a re-plan, not a cosmetic page operation.  The
         # latter can drop an existing page but cannot reliably add a requested
@@ -327,6 +360,17 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
     return preamble.then(_answer(chat, analysis, text))
 
 
+def _requires_replan_revision(text: str) -> bool:
+    """Edits that affect the whole brief/template rather than one page op."""
+    lowered = (text or "").casefold()
+    return bool(re.search(
+        r"\b(?:layout|template|theme|master|design|table\s+from|exact\s+text|"
+        r"verbatim|translate|language|copywriting|tone|more\s+concise|"
+        r"more\s+detailed|more\s+diplomatic|more\s+direct)\b",
+        lowered,
+    ))
+
+
 def _uploaded_files(chat: Chat) -> list[str]:
     """The file names currently in the session, however `meta` stored them."""
     meta = json_store.load_meta(chat.session_id) or {}
@@ -335,6 +379,84 @@ def _uploaded_files(chat: Chat) -> list[str]:
         for f in meta.get("files", [])
     ]
     return sorted(name for name in names if name)
+
+
+def _format_gate(chat: Chat, text: str) -> tuple[str, Optional[ChatAnswer]]:
+    from app.deliverable import workflow
+
+    pending = json_store.load_pending(chat.session_id)
+    if pending and pending.get("mode") == "awaiting_output_format":
+        selected = workflow.normalize_format(text)
+        if selected is None:
+            return text, _ask_format()
+        original = pending.get("request_text", "")
+        json_store.clear_pending(chat.session_id)
+        workflow.update(
+            chat.session_id, selected_format=selected,
+            request_text=original, state="awaiting_preview_revision",
+        )
+        label = workflow.FORMAT_LABELS[selected]
+        return f"{original}\nOutput format: {label}", None
+
+    turn = _classify(text, chat)
+    declared = _declared_output_format(text)
+    if declared is not None:
+        workflow.update(chat.session_id, selected_format=declared)
+    if turn.intent not in ("request_report", "render"):
+        return text, None
+
+    selected = (workflow.normalize_format(turn.output_format)
+                or workflow.load(chat.session_id).selected_format)
+    if selected is None:
+        json_store.save_pending(chat.session_id, {
+            "mode": "awaiting_output_format", "request_text": text,
+        })
+        workflow.update(
+            chat.session_id, request_text=text, state="awaiting_output_format",
+        )
+        return text, _ask_format()
+
+    workflow.update(
+        chat.session_id, selected_format=selected, request_text=text,
+        state="awaiting_preview_revision",
+    )
+    if turn.output_format:
+        return text, None
+    return f"{text}\nOutput format: {workflow.FORMAT_LABELS[selected]}", None
+
+
+def _ask_format() -> ChatAnswer:
+    return ChatAnswer(
+        content=("Which output format would you like: PowerPoint, PDF, Word, "
+                 "HTML, or chart?"),
+        actions=[ChooseFormatAction()],
+    )
+
+
+def _approval_question(selected_format: Optional[str]) -> str:
+    from app.deliverable import workflow
+
+    label = workflow.FORMAT_LABELS.get(selected_format or "", "file")
+    return (f"Would you like me to generate the {label} now with this content, "
+            "or change the layout, text, titles, copywriting, language, or "
+            "anything else?")
+
+
+def _declared_output_format(text: str):
+    """An explicit format preference stated before the report request itself."""
+    from app.deliverable import workflow
+
+    standalone = workflow.normalize_format(text)
+    if standalone is not None:
+        return standalone
+    lowered = (text or "").casefold()
+    if not re.search(
+        r"\b(?:output\s+format|file\s+format|format\s+(?:is|should be)|"
+        r"i\s+(?:want|need|would like|prefer))\b",
+        lowered,
+    ):
+        return None
+    return workflow.normalize_format(_detect_output_format(lowered))
 
 
 def _analysis_covers(analysis, uploaded: list[str]) -> bool:
@@ -377,6 +499,13 @@ def _ensure_analysis(chat: Chat, text: str, turn: TurnIntent, prior=None):
 
     if needs_audience:
         # §4: extraction stopped because the audience could not be inferred.
+        # Keep the original brief: the next message is an answer to this
+        # question, not a replacement report request. Without this state, a
+        # perfectly valid free-text role was analysed as a brand-new request.
+        json_store.save_pending(chat.session_id, {
+            "mode": "awaiting_audience",
+            "request_text": request_text,
+        })
         return None, _ask_audience(
             "Before I read these — who is the report for? It changes what goes "
             "in it."
@@ -389,6 +518,43 @@ def _ensure_analysis(chat: Chat, text: str, turn: TurnIntent, prior=None):
         )
 
     return analysis, None
+
+
+def _resume_with_audience(chat: Chat, pending: dict, text: str, *, cancel=None):
+    """Accept a free-text answer and resume the original report request.
+
+    Named roles are not limited to a finite dropdown. Known titles resolve to
+    the corresponding report shape; a new specialist role uses the detailed
+    workstream shape. The exact title is retained for the report itself.
+    """
+    # A complete new instruction is not an answer to the old question. This is
+    # common when the user first states a format and then sends the whole report
+    # brief; let the newer request replace the pending one.
+    turn = _classify(text, chat)
+    if turn.intent in ("request_report", "render", "revise_content", "question"):
+        json_store.clear_pending(chat.session_id)
+        return _respond_turn(chat, text, cancel=cancel)
+
+    label = (text or "").strip().strip(".?!").strip()
+    if not label:
+        return _ask_audience("Who is the report for?")
+    if len(label) > 120:
+        return _ask_audience(
+            "Please give me the role or group name only — for example, CHRO, "
+            "Integration Director, or HR workstream leads."
+        )
+
+    audience = _match_audience(label)
+    if audience is None:
+        # This is an explicit answer to the audience question, so the reader is
+        # known even if their organisation uses a title we have never seen.
+        # A role-specific operational shape is the least assumptive fallback.
+        audience = Audience.WORKSTREAM
+
+    knowledge.save(knowledge.load(chat.session_id).set_audience(audience, label))
+    original = pending.get("request_text", "")
+    json_store.clear_pending(chat.session_id)
+    return _respond_turn(chat, original, cancel=cancel)
 
 
 # ------------------------------------------------------------------ actions
@@ -550,6 +716,24 @@ def _plan(chat: Chat, analysis, turn: TurnIntent, text: str,
          remember_structure: bool = True) -> ChatAnswer:
     """Draft the report. `respond` guarantees `analysis` is not None."""
     from app.generation import chat_writer
+    from app.deliverable import references, workflow
+
+    selected_format = (workflow.normalize_format(turn.output_format)
+                       or workflow.load(chat.session_id).selected_format)
+    if selected_format is None:
+        json_store.save_pending(chat.session_id, {
+            "mode": "awaiting_output_format", "request_text": text,
+        })
+        return _ask_format()
+
+    resolution = references.resolve(
+        chat.session_id, text, _uploaded_files(chat))
+    if resolution.issues:
+        json_store.save_pending(chat.session_id, {
+            "mode": "awaiting_reference", "request_text": text,
+            "format": selected_format,
+        })
+        return say("\n\n".join(resolution.issues))
 
     audience = turn.audience or analysis.audience
     if audience is None:
@@ -582,8 +766,23 @@ def _plan(chat: Chat, analysis, turn: TurnIntent, text: str,
         chat.session_id, analysis,
         request_text=text or analysis.request_text or "",
         audience=_audience_label(text) or analysis.audience_label or "",
+        fmt=workflow.planning_format(selected_format),
+        presentation_layout=selected_format == "powerpoint",
+        review_required=True,
+        source_use_constraints=resolution.constraints,
         cancel=cancel,
     )
+
+    workflow.update(
+        chat.session_id, selected_format=selected_format,
+        request_text=text, state="awaiting_generation_approval",
+        version=stored.version,
+    )
+    json_store.save_pending(chat.session_id, {
+        "mode": "awaiting_generation_approval",
+        "format": selected_format,
+        "version": stored.version,
+    })
 
     # What the draft says, in prose. The document itself is fetched on demand —
     # inlining it put a second copy of the whole report in the transcript, which
@@ -592,10 +791,14 @@ def _plan(chat: Chat, analysis, turn: TurnIntent, text: str,
     answer = answer.then(ChatAnswer(
         content=("I've drafted it — here's the argument.\n\n" + body if body
                  else "I've drafted it.")
-                + "\n\nTell me what to change, or say which format you want.",
+                + ("\n\nReview the complete preview below. "
+                   + _approval_question(selected_format)),
         actions=[OpenPreviewAction(session_id=chat.session_id,
                                    version=stored.version,
-                                   formats=PREVIEW_FORMATS)],
+                                   formats=PREVIEW_FORMATS,
+                                   selected_format=selected_format,
+                                   open_by_default=True,
+                                   approval_required=True)],
     ))
     for warning in _readable_warnings(stored.warnings)[:3]:
         answer = answer.then(say(f"*{warning}*"))
@@ -603,8 +806,8 @@ def _plan(chat: Chat, analysis, turn: TurnIntent, text: str,
     # Now that a draft exists (and the audience is settled), start filling the
     # gaps the files left behind — one question at a time, in chat. Skipped on a
     # regenerate, which is already the tail of a correction exchange.
-    if collect_gaps:
-        answer = answer.then(_maybe_start_gaps(chat, analysis))
+    # Missing-value collection remains available on request, but it must not
+    # replace the pending approval question immediately after a preview.
     return answer
 
 
@@ -690,6 +893,17 @@ def _revise(chat: Chat, analysis, text: str) -> ChatAnswer:
         )
 
     stored = dlv_store.save(result.deliverable)
+    from app.deliverable import workflow
+
+    selected = (workflow.normalize_format(stored.primary_format)
+                or workflow.load(chat.session_id).selected_format)
+    workflow.update(
+        chat.session_id, selected_format=selected,
+        state="awaiting_generation_approval", version=stored.version)
+    json_store.save_pending(chat.session_id, {
+        "mode": "awaiting_generation_approval", "format": selected,
+        "version": stored.version,
+    })
     refused = [r.reason for r in result.rejected]
     return ChatAnswer(
         content=("Done — " + "; ".join(result.applied) + "."
@@ -697,10 +911,14 @@ def _revise(chat: Chat, analysis, text: str) -> ChatAnswer:
                     + "\n".join(f"- {reason}" for reason in refused)
                     if refused else "")
                  + ("\n\n" + "\n".join(f"*{w}*" for w in warnings)
-                    if warnings else "")),
+                    if warnings else "")
+                 + "\n\n" + _approval_question(selected)),
         actions=[OpenPreviewAction(session_id=chat.session_id,
                                    version=stored.version,
-                                   formats=PREVIEW_FORMATS)],
+                                   formats=PREVIEW_FORMATS,
+                                   selected_format=selected,
+                                   open_by_default=True,
+                                   approval_required=True)],
     )
 
 
@@ -710,42 +928,62 @@ def _numeric_corpus(session_id: str, analysis) -> set[str]:
 
     context = builder.build_for_session(session_id, analysis.request_text or "",
                                         analysis=analysis)
-    return context.evidence.numeric_corpus()
+    corpus = context.evidence.numeric_corpus()
+    deliverable = session_plan.load(session_id)
+    if deliverable is not None:
+        from app.report import guard
+
+        for page in deliverable.pages:
+            if page.section_id == "source_reuse":
+                corpus |= guard.numbers_in(page.text_content())
+    return corpus
 
 
 def _render(chat: Chat, analysis, output_format: Optional[str],
             *, cancel=None) -> ChatAnswer:
     """Build the file. `respond` guarantees analysis exists and content is drafted."""
-    fmt = output_format or "powerpoint"
-    canonical = FORMAT_ALIASES.get(fmt.casefold(), fmt.casefold())
-    wants_presentation_layout = canonical in (
-        "powerpoint", "pptx", "deck", "slides", "presentation")
+    from app.deliverable import approval as approval_store, workflow
+
+    selected = (workflow.normalize_format(output_format)
+                or workflow.load(chat.session_id).selected_format)
+    if selected is None:
+        return _ask_format()
+    fmt = selected
+    wants_presentation_layout = selected == "powerpoint"
 
     deliverable = session_plan.load(chat.session_id)
     if deliverable is None:
         return say("Let me draft the report first — what do you need?")
 
-    preamble = ChatAnswer()
+    planned_format = workflow.normalize_format(deliverable.primary_format)
     layout_changed = deliverable.presentation_layout != wants_presentation_layout
-    if layout_changed or session_plan.is_stale(
-            deliverable, chat.session_id, analysis):
-        # Re-plan and carry on. Telling the user to ask again is the dead end
-        # this router exists to eliminate: they asked for a Word document, the
-        # draft was stale because of a correction *they* just made, and there is
-        # nothing for them to decide. Saying what changed is worth doing; making
-        # them type a second sentence to get it is not.
+    stale = session_plan.is_stale(deliverable, chat.session_id, analysis)
+    if planned_format != selected or layout_changed or stale:
+        # A format or data change may alter pagination, density, visuals and
+        # layout. Re-plan, show the complete new preview, and stop; approval of
+        # an older shape can never authorize the new one.
         reason = session_plan.stale_reason(deliverable, chat.session_id, analysis)
-        _check(cancel, "redoing the report")
-        deliverable = session_plan.plan(
-            chat.session_id, analysis,
-            request_text=deliverable.request_text or analysis.request_text or "",
-            audience=deliverable.audience_label or "",
-            presentation_layout=wants_presentation_layout,
-            cancel=cancel)
-        if not layout_changed:
-            preamble = say(
-                f"*{reason or 'The data changed, so I redid the draft.'}*"
-                f" I've redone it from the current data.")
+        request = deliverable.request_text or analysis.request_text or ""
+        request += f"\nOutput format: {workflow.FORMAT_LABELS[selected]}"
+        turn = TurnIntent(intent="request_report", audience=analysis.audience,
+                          output_format=selected)
+        preview = _plan(chat, analysis, turn, request, collect_gaps=False,
+                        cancel=cancel)
+        if stale and reason:
+            return say(f"*{reason} I rebuilt the preview for review.*").then(preview)
+        return preview
+
+    record = approval_store.current(
+        chat.session_id, deliverable, selected, analysis=analysis)
+    if record is None:
+        try:
+            record = approval_store.approve(
+                chat.session_id, deliverable.version, selected,
+                analysis=analysis)
+        except approval_store.ApprovalError as exc:
+            return ChatAnswer(content=str(exc), status="failed")
+
+    preamble = ChatAnswer()
 
     # Actually render it. Saying "generating…" and returning nothing would be a
     # reply that claims work it did not do — the one thing a status tool must
@@ -793,6 +1031,9 @@ def _render(chat: Chat, analysis, output_format: Optional[str],
                      + "\n".join(f"- {reason}" for reason in reasons)),
             status="failed"))
 
+    workflow.update(chat.session_id, state="generated",
+                    selected_format=selected, version=deliverable.version)
+    json_store.clear_pending(chat.session_id)
     return preamble.then(ChatAnswer(
         content=(f"Here is the {fmt}."
                  + (f" It carries {len(blocking)} unresolved critical "
@@ -835,11 +1076,7 @@ def _classify_by_keyword(text: str) -> TurnIntent:
 
     audience = _match_audience(lowered)
 
-    output_format = next(
-        (name for name, words in FORMATS.items()
-         if any(word in lowered for word in words)),
-        None,
-    )
+    output_format = _detect_output_format(lowered)
 
     # A report can be the *subject* of a question. "Why did you include Unknown
     # in the HTML report?" contains both an edit verb and a format, but the user
@@ -854,10 +1091,18 @@ def _classify_by_keyword(text: str) -> TurnIntent:
         return TurnIntent(intent="render", output_format=output_format,
                           audience=audience)
 
-    if re.search(r"\b(remove|drop|delete|exclude|omit|leave out|add|include|"
-                 r"move|reorder|shorten|rename|replace|instead of|"
-                 r"put .* first|show \d+)\b", lowered):
-        return TurnIntent(intent="revise_content", audience=audience)
+    reference_edit = re.search(
+        r"\b(?:use|reuse|copy|take|follow)\b.{0,60}\b(?:layout|template|"
+        r"theme|master|design|table|exact\s+text|verbatim|wording)\b",
+        lowered,
+    )
+    if reference_edit or re.search(r"\b(remove|drop|delete|exclude|omit|leave out|add|include|"
+                 r"move|reorder|shorten|rename|replace|rewrite|revise|change|"
+                 r"translate|language|layout|copywriting|tone|instead of|"
+                 r"put .* first|show\s+(?:me\s+)?(?:only\s+|all\s+)?\d+|"
+                 r"show\s+(?:me\s+)?all\s+(?:the\s+)?rows?)\b", lowered):
+        return TurnIntent(intent="revise_content", audience=audience,
+                          output_format=output_format)
 
     if re.search(r"\b(report|deck|presentation|status|summary|update|dashboard)\b",
                  lowered):
@@ -870,6 +1115,33 @@ def _classify_by_keyword(text: str) -> TurnIntent:
     return TurnIntent(intent="unclear")
 
 
+def _detect_output_format(lowered: str) -> Optional[str]:
+    """Match format words as words/phrases, never inside e.g. ``wording``."""
+    for name, words in FORMATS.items():
+        for word in words:
+            if re.search(rf"(?<!\w){re.escape(word)}(?!\w)", lowered):
+                return name
+    return None
+
+
+def _requested_review_format(text: str):
+    """A format answer/change, without reading ordinary nouns as commands.
+
+    "ERP chart of accounts" is task data, not a request to switch the report to
+    a chart. A bare "PDF" is a choice; a longer message only changes format when
+    it is itself classified as a report/render request.
+    """
+    from app.deliverable import workflow
+
+    selected = workflow.normalize_format(text)
+    if selected is not None:
+        return selected
+    turn = _classify_by_keyword(text)
+    if turn.intent in ("request_report", "render"):
+        return workflow.normalize_format(turn.output_format)
+    return None
+
+
 def _match_audience(lowered: str) -> Optional[Audience]:
     """One audience map, shared with the request parser.
 
@@ -878,13 +1150,9 @@ def _match_audience(lowered: str) -> Optional[Audience]:
     — the same prompt behaved differently depending on which entry point it hit.
     Reading the fallback hints here keeps the two in step (§9/§4).
     """
-    from app.llm.fallbacks import _AUDIENCE_HINTS
+    from app.llm.fallbacks import match_audience
 
-    lowered = (lowered or "").casefold()
-    for aud, keywords in _AUDIENCE_HINTS.items():
-        if any(re.search(rf"\b{re.escape(k)}\b", lowered) for k in keywords):
-            return aud
-    return None
+    return match_audience(lowered)
 
 
 # ------------------------------------------------------------- capabilities (§9)
@@ -919,7 +1187,7 @@ def _capabilities(analysis) -> ChatAnswer:
         "anything is generated.\n"
         "• Fill missing values one question at a time, and apply your corrections "
         "straight into the data.\n"
-        "• Generate PowerPoint, Word, PDF, HTML or Excel — for a Steering Committee "
+        "• Generate PowerPoint, Word, PDF, HTML or a standalone chart — for a Steering Committee "
         "(SteerCo), an IMO/PMO, Finance, or a single workstream.\n\n"
         "Try: “Create an Executive SteerCo deck”, “What are the gaps?”, "
         "“Day-1 legal close should be 02-06-2026”, or “generate it as Word”."
@@ -1048,6 +1316,49 @@ def _handle_pending(chat: Chat, analysis, pending: dict, text: str):
     mode = pending.get("mode")
     lowered = (text or "").strip().lower()
 
+    if mode == "awaiting_reference":
+        from app.deliverable import references, workflow
+
+        combined = (pending.get("request_text", "") + "\n" + text).strip()
+        resolution = references.resolve(
+            chat.session_id, combined, _uploaded_files(chat))
+        if resolution.issues:
+            return say("\n\n".join(resolution.issues))
+        json_store.clear_pending(chat.session_id)
+        selected = (workflow.normalize_format(pending.get("format"))
+                    or workflow.load(chat.session_id).selected_format)
+        return _plan(
+            chat, analysis,
+            TurnIntent(intent="request_report", audience=analysis.audience,
+                       output_format=selected),
+            combined, collect_gaps=False,
+        )
+
+    if mode == "awaiting_generation_approval":
+        from app.deliverable import workflow
+
+        selected = _requested_review_format(text)
+        current = (workflow.normalize_format(pending.get("format"))
+                   or workflow.load(chat.session_id).selected_format)
+        if selected and selected != current:
+            json_store.clear_pending(chat.session_id)
+            existing = session_plan.load(chat.session_id)
+            request = ((existing.request_text if existing else "")
+                       or analysis.request_text or "")
+            request += f"\nOutput format: {workflow.FORMAT_LABELS[selected]}"
+            return _plan(
+                chat, analysis,
+                TurnIntent(intent="request_report", audience=analysis.audience,
+                           output_format=selected),
+                request, collect_gaps=False,
+            )
+        explicit_generate = bool(re.match(
+            r"^(?:please\s+)?(?:generate|create|build|produce|export|render|"
+            r"go ahead|approved?)(?:\b|$)", lowered))
+        if lowered in _AFFIRM or explicit_generate:
+            return _render(chat, analysis, current)
+        return None
+
     if mode == "choose_presentation_mode":
         # Compatibility for sessions paused by the removed design question:
         # resume their requested export immediately with the light master.
@@ -1146,7 +1457,8 @@ def _handle_pending(chat: Chat, analysis, pending: dict, text: str):
 
 
 # ------------------------------------------------- value corrections (§6/§7)
-def _after_update(chat: Chat, analysis, applied) -> ChatAnswer:
+def _after_update(chat: Chat, analysis, applied, *,
+                  render_format: Optional[str] = None) -> ChatAnswer:
     """The reply for a natural-language data update.
 
     Says which field changed and offers the one next step that follows from it.
@@ -1175,8 +1487,13 @@ def _after_update(chat: Chat, analysis, applied) -> ChatAnswer:
         ))
         knowledge.save(kb)
 
-    answer = say(fmt_chat.reply(applied.message,
-                                body=_consequence_of(applied), action=""))
+    body = []
+    if applied.warning:
+        body.append(f"**Warning:** {applied.warning}")
+    body += _consequence_of(applied)
+    answer = say(fmt_chat.reply(applied.message, body=body, action=""))
+    if render_format:
+        return answer.then(_regenerate(chat, analysis, render_format))
     return answer.then(_offer_regeneration(chat))
 
 
@@ -1204,7 +1521,8 @@ def _consequence_of(applied) -> list[str]:
 
 def _after_bulk(chat: Chat, analysis, result, *,
                 refresh_report: bool = False,
-                show_remaining: bool = False) -> ChatAnswer:
+                show_remaining: bool = False,
+                render_format: Optional[str] = None) -> ChatAnswer:
     """The reply for a pasted, multi-item update.
 
     Says how many values landed and — just as importantly — names the lines it
@@ -1231,6 +1549,8 @@ def _after_bulk(chat: Chat, analysis, result, *,
     ))
     if not result.applied:
         return answer
+    if render_format:
+        return answer.then(_regenerate(chat, analysis, render_format))
     if refresh_report:
         return answer.then(_refresh_current_report(chat, analysis))
     return answer.then(_offer_regeneration(chat))
@@ -1279,6 +1599,20 @@ def _requests_report_refresh(text: str) -> bool:
         and any(word in lowered for word in action_words)
 
 
+def _requested_update_output(text: str,
+                             output_format: Optional[str]) -> Optional[str]:
+    """The format requested as the second half of a data-edit instruction."""
+    if not output_format:
+        return None
+    lowered = (text or "").casefold()
+    requested = re.search(
+        r"\b(updated?|redo|regenerate|rebuild|export|generate|render|produce|"
+        r"download|give\s+me|send\s+me|return)\b",
+        lowered,
+    )
+    return output_format if requested else None
+
+
 def _refresh_current_report(chat: Chat, analysis) -> ChatAnswer:
     """Re-plan immediately when the same message says to include the values."""
     existing = session_plan.load(chat.session_id)
@@ -1287,18 +1621,35 @@ def _refresh_current_report(chat: Chat, analysis) -> ChatAnswer:
             "I saved the values. Who is the report for? It changes what goes in it."
         )
 
+    from app.deliverable import workflow
+
+    selected = (workflow.normalize_format(existing.primary_format)
+                if existing else workflow.load(chat.session_id).selected_format)
+    if selected is None:
+        return _ask_format()
     stored = session_plan.plan(
         chat.session_id, analysis,
         request_text=((existing.request_text if existing else "")
                       or analysis.request_text or ""),
         audience=((existing.audience_label if existing else "")
                   or analysis.audience_label or ""),
+        fmt=workflow.planning_format(selected),
+        presentation_layout=selected == "powerpoint",
+        review_required=True,
     )
+    workflow.update(chat.session_id, selected_format=selected,
+                    state="awaiting_generation_approval", version=stored.version)
+    json_store.save_pending(chat.session_id, {
+        "mode": "awaiting_generation_approval", "format": selected,
+        "version": stored.version,
+    })
     return ChatAnswer(
         content="Updated the report with the values I could place.",
         actions=[OpenPreviewAction(
             session_id=chat.session_id, version=stored.version,
             formats=PREVIEW_FORMATS,
+            selected_format=selected, open_by_default=True,
+            approval_required=True,
         )],
     )
 
@@ -1330,22 +1681,20 @@ def _last_generated_format(session_id: str) -> Optional[str]:
 
 
 def _regenerate(chat: Chat, analysis, output_format: Optional[str]) -> ChatAnswer:
-    """Re-plan from the corrected model, then render — the "yes, rebuild it" path.
+    """Re-plan from corrected data and require review again before rendering."""
+    from app.deliverable import workflow
 
-    Re-planning refreshes the draft so it reflects the corrected value and clears
-    the staleness the correction introduced; rendering then produces the file in
-    whatever format was last generated (default PowerPoint)."""
     fresh = json_store.load_analysis(chat.session_id) or analysis
-    turn = TurnIntent(intent="request_report", audience=fresh.audience)
-    answer = _plan(chat, fresh, turn, fresh.request_text or "", collect_gaps=False)
-
-    # Only render when a draft actually came out of that — `_plan` returns the
-    # audience question instead when §4's gate is still open.
-    drafted = any(action.type == "open_preview" for action in answer.actions)
-    if drafted:
-        latest = json_store.load_analysis(chat.session_id) or fresh
-        answer = answer.then(_render(chat, latest, output_format or "powerpoint"))
-    return answer
+    existing = session_plan.load(chat.session_id)
+    request_text = ((existing.request_text if existing else "")
+                    or fresh.request_text or "")
+    selected = (workflow.normalize_format(output_format)
+                or workflow.load(chat.session_id).selected_format)
+    if selected is None:
+        return _ask_format()
+    turn = TurnIntent(intent="request_report", audience=fresh.audience,
+                      output_format=selected)
+    return _plan(chat, fresh, turn, request_text, collect_gaps=False)
 
 
 def _ask_audience(text: str) -> ChatAnswer:
@@ -1376,8 +1725,17 @@ def _audience_label(text: str) -> str:
     title page would be worse than the canonical label.
     """
     stripped = (text or "").strip().strip(".?!").strip()
-    if not stripped or len(stripped) > 40 or len(stripped.split()) > 5:
+    if not stripped or len(stripped) > 80 or len(stripped.split()) > 10:
         return ""
     if _match_audience(stripped.lower()) is None:
         return ""
+    if re.search(
+        r"\b(?:report|deck|presentation|pack|update|summary|dashboard|"
+        r"create|build|prepare|generate|make|draft)\b",
+        stripped,
+        re.I,
+    ):
+        from app.context.builder import requested_audience
+
+        return requested_audience(stripped) or ""
     return stripped

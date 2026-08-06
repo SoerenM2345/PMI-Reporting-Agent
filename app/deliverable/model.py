@@ -25,6 +25,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.report.content import Emphasis
+from app.context.schemas import SourceUseConstraint
 from app.visualizations.specs import ChartSpec, DiagramSpec, TableSpec
 
 log = logging.getLogger("pmi.deliverable")
@@ -208,6 +209,10 @@ class Deliverable(BaseModel):
     primary_format: str = "pptx"
     audience_label: str = ""
     presentation_layout: bool = False
+    #: True for user-facing chat drafts.  Legacy/programmatic planning may keep
+    #: this false, but a reviewed draft cannot be rendered until its exact
+    #: version and format have been approved.
+    review_required: bool = False
     governing_message: str = ""
     executive_takeaway: str = ""
 
@@ -225,6 +230,18 @@ class Deliverable(BaseModel):
     #: against a request nobody made, and reports it stale the instant it is
     #: saved. A genuinely new ask arrives through `plan()`, not through a check.
     request_text: str = ""
+
+    #: The audience value in the context when the request fingerprint was made.
+    #: This is deliberately separate from ``audience_label``: planning may turn
+    #: an inferred reader into polished display copy (for example, "CHRO" into
+    #: "Steering Committee"). Reusing that editorial label as request input
+    #: makes a draft appear stale the instant it is saved.
+    planning_audience: Optional[str] = None
+
+    #: Uploaded files the user explicitly asked this output to reuse.  The
+    #: extracted content lives in normal elements/specs; this list records the
+    #: instruction, its source locator and checksum for preview and staleness.
+    source_use_constraints: list[SourceUseConstraint] = Field(default_factory=list)
 
     #: Pages a revision removed. Kept rather than deleted so "put the
     #: dependencies slide back" is a one-word instruction and not a re-plan, and

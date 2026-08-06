@@ -225,6 +225,38 @@ def test_resolving_a_conflict_stales_the_pages_that_cited_the_figure(model):
     assert "risks" in fp.stale_pages(deliverable, later)
 
 
+def test_a_draft_planned_before_references_were_fingerprinted_is_not_stale(model):
+    """An unrecorded reference digest is unknown, not changed.
+
+    `compute` hashes the empty constraint list to a real value, so a stored
+    empty digest can only mean the draft predates the field. Comparing the two
+    marked 116 of the sample sessions permanently stale and disabled Generate
+    with no way back — while blaming "a source file explicitly reused by this
+    report" on reports that reuse no files at all.
+    """
+    context = context_for(model)
+    stored = fp.compute(context)
+    assert stored.reference_digest, "compute must never produce an empty digest"
+    stored.reference_digest = ""              # a draft from before the field
+    deliverable = a_deliverable(fingerprint=stored.model_dump())
+
+    assert not fp.is_stale(deliverable, fp.compute(context))
+    assert fp.stale_reason(deliverable, fp.compute(context)) == ""
+
+
+def test_a_reference_that_really_changed_is_still_caught(model):
+    """The tolerance above is for absence only; two known digests still differ."""
+    context = context_for(model)
+    stored = fp.compute(context)
+    deliverable = a_deliverable(fingerprint=stored.model_dump())
+
+    later = fp.compute(context)
+    later.reference_digest = "0123456789abcdef"
+    assert fp.is_stale(deliverable, later)
+    assert "source file" in fp.stale_reason(deliverable, later)
+    assert fp.stale_pages(deliverable, later) == []
+
+
 def test_a_deliverable_with_no_fingerprint_is_stale(model):
     assert fp.is_stale(a_deliverable(), fp.compute(context_for(model)))
     assert "predates" in fp.stale_reason(a_deliverable(),

@@ -68,6 +68,34 @@ def test_every_format_produces_a_file_that_opens(content, tmp_path):
     assert html.startswith("<!doctype html>") and html.rstrip().endswith("</html>")
 
 
+def test_word_and_pdf_start_every_chapter_on_a_new_page(content, tmp_path):
+    """The compatibility renderers keep the title page and chapters distinct."""
+    from docx import Document
+    import fitz
+
+    chapters = content.narrative()
+
+    word = Document(str(docx_render.render(content, tmp_path)))
+    for chapter in chapters:
+        index = next(i for i, paragraph in enumerate(word.paragraphs)
+                     if paragraph.text == chapter.headline)
+        assert index > 0
+        assert any(node.tag.endswith("}br") and
+                   node.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type") == "page"
+                   for node in word.paragraphs[index - 1]._p.iter())
+
+    with fitz.open(str(pdf_render.render(content, tmp_path))) as pdf:
+        starts = []
+        for chapter in chapters:
+            wanted = "".join(ch for ch in chapter.headline if ch.isalnum())[:28]
+            pages = [index for index, page in enumerate(pdf)
+                     if wanted in "".join(ch for ch in page.get_text()
+                                           if ch.isalnum())]
+            assert pages
+            starts.append(pages[-1])
+        assert len(set(starts)) == len(chapters)
+
+
 # ============================================ they say what the preview said
 @pytest.mark.parametrize("fmt", ["word", "pdf", "html"])
 def test_each_format_states_what_the_user_approved(content, tmp_path, fmt):

@@ -96,6 +96,15 @@ class GenerateRequest(BaseModel):
     #: request asked for. Re-rendering is cheap: the content is already planned,
     #: so no LLM call and no extraction happens, and the wording cannot change.
     format: Optional[str] = None
+    #: Required for user-facing reviewed drafts. It binds generation to the
+    #: exact version and format the user approved.
+    approval_id: Optional[str] = None
+    version: Optional[int] = None
+
+
+class ApproveContentRequest(BaseModel):
+    version: int
+    format: str
 
 
 # ================================================================== sessions
@@ -295,13 +304,36 @@ def generate(req: GenerateRequest) -> dict:
         # The analysis moved after this was planned — almost always because a
         # conflict was resolved. Rendering it would state the figure the user
         # has since corrected, so it is discarded rather than trusted.
+        if approved.review_required:
+            raise HTTPException(status_code=409, detail={
+                "error": "stale_content",
+                "message": "The source data changed. Review and approve a fresh preview first.",
+            })
         log.info("stored content for %s is stale; re-planning", req.session_id)
         approved = None
 
+    if approved is not None and approved.review_required:
+        from app.deliverable import approval as approval_store, workflow
+
+        requested_format = (workflow.normalize_format(req.format)
+                            or workflow.normalize_format(approved.primary_format))
+        record = approval_store.current(
+            req.session_id, approved, requested_format or "",
+            analysis=analysis, approval_id=req.approval_id)
+        if (record is None or req.version != approved.version):
+            raise HTTPException(status_code=409, detail={
+                "error": "approval_required",
+                "message": "Review and explicitly approve the current preview before generation.",
+                "version": approved.version,
+                "format": requested_format,
+            })
+
+    selected_output = req.format or (approved.primary_format if approved else None) \
+        or analysis.output_type
     state: AgentState = {
         "session_id": req.session_id,
         "request_text": analysis.request_text,
-        "output_type": req.format or analysis.output_type,
+        "output_type": selected_output,
         "topic": analysis.topic,
         "audience": analysis.audience,
         "data_model": analysis.data_model,
@@ -327,7 +359,7 @@ def generate(req: GenerateRequest) -> dict:
         "outputs": outputs,
         "summary": result.get("summary_bullets", []),
         "audience": _audience_str(analysis.audience),
-        "output_type": analysis.output_type,
+        "output_type": selected_output,
         "generated_with_unresolved_conflicts": [
             c.conflict_id for c in blocking
         ] if blocking else [],
@@ -350,7 +382,36 @@ def _content_payload(deliverable, analysis, *, stale: bool = False,
     """
     from app.deliverable import preview
 
-    return preview.payload(deliverable, stale=stale, stale_reason=reason)
+    from app.deliverable import approval as approval_store
+
+    conflicts = [item.model_dump(mode="json")
+                 for item in analysis.data_model.unresolved_conflicts()
+                 if item.critical]
+    body = preview.payload(
+        deliverable, stale=stale, stale_reason=reason,
+        source_files=list(analysis.data_model.source_files),
+        conflicts=conflicts,
+    )
+    if deliverable.session_id:
+        body["approval"] = approval_store.describe(
+            deliverable.session_id, deliverable, analysis=analysis)
+    return body
+
+
+@app.post("/api/content/{session_id}/approve")
+def approve_content(session_id: str, req: ApproveContentRequest) -> dict:
+    """Approve one exact preview version and format for generation."""
+    from app.deliverable import approval as approval_store
+
+    analysis = _analysis_or_404(session_id)
+    try:
+        record = approval_store.approve(
+            session_id, req.version, req.format, analysis=analysis)
+    except approval_store.ApprovalError as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": exc.code, "message": str(exc),
+        }) from exc
+    return record.model_dump(mode="json")
 
 
 def _evidence_corpus(session_id: str, analysis) -> set[str]:
@@ -359,7 +420,16 @@ def _evidence_corpus(session_id: str, analysis) -> set[str]:
 
     context = builder.build_for_session(session_id, analysis.request_text or "",
                                         analysis=analysis)
-    return context.evidence.numeric_corpus()
+    corpus = context.evidence.numeric_corpus()
+    from app.deliverable import session as session_plan
+    from app.report import guard
+
+    deliverable = session_plan.load(session_id)
+    if deliverable is not None:
+        for page in deliverable.pages:
+            if page.section_id == "source_reuse":
+                corpus |= guard.numbers_in(page.text_content())
+    return corpus
 
 
 @app.post("/api/content/{session_id}")
@@ -368,7 +438,17 @@ def plan_content_route(session_id: str) -> dict:
     from app.deliverable import session as session_plan
 
     analysis = _analysis_or_404(session_id)
-    stored = session_plan.plan(session_id, analysis)
+    existing = session_plan.load(session_id)
+    stored = session_plan.plan(
+        session_id, analysis,
+        request_text=(existing.request_text if existing else ""),
+        audience=(existing.audience_label if existing else ""),
+        fmt=(existing.primary_format if existing else None),
+        presentation_layout=(existing.presentation_layout if existing else False),
+        review_required=(existing.review_required if existing else False),
+        source_use_constraints=(existing.source_use_constraints
+                                if existing else None),
+    )
     return _content_payload(stored, analysis)
 
 
@@ -477,11 +557,13 @@ class PatchProjectRequest(BaseModel):
     name: Optional[str] = None
     icon: Optional[str] = None
     knowledge: Optional[str] = None
+    pinned: Optional[bool] = None
 
 
 class PatchChatRequest(BaseModel):
     title: Optional[str] = None
     archived: Optional[bool] = None
+    pinned: Optional[bool] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     #: Filing is also an import into project context. Explicit null removes the
@@ -548,6 +630,7 @@ def patch_project(project_id: str, req: PatchProjectRequest) -> dict:
     _project_or_404(project_id)
     project = chat_store.update_project(
         project_id, name=req.name, icon=req.icon, knowledge=req.knowledge,
+        pinned=req.pinned,
     )
     return {"project": project.model_dump()}
 
@@ -816,6 +899,12 @@ def list_chats(include_archived: bool = False) -> dict:
                       for c in chat_store.list_chats(include_archived=include_archived)]}
 
 
+@app.get("/api/search")
+def search_app(q: str = "") -> dict:
+    """Search visible projects, chat titles, and decoded transcript text."""
+    return {"results": chat_store.search(q)}
+
+
 @app.get("/api/chats/{chat_id}")
 def get_chat(chat_id: str) -> dict:
     """The whole transcript, for reopening a chat from the sidebar."""
@@ -838,6 +927,8 @@ def patch_chat(chat_id: str, req: PatchChatRequest) -> dict:
         chat = chat_store.rename_chat(chat_id, req.title)
     if req.archived is not None:
         chat = chat_store.archive_chat(chat_id, req.archived)
+    if req.pinned is not None:
+        chat = chat_store.pin_chat(chat_id, req.pinned)
     if req.provider is not None or req.model is not None:
         chat = chat_store.set_model(chat_id, provider=req.provider, model=req.model)
     if "project_id" in req.model_fields_set:

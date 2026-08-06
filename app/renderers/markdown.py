@@ -158,15 +158,15 @@ def _table(spec) -> str:
         "---:" if c.kind in ("number", "currency", "percent") else "---"
         for c in spec.columns)
     lines = [f"| {header} |", f"| {divider} |"]
-    for index, row in enumerate(spec.rows):
+    for index, row in enumerate(spec.displayed_rows):
         cells = []
         for cell in row[:len(spec.columns)]:
             text = _escape(cell.text)
             cells.append(f"**{text}**" if index in spec.emphasis_rows else text)
         lines.append("| " + " | ".join(cells) + " |")
     out = "\n".join(lines)
-    if spec.is_truncated:
-        out += f"\n\n<sub>{spec.truncation_note()}</sub>"
+    if spec.has_note:
+        out += f"\n\n<sub>{spec.note()}</sub>"
     return out
 
 

@@ -375,6 +375,10 @@ def _render_designed(state: AgentState, output_type: str,
 
         context = builder.build_for_session(
             session_id, state.get("request_text", "") or "", analysis=analysis)
+        from app.deliverable import references
+
+        references.apply_to_context(
+            session_id, context, deliverable.source_use_constraints)
         reviewed = review(deliverable, context, use_model=False)
         if not reviewed.passed:
             deliverable, _applied = repair(deliverable, context, reviewed)
@@ -448,12 +452,22 @@ def generate_output(state: AgentState) -> AgentState:
                                     quality=report)
         ))
     elif output_type == "chart":
-        # The approved content's own charts first, so a picture cannot show
-        # something the preview did not — then topic-driven extras. A chart the
-        # user read about in the preview and a chart the topic implies are both
-        # legitimate; a chart that contradicts the preview is not.
-        files.extend(str(p) for p in _render_charts(
-            content, model, state.get("topic", "status"), out_dir))
+        deliverable = state.get("deliverable")
+        if deliverable is not None:
+            from app.context import builder
+            from app.deliverable import chart_output, references
+
+            context = builder.build_for_session(
+                state.get("session_id", ""), state.get("request_text", "") or "",
+                analysis=_analysis_for(state))
+            references.apply_to_context(
+                state.get("session_id", ""), context,
+                deliverable.source_use_constraints)
+            files.extend(str(path) for path in chart_output.render(
+                deliverable, context, out_dir))
+        else:
+            files.extend(str(p) for p in _render_charts(
+                content, model, state.get("topic", "status"), out_dir))
 
     # §18.18-19: the conflict report and the data-quality report ship with EVERY run,
     # not only when the user thinks to ask. They are what make the deck defensible.

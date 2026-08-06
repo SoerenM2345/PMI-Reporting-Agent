@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import * as api from "../../api";
-import PreviewBody from "./PreviewBody";
+import FormatPreview from "./FormatPreview";
 
 /**
  * The drafted report, on request.
@@ -12,14 +12,16 @@ import PreviewBody from "./PreviewBody";
  * session and version, and the document is fetched from the place it already
  * lives — so the chat and the artifact cannot drift, because there is one copy.
  *
- * Collapsed by default. The prose above already says what the report argues;
- * opening it is for checking the figures and editing a cell.
+ * New report drafts open automatically because generation is blocked until the
+ * user has reviewed this complete format-specific description. Existing
+ * callers can still opt out by omitting `open_by_default`.
  */
 export default function PreviewPanel({ action, onAction, busy }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(Boolean(action.open_by_default));
   const [draft, setDraft] = useState(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [approvalError, setApprovalError] = useState("");
 
   const sessionId = action.session_id;
   const version = action.version;
@@ -84,8 +86,8 @@ export default function PreviewPanel({ action, onAction, busy }) {
             <p className="text-sm text-slate-400">Loading the draft…</p>
           )}
           {draft && (
-            <PreviewBody
-              sections={draft.blocks ?? []}
+            <FormatPreview
+              preview={draft.format_preview}
               busy={busy}
               onEdit={(edit) => onAction({ type: "edit_cell", ...edit })}
               onProseEdit={(edit) => onAction({ type: "edit_prose", ...edit })}
@@ -94,25 +96,50 @@ export default function PreviewPanel({ action, onAction, busy }) {
         </div>
       )}
 
+      {draft?.review_question && (
+        <p className="border-t border-slate-100 px-4 py-2 text-xs text-slate-600">
+          {draft.review_question}
+        </p>
+      )}
+
       <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 px-4 py-3">
-        <span className="mr-1 text-xs text-slate-500">Generate as</span>
-        {(action.formats ?? ["powerpoint"]).map((format) => (
-          <button
-            key={format}
-            type="button"
-            disabled={busy}
-            onClick={() => onAction({ type: "generate", format })}
-            className="rounded border border-slate-300 bg-white px-2.5 py-1 text-xs
-                       font-medium text-slate-700 hover:border-slate-500
-                       disabled:opacity-40"
-          >
-            {LABELS[format] ?? format}
-          </button>
-        ))}
+        <span className="mr-1 text-xs text-slate-500">
+          Output: {LABELS[draft?.selected_format ?? action.selected_format] ?? draft?.selected_format}
+        </span>
+        <button
+          type="button"
+          disabled={busy || !draft || draft.stale}
+          onClick={async () => {
+            setApprovalError("");
+            try {
+              await onAction({
+                type: "approve_generate",
+                format: draft.selected_format,
+                version: draft.version,
+              });
+            } catch (err) {
+              setApprovalError(err.message || "could not approve this preview");
+            }
+          }}
+          className="rounded bg-slate-900 px-3 py-1 text-xs font-medium text-white
+                     hover:bg-slate-700 disabled:opacity-40"
+        >
+          Generate now
+        </button>
         <span className="ml-auto text-xs text-slate-400">
-          …or tell me what to change
+          …or describe any change in the chat
         </span>
       </div>
+      {draft?.stale && (
+        <p className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+          {draft.stale_reason || "The source data changed. A fresh preview is required."}
+        </p>
+      )}
+      {approvalError && (
+        <p className="border-t border-red-200 bg-red-50 px-4 py-2 text-xs text-rag-red">
+          {approvalError}
+        </p>
+      )}
     </div>
   );
 }
@@ -122,6 +149,5 @@ const LABELS = {
   word: "Word",
   pdf: "PDF",
   html: "HTML",
-  excel: "Excel",
-  chart: "Charts",
+  chart: "Chart",
 };

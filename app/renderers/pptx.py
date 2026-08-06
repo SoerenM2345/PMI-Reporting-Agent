@@ -266,11 +266,11 @@ def _render_visual(slide, element, box, page: PageDesign,
             return False
         shown = _table_view_for_slide(spec, box)
         table_box = box
-        if shown.is_truncated:
+        if shown.has_note:
             left, top, width, height = box
             table_box = (left, top, width, max(height - Inches(0.28), Inches(1)))
         pptx_base.draw_table(slide, brand, shown, table_box)
-        _caption(slide, brand, shown.truncation_note(), table_box)
+        _caption(slide, brand, shown.note(), table_box)
         return True
     if isinstance(element, KpiRowElement):
         pptx_base.draw_kpi_row(slide, brand, element.tiles, box)
@@ -289,8 +289,8 @@ def _table_view_for_slide(spec, box, *, row_cap: int = 8):
     """A readable slide view; the stored spec keeps every row for other formats."""
     _left, _top, _width, height = box
     by_height = max(3, int(Emu(height).inches / 0.5) - 1)
-    limit = min(row_cap, by_height)
-    if len(spec.rows) <= limit:
+    limit = min(row_cap, by_height, spec.displayed_row_count)
+    if len(spec.rows) <= limit and not spec.is_truncated:
         return spec
 
     shown = spec.model_copy(deep=True)

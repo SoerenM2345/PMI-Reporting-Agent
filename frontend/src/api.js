@@ -163,6 +163,11 @@ export function listProjects() {
   return call("/api/projects");
 }
 
+/** Search project names/knowledge plus titles and text across every live chat. */
+export function searchApp(query) {
+  return call(`/api/search?q=${encodeURIComponent(query)}`);
+}
+
 export function createProject(payload = {}) {
   return call("/api/projects", {
     method: "POST",
@@ -178,13 +183,6 @@ export function patchProject(projectId, patch) {
   return call(`/api/projects/${projectId}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
-  });
-}
-
-export function addProjectRule(projectId, rule) {
-  return call(`/api/projects/${projectId}/rules`, {
-    method: "POST",
-    body: JSON.stringify({ rule }),
   });
 }
 
@@ -248,12 +246,25 @@ export function reviseContent(sessionId, instruction) {
   });
 }
 
+export function approveContent(sessionId, version, format) {
+  return call(`/api/content/${sessionId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ version, format }),
+  });
+}
+
 /** Render the approved content. `format` is optional; omitted keeps the
     original request's type. */
-export function generateAs(sessionId, format, force = false) {
+export function generateAs(sessionId, format, force = false, approvalId = null, version = null) {
   return call("/api/generate", {
     method: "POST",
-    body: JSON.stringify({ session_id: sessionId, format, force }),
+    body: JSON.stringify({
+      session_id: sessionId,
+      format,
+      force,
+      approval_id: approvalId,
+      version,
+    }),
   });
 }
 

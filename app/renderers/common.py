@@ -57,5 +57,9 @@ class RenderResult(BaseModel):
 
 
 def truncation_suffix(spec) -> str:
-    """The "showing N of M" note, or nothing. Shared so all four formats agree."""
-    return getattr(spec, "truncation_note", lambda: "")()
+    """A table's own note — truncated, filtered, or neither.
+
+    Shared so all four formats agree. `TableSpec.note()` is the authority; the
+    getattr is for specs that predate it.
+    """
+    return getattr(spec, "note", lambda: "")()

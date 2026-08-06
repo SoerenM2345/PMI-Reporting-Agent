@@ -36,7 +36,8 @@ OVERRIDE_PREFIX = "dlv:"
 def plan(session_id: str, analysis, *, request_text: str = "",
          audience: str = "", fmt: Optional[str] = None,
          presentation_layout: bool = False,
-         force: bool = True, cancel=None) -> Deliverable:
+         force: bool = True, cancel=None, review_required: bool = False,
+         source_use_constraints=None) -> Deliverable:
     """Plan the session's deliverable and store it as a new version."""
     from app.agent import knowledge as kb_store
     from app.context import builder
@@ -54,14 +55,32 @@ def plan(session_id: str, analysis, *, request_text: str = "",
     context.audience = (audience or context.audience
                         or analysis.audience_label or "")
 
+    from app.deliverable import references
+
+    resolution = (references.ReferenceResolution(
+        constraints=source_use_constraints or [])
+        if source_use_constraints is not None
+        else references.resolve(session_id, context.user_request))
+    reference_warnings = references.apply_to_context(
+        session_id, context, resolution.constraints)
+
     deliverable = engine.build(context, force=force,
                                content_revision=kb.content_revision,
                                cancel=cancel)
+    from app.deliverable import chart_output
+
+    deliverable.warnings.extend(chart_output.ensure_spec(deliverable, context))
     deliverable.warnings.extend(apply_overrides(deliverable, kb))
+    deliverable.review_required = review_required
+    deliverable.source_use_constraints = list(context.source_use_constraints)
+    deliverable.warnings.extend(reference_warnings)
+    deliverable.warnings.extend(references.apply_content(
+        session_id, deliverable, context.source_use_constraints))
     deliverable.session_id = session_id
     # What the staleness check will compare against next time. See
     # `Deliverable.request_text` for why it is recorded rather than re-derived.
     deliverable.request_text = context.user_request
+    deliverable.planning_audience = context.audience
     deliverable.audience_label = deliverable.audience_label or context.audience
     store.save(deliverable)
     log.info("session %s: planned deliverable v%d (%d pages, planned_by=%s)",
@@ -102,10 +121,20 @@ def _fingerprint(session_id: str, analysis,
     request = ((deliverable.request_text if deliverable is not None else "")
                or analysis.request_text or "")
     context = builder.build_for_session(session_id, request, analysis=analysis)
-    if deliverable is not None and deliverable.audience_label:
-        context.audience = deliverable.audience_label
     if deliverable is not None:
+        # The display label is an editorial output and can legitimately differ
+        # from the audience value that was fingerprinted. New drafts record the
+        # exact input. For older drafts, leave the audience derived from their
+        # stored request in place; substituting the display label is what made
+        # those previews falsely stale immediately after planning.
+        if deliverable.planning_audience is not None:
+            context.audience = deliverable.planning_audience
         context.presentation_layout = deliverable.presentation_layout
+        context.requested_output_format = deliverable.primary_format
+        from app.deliverable import references
+
+        references.apply_to_context(
+            session_id, context, deliverable.source_use_constraints)
     return fp.compute(context,
                       content_revision=kb_store.load(session_id).content_revision)
 
