@@ -21,6 +21,7 @@ ALIASES: dict[str, str] = {
     "docx": "docx", "word": "docx", "doc": "docx", "document": "docx",
     "pdf": "pdf",
     "html": "html", "dashboard": "html", "web": "html", "htm": "html",
+    "xlsx": "xlsx", "excel": "xlsx", "xls": "xlsx", "workbook": "xlsx",
     "chart": "chart", "charts": "chart", "graph": "chart", "png": "chart",
 }
 
@@ -30,7 +31,7 @@ def normalize(fmt: Optional[str]) -> str:
 
 
 def supported() -> list[str]:
-    return ["pptx", "docx", "pdf", "html"]
+    return ["pptx", "docx", "pdf", "html", "xlsx"]
 
 
 def renderer(fmt: str) -> Callable[..., RenderResult]:
@@ -45,6 +46,8 @@ def renderer(fmt: str) -> Callable[..., RenderResult]:
         from app.renderers.docx import render
     elif name == "pdf":
         from app.renderers.pdf import render
+    elif name == "xlsx":
+        from app.renderers.xlsx import render
     else:
         from app.renderers.html import render
     return render

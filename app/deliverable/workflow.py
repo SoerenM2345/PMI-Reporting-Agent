@@ -8,12 +8,13 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 
-ReviewFormat = Literal["powerpoint", "pdf", "word", "html", "chart"]
+ReviewFormat = Literal["powerpoint", "pdf", "word", "excel", "html", "chart"]
 
 FORMAT_LABELS = {
     "powerpoint": "PowerPoint",
     "pdf": "PDF",
     "word": "Word",
+    "excel": "Excel",
     "html": "HTML",
     "chart": "chart",
 }
@@ -22,13 +23,15 @@ FORMAT_ALIASES = {
     "deck": "powerpoint", "slides": "powerpoint", "presentation": "powerpoint",
     "pdf": "pdf",
     "word": "word", "docx": "word", "doc": "word", "document": "word",
+    "excel": "excel", "xlsx": "excel", "workbook": "excel",
+    "spreadsheet": "excel",
     "html": "html", "web": "html", "webpage": "html", "web page": "html",
     "dashboard": "html",
     "chart": "chart", "charts": "chart", "graph": "chart", "graphs": "chart",
     "image": "chart", "picture": "chart", "plot": "chart", "png": "chart",
 }
 PLANNING_FORMAT = {
-    "powerpoint": "pptx", "word": "docx", "pdf": "pdf",
+    "powerpoint": "pptx", "word": "docx", "pdf": "pdf", "excel": "xlsx",
     "html": "html", "chart": "chart",
 }
 

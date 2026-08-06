@@ -313,8 +313,11 @@ def _table(document, spec, brand: BrandSystem) -> None:
             paragraph = cell.paragraphs[0]
             paragraph.style = document.styles[styles.TABLE_BODY]
             run = paragraph.add_run(value.text)
-            run.bold = emphasised
-            colour = _emphasis_colour(value.emphasis, brand)
+
+            is_source = spec.columns[column_index].header == "Source"
+            run.bold = emphasised and not is_source
+            run.font.size = 80000  # 8pt for source column, else default
+            colour = _emphasis_colour("muted" if is_source else value.emphasis, brand)
             if colour:
                 run.font.color.rgb = styles.rgb(colour)
             if spec.columns[column_index].kind in ("number", "currency",

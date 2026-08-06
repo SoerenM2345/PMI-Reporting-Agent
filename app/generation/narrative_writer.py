@@ -18,6 +18,7 @@ content. The deterministic path here states what the evidence says instead.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional, Sequence
 
 from app.context.schemas import GenerationContext
@@ -33,6 +34,29 @@ log = logging.getLogger("pmi.generation.narrative")
 MAX_BODY_CHARS = 1400
 MAX_BULLETS = 7
 
+#: Sections whose job is to say what to do next. Matched on the storyline's
+#: `purpose` first; the title is the backstop for a structure the user wrote
+#: themselves, where the purpose classifier never ran.
+_RECOMMENDS = re.compile(
+    r"\b(recommend\w*|next step\w*|way forward|actions? required)\b", re.I)
+
+#: Said in the small grey provenance line every renderer already draws, because
+#: a reader must never mistake a proposal for something a source reported.
+AI_RECOMMENDATION_NOTE = (
+    "AI-generated recommendations. Not drawn from the uploaded sources — "
+    "these are suggestions for discussion and require manager verification "
+    "before they are acted on."
+)
+
+#: The body text above the recommendations. It has to be set explicitly: leaving
+#: it empty falls through to `_deterministic_body`, which correctly reports that
+#: there is no evidence — so the page rendered "Not enough data" directly above
+#: the very recommendations written to answer it.
+RECOMMENDATION_LEAD_IN = (
+    "No uploaded source covers this topic. The actions below are proposed for "
+    "discussion rather than reported from the data."
+)
+
 
 def write_page(page: PageDesign, context: GenerationContext,
                plan: Optional[StorylinePlan] = None, *,
@@ -46,6 +70,17 @@ def write_page(page: PageDesign, context: GenerationContext,
     with tasks.collect() as fell_back:
         copy = copy or (_ask(page, context, plan, items) if use_model
                         else fallback_copy(page, context, items))
+
+    # A "Recommendations" section that no source speaks to would otherwise read
+    # "Not enough data", which is true and useless. Recommendations are the one
+    # thing worth writing when there is nothing to restate, because they propose
+    # an action rather than asserting a fact about the project.
+    recommendations = _recommendations_for(page, context, plan, items, warnings)
+    if recommendations:
+        copy = copy.model_copy(update={"bullets": recommendations,
+                                       "body": RECOMMENDATION_LEAD_IN})
+        page.source_note = " ".join(
+            part for part in (page.source_note, AI_RECOMMENDATION_NOTE) if part)
 
     # The guard exists to stop a *model* stating a figure the evidence does not
     # hold. When the text is Python's own, containment is the wrong test: the
@@ -97,6 +132,56 @@ def write_page(page: PageDesign, context: GenerationContext,
             element.authored_by = "llm" if copy.bullets and kept else "python"
 
     return warnings
+
+
+def _recommendations_for(page: PageDesign, context: GenerationContext,
+                         plan: Optional[StorylinePlan],
+                         items: Sequence[EvidenceItem],
+                         warnings: list[str]) -> list[str]:
+    """Recommended actions for a recommendations page with nothing to report.
+
+    Guarded here rather than by the caller's `accept`: that is `_trusted` when
+    the page's own copy fell back to Python, and this text is the model's. A
+    recommendation carrying a figure the evidence does not hold is exactly what
+    `guard.check_text` exists to stop, so it is checked on its own terms.
+    """
+    if not _wants_recommendations(page, plan, items):
+        return []
+
+    section = plan.section(page.section_id) if plan is not None else None
+    topic = (section.working_title if section is not None else "") or page.title
+    proposed = tasks.write_recommendations(
+        topic,
+        audience=context.audience or "",
+        project_context=context.project_context or "",
+    )
+    kept = [_clip(text, 220) for text in proposed
+            if _accept(text, context, page, warnings, "recommendation")]
+    if proposed and not kept:
+        log.warning("page %s: every recommendation stated a figure outside the "
+                    "evidence and was rejected", page.page_id)
+    return kept[:MAX_BULLETS]
+
+
+def _wants_recommendations(page: PageDesign, plan: Optional[StorylinePlan],
+                           items: Sequence[EvidenceItem]) -> bool:
+    """Whether this page is a recommendations section the sources do not answer.
+
+    The evidence test comes first and is deliberately strict: one substantive
+    record is enough to prefer restating it. Proposing actions *instead of*
+    reporting what a source said would be the pipeline overriding its own
+    evidence, which is a far worse failure than a thin page.
+    """
+    if any(not item.is_absence for item in items):
+        return False
+
+    section = plan.section(page.section_id) if plan is not None else None
+    if section is not None:
+        if section.purpose == "plan":
+            return True
+        if _RECOMMENDS.search(section.working_title or ""):
+            return True
+    return bool(_RECOMMENDS.search(page.title or ""))
 
 
 def _ask(page: PageDesign, context: GenerationContext,

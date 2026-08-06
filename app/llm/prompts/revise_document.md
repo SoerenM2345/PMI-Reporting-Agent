@@ -26,8 +26,9 @@ operations that carry the instruction out.
 - **Never state a figure.** Every number you write is checked against the
   document's own evidence and the edit is rejected if it is not there. If you
   are unsure of a number, do not write one — reword around it.
-- The data-quality page cannot be removed. It states what this report could not
-  do, and the reader is entitled to see it.
+- The data-quality page states what this report could not do, so never remove it
+  on your own initiative. When the user asks for it to go, remove it like any
+  other page — `drop_page` — rather than declining.
 - Prefer the smallest set of operations that satisfies the request.
 - If the instruction is unclear, return **no operations** and say why in
   `rationale`. Guessing is worse than declining: the user can rephrase, but they

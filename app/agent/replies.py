@@ -62,7 +62,7 @@ class ChooseFormatAction(BaseModel):
 
     type: Literal["choose_format"] = "choose_format"
     options: list[str] = Field(default_factory=lambda: [
-        "powerpoint", "pdf", "word", "html", "chart",
+        "powerpoint", "pdf", "word", "excel", "html", "chart",
     ])
 
 

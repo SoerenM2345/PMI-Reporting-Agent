@@ -71,6 +71,7 @@ def plan(session_id: str, analysis, *, request_text: str = "",
 
     deliverable.warnings.extend(chart_output.ensure_spec(deliverable, context))
     deliverable.warnings.extend(apply_overrides(deliverable, kb))
+    apply_removals(deliverable, kb)
     deliverable.review_required = review_required
     deliverable.source_use_constraints = list(context.source_use_constraints)
     deliverable.warnings.extend(reference_warnings)
@@ -215,3 +216,54 @@ def apply_overrides(deliverable: Deliverable, kb) -> list[str]:
         warnings.append(message)
         log.warning("orphaned prose override %r: %s", element_id, message)
     return warnings
+
+
+# ----------------------------------------------------------------- removals
+def remember_removals(session_id: str, deliverable: Deliverable) -> None:
+    """Record which pages the user has taken out, so a re-plan keeps them out.
+
+    Read off `dropped_pages` rather than off the ops that produced it, so
+    "restore the retention page" un-remembers the removal by the same route that
+    remembered it — there is one description of the current state, not two that
+    can disagree.
+    """
+    from app.agent import knowledge as kb_store
+
+    kb = kb_store.load(session_id)
+    removed = [kb_store.RemovedPage(page_id=page.page_id,
+                                    section_id=page.section_id,
+                                    title=page.title or "")
+               for page in deliverable.dropped_pages]
+    if [item.model_dump() for item in removed] == \
+            [item.model_dump() for item in kb.removed_pages]:
+        return
+    kb.removed_pages = removed
+    kb_store.save(kb)
+    log.info("session %s: %d page(s) held out of future plans", session_id,
+             len(removed))
+
+
+def apply_removals(deliverable: Deliverable, kb) -> None:
+    """Take the pages the user removed back out, after planning put them back.
+
+    Planning cannot simply be told to skip them: `enforce_limitations` appends
+    the data-quality section on Python's authority precisely so no model can
+    decide to omit it, and the other sections come from the storyline, which is
+    re-derived from the evidence every time. So the removal is re-applied to the
+    planned document, which also keeps every page restorable — a page that was
+    never planned could not be brought back.
+    """
+    removed = list(getattr(kb, "removed_pages", None) or [])
+    if not removed:
+        return
+
+    holding = [page for page in deliverable.pages
+               if page.purpose != "cover"
+               and any(item.matches(page) for item in removed)]
+    for page in holding:
+        deliverable.pages.remove(page)
+        deliverable.dropped_pages.append(page)
+    if holding:
+        deliverable.renumber()
+        log.info("kept %d page(s) out of the plan at the user's request: %s",
+                 len(holding), ", ".join(page.page_id for page in holding))

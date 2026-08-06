@@ -53,10 +53,10 @@ OpName = Literal[
     "set_row_limit", "set_emphasis", "exclude_rows", "restore_rows",
 ]
 
-#: A page whose removal the user is not offered. §12.5 requires the document to
-#: state what it could not do, and a reader is entitled to see it whether or not
-#: the author finds it flattering.
-PROTECTED_PURPOSES = ("limitations",)
+#: How the §12.5 disclosure page is recognised, whatever the planner titled it.
+#: Removing it is allowed — see `_drop_page` — but it is worth saying out loud,
+#: so the page still has to be identifiable after the fact.
+DISCLOSURE_PURPOSES = ("limitations",)
 
 
 class PageOp(BaseModel):
@@ -280,8 +280,14 @@ def _label(page: PageDesign) -> str:
     return page.title or page.page_id
 
 
-def _is_protected(page: PageDesign) -> bool:
-    return (page.purpose in PROTECTED_PURPOSES
+def is_disclosure_page(page: PageDesign) -> bool:
+    """Whether this is the page §12.5 asks for — by purpose or by its title.
+
+    The planner titles it "Data quality and limitations"; a user-described
+    structure may call it something else, and the purpose is what survives a
+    retitle. Both are checked because either one alone has been wrong.
+    """
+    return (page.purpose in DISCLOSURE_PURPOSES
             or "limitation" in (page.title or "").casefold()
             or "data quality" in (page.title or "").casefold())
 
@@ -306,16 +312,31 @@ def _reorder(draft: Deliverable, op: PageOp, _corpus) -> str:
 
 
 def _drop_page(draft: Deliverable, op: PageOp, _corpus) -> str:
+    """Take a page out of the document. Including the data-quality page.
+
+    That page used to be refused outright on §12.5 grounds. Refusing it did not
+    keep the disclosure honest — it produced a report the author could not shape
+    and an instruction the agent visibly ignored, while the page was rendered
+    anyway. §12.5 constrains what *this system* may hide from a reader, not what
+    an author may choose to leave out of their own document, and the removal is
+    neither silent nor final: it is confirmed in chat, recorded in the
+    deliverable's notes, and the page stays in `dropped_pages` so "restore the
+    data quality page" puts it back.
+    """
     page = _find(draft, op)
-    if _is_protected(page):
-        raise _Refused(
-            "the data-quality page cannot be removed — it states what this "
-            "report could not do, which every recipient is entitled to see")
     if page.purpose == "cover":
         raise _Refused("the cover cannot be removed")
     draft.pages.remove(page)
     draft.dropped_pages.append(page)
     draft.renumber()
+    if is_disclosure_page(page):
+        # The same split `_exclude_rows` makes, for the same reason. The note is
+        # *rendered*, into the appendix — so naming this page there, or quoting
+        # the instruction that named it, prints "Data quality and limitations"
+        # in the document the user just took it out of, and reads as the removal
+        # having been ignored.
+        log.info("data-quality page %r removed on request", page.page_id)
+        return f"removed “{_label(page)}”", "removed 1 page at the author's request"
     return f"removed “{_label(page)}”"
 
 
