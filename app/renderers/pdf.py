@@ -170,12 +170,14 @@ def render(deliverable: Deliverable, context: GenerationContext,
     boxes: list[MeasuredBox] = []
     figure_number = [0]
 
-    _cover(story, deliverable, context, sheet)
+    _cover(story, deliverable, context, brand, sheet)
     _contents(story, deliverable, sheet)
 
-    for page in deliverable.pages:
-        if page.purpose == "cover":
-            continue
+    planned_pages = [page for page in deliverable.pages
+                     if page.purpose != "cover"]
+    for index, page in enumerate(planned_pages):
+        if index:
+            story.append(PageBreak())
         boxes.extend(_section(story, page, deliverable, brand, sheet, assets,
                               figure_number, regular))
 
@@ -312,7 +314,7 @@ def _styles(brand: BrandSystem, regular: str, bold: str) -> dict:
                        colour="deep", font=bold, space_before=16,
                        space_after=16, left_indent=10, border="emphasis",
                        leading_ratio=1.2),
-        "source": style("PMISource", brand.font("label").size_pt, colour="muted",
+        "source": style("PMISource", 6.0, colour="#A6A6A6",
                         italic=True, space_before=3, space_after=12),
         "cell": style("PMICell", brand.font("small").size_pt, space_after=0,
                       leading_ratio=1.2),
@@ -340,9 +342,20 @@ def _styles(brand: BrandSystem, regular: str, bold: str) -> dict:
 
 # ==================================================================== story
 def _cover(story: list, deliverable: Deliverable, context: GenerationContext,
-           sheet: dict) -> None:
+           brand: BrandSystem, sheet: dict) -> None:
+    if brand.logo_png_b64:
+        import base64
+        import io
+
+        try:
+            logo = Image(io.BytesIO(base64.b64decode(brand.logo_png_b64)),
+                         width=1.75 * inch, height=0.33 * inch)
+            logo.hAlign = "RIGHT"
+            story.append(logo)
+        except Exception:                                      # noqa: BLE001
+            pass
     story.append(NextPageTemplate("content"))
-    story.append(Spacer(1, 1.6 * inch))
+    story.append(Spacer(1, 1.25 * inch))
     story.append(Paragraph(_x(deliverable.title), sheet["title"]))
     if deliverable.subtitle:
         story.append(Paragraph(_x(deliverable.subtitle), sheet["subtitle"]))
@@ -355,8 +368,6 @@ def _cover(story: list, deliverable: Deliverable, context: GenerationContext,
                                sheet["governing"]))
     if deliverable.executive_takeaway:
         story.append(Paragraph(_x(deliverable.executive_takeaway), sheet["body"]))
-    if deliverable.planned_by == "fallback" and deliverable.warnings:
-        story.append(Paragraph(_x(deliverable.warnings[0]), sheet["callout"]))
     story.append(PageBreak())
 
 
@@ -411,8 +422,7 @@ def _section(story: list, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 path = chart_render.to_png(spec, brand, assets,
                                            size_in=(9.0, 4.6))
-                story.append(_figure(path, spec.caption, figure_number, sheet,
-                                     editable=spec.is_native_pptx))
+                story.append(_figure(path, "", figure_number, sheet))
                 boxes.append(MeasuredBox(page_id=page.page_id, name="chart",
                                          text=spec.caption))
 
@@ -421,7 +431,7 @@ def _section(story: list, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 path = diagram_render.to_png(spec, brand, assets,
                                              size_in=(9.0, 3.8))
-                story.append(_figure(path, spec.caption, figure_number, sheet))
+                story.append(_figure(path, "", figure_number, sheet))
                 boxes.append(MeasuredBox(page_id=page.page_id, name="diagram",
                                          text=spec.caption))
 
@@ -447,6 +457,8 @@ def _section(story: list, page: PageDesign, deliverable: Deliverable,
 def _figure(path: Path, caption: str, figure_number: list[int], sheet: dict, *,
             editable: bool = False) -> KeepTogether:
     """A figure and its caption, which platypus will not separate."""
+    if not caption and not editable:
+        return KeepTogether([_scaled(path)])
     figure_number[0] += 1
     text = caption
     if editable:
@@ -476,7 +488,7 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
                if column.kind in ("number", "currency", "percent")}
 
     rows = [header]
-    for row in spec.rows:
+    for row in spec.displayed_rows:
         rendered = []
         for index, cell in enumerate(row[:len(spec.columns)]):
             style = sheet["cell_num"] if index in numeric else sheet["cell"]
@@ -503,6 +515,8 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
             commands.append(("BACKGROUND", (0, index), (-1, index),
                              colors.HexColor(brand.color("surface_alt"))))
     for index in spec.emphasis_rows:
+        if index >= spec.displayed_row_count:
+            continue
         commands.append(("BACKGROUND", (0, index + 1), (-1, index + 1),
                          colors.HexColor(brand.color("surface_alt"))))
     table.setStyle(TableStyle(commands))
@@ -510,8 +524,8 @@ def _table(spec, brand: BrandSystem, sheet: dict) -> list:
     out: list = [table]
     if spec.caption:
         out.append(Paragraph(_x(spec.caption), sheet["caption"]))
-    if spec.is_truncated:
-        out.append(Paragraph(_x(spec.truncation_note()), sheet["source"]))
+    if spec.has_note:
+        out.append(Paragraph(_x(spec.note()), sheet["source"]))
     return out
 
 
@@ -559,7 +573,7 @@ def _appendix(story: list, deliverable: Deliverable,
     if files:
         for name in files:
             story.append(Paragraph(f"&bull;&nbsp;&nbsp;{_x(name)}",
-                                   sheet["bullet"]))
+                                   sheet["source"]))
     else:
         story.append(Paragraph("No files were read for this document.",
                                sheet["body"]))

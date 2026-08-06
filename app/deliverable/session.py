@@ -35,7 +35,9 @@ OVERRIDE_PREFIX = "dlv:"
 
 def plan(session_id: str, analysis, *, request_text: str = "",
          audience: str = "", fmt: Optional[str] = None,
-         force: bool = True, cancel=None) -> Deliverable:
+         presentation_layout: bool = False,
+         force: bool = True, cancel=None, review_required: bool = False,
+         source_use_constraints=None) -> Deliverable:
     """Plan the session's deliverable and store it as a new version."""
     from app.agent import knowledge as kb_store
     from app.context import builder
@@ -47,19 +49,39 @@ def plan(session_id: str, analysis, *, request_text: str = "",
         analysis=analysis)
     if fmt:
         context.requested_output_format = fmt
+    context.presentation_layout = presentation_layout
     # The reader named in *this* turn wins: "actually it's for the CFO" is a
     # correction, and falling back to the stored label would ignore it.
     context.audience = (audience or context.audience
                         or analysis.audience_label or "")
 
+    from app.deliverable import references
+
+    resolution = (references.ReferenceResolution(
+        constraints=source_use_constraints or [])
+        if source_use_constraints is not None
+        else references.resolve(session_id, context.user_request))
+    reference_warnings = references.apply_to_context(
+        session_id, context, resolution.constraints)
+
     deliverable = engine.build(context, force=force,
                                content_revision=kb.content_revision,
                                cancel=cancel)
+    from app.deliverable import chart_output
+
+    deliverable.warnings.extend(chart_output.ensure_spec(deliverable, context))
     deliverable.warnings.extend(apply_overrides(deliverable, kb))
+    apply_removals(deliverable, kb)
+    deliverable.review_required = review_required
+    deliverable.source_use_constraints = list(context.source_use_constraints)
+    deliverable.warnings.extend(reference_warnings)
+    deliverable.warnings.extend(references.apply_content(
+        session_id, deliverable, context.source_use_constraints))
     deliverable.session_id = session_id
     # What the staleness check will compare against next time. See
     # `Deliverable.request_text` for why it is recorded rather than re-derived.
     deliverable.request_text = context.user_request
+    deliverable.planning_audience = context.audience
     deliverable.audience_label = deliverable.audience_label or context.audience
     store.save(deliverable)
     log.info("session %s: planned deliverable v%d (%d pages, planned_by=%s)",
@@ -100,8 +122,20 @@ def _fingerprint(session_id: str, analysis,
     request = ((deliverable.request_text if deliverable is not None else "")
                or analysis.request_text or "")
     context = builder.build_for_session(session_id, request, analysis=analysis)
-    if deliverable is not None and deliverable.audience_label:
-        context.audience = deliverable.audience_label
+    if deliverable is not None:
+        # The display label is an editorial output and can legitimately differ
+        # from the audience value that was fingerprinted. New drafts record the
+        # exact input. For older drafts, leave the audience derived from their
+        # stored request in place; substituting the display label is what made
+        # those previews falsely stale immediately after planning.
+        if deliverable.planning_audience is not None:
+            context.audience = deliverable.planning_audience
+        context.presentation_layout = deliverable.presentation_layout
+        context.requested_output_format = deliverable.primary_format
+        from app.deliverable import references
+
+        references.apply_to_context(
+            session_id, context, deliverable.source_use_constraints)
     return fp.compute(context,
                       content_revision=kb_store.load(session_id).content_revision)
 
@@ -182,3 +216,54 @@ def apply_overrides(deliverable: Deliverable, kb) -> list[str]:
         warnings.append(message)
         log.warning("orphaned prose override %r: %s", element_id, message)
     return warnings
+
+
+# ----------------------------------------------------------------- removals
+def remember_removals(session_id: str, deliverable: Deliverable) -> None:
+    """Record which pages the user has taken out, so a re-plan keeps them out.
+
+    Read off `dropped_pages` rather than off the ops that produced it, so
+    "restore the retention page" un-remembers the removal by the same route that
+    remembered it — there is one description of the current state, not two that
+    can disagree.
+    """
+    from app.agent import knowledge as kb_store
+
+    kb = kb_store.load(session_id)
+    removed = [kb_store.RemovedPage(page_id=page.page_id,
+                                    section_id=page.section_id,
+                                    title=page.title or "")
+               for page in deliverable.dropped_pages]
+    if [item.model_dump() for item in removed] == \
+            [item.model_dump() for item in kb.removed_pages]:
+        return
+    kb.removed_pages = removed
+    kb_store.save(kb)
+    log.info("session %s: %d page(s) held out of future plans", session_id,
+             len(removed))
+
+
+def apply_removals(deliverable: Deliverable, kb) -> None:
+    """Take the pages the user removed back out, after planning put them back.
+
+    Planning cannot simply be told to skip them: `enforce_limitations` appends
+    the data-quality section on Python's authority precisely so no model can
+    decide to omit it, and the other sections come from the storyline, which is
+    re-derived from the evidence every time. So the removal is re-applied to the
+    planned document, which also keeps every page restorable — a page that was
+    never planned could not be brought back.
+    """
+    removed = list(getattr(kb, "removed_pages", None) or [])
+    if not removed:
+        return
+
+    holding = [page for page in deliverable.pages
+               if page.purpose != "cover"
+               and any(item.matches(page) for item in removed)]
+    for page in holding:
+        deliverable.pages.remove(page)
+        deliverable.dropped_pages.append(page)
+    if holding:
+        deliverable.renumber()
+        log.info("kept %d page(s) out of the plan at the user's request: %s",
+                 len(holding), ", ".join(page.page_id for page in holding))

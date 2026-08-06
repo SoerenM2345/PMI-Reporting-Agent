@@ -82,6 +82,11 @@ def _sheet(
         sheet.set_column(column, column, width)
         sheet.write(0, column, heading, fmt["header"])
 
+    source_columns = {
+        index for index, heading in enumerate(headers)
+        if heading.strip().casefold() in {"source", "sources", "read from", "from"}
+    }
+
     for r, row in enumerate(rows, start=1):
         for c, value in enumerate(row):
             if value == NOT_REPORTED:
@@ -97,7 +102,8 @@ def _sheet(
             elif c in flag_columns and value == "YES":
                 sheet.write(r, c, value, fmt["bad"])
             else:
-                sheet.write(r, c, "" if value is None else str(value), fmt["cell"])
+                sheet.write(r, c, "" if value is None else str(value),
+                            fmt["source"] if c in source_columns else fmt["cell"])
 
     last_row, last_column = max(len(rows), 1), len(headers) - 1
 
@@ -136,6 +142,10 @@ def _formats(workbook) -> dict:
         "label": workbook.add_format({"bold": True}),
         "muted": workbook.add_format({"font_color": GREY, "italic": True,
                                       "border": 1}),
+        "source": workbook.add_format({"font_color": "#A6A6A6",
+                                       "font_size": 7, "italic": True,
+                                       "border": 1, "valign": "top",
+                                       "text_wrap": True}),
         "number": workbook.add_format({"border": 1, "num_format": "#,##0.##"}),
         # §13: "Consistent date formats" — DD-MM-YYYY, per §7.
         "date": workbook.add_format({"border": 1, "num_format": "dd-mm-yyyy"}),
@@ -151,4 +161,3 @@ def _formats(workbook) -> dict:
         "bad": workbook.add_format({"bg_color": RED, "border": 1,
                                     "text_wrap": True, "valign": "top"}),
     }
-

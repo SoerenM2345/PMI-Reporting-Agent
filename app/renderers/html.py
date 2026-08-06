@@ -88,16 +88,19 @@ def _masthead(deliverable: Deliverable, context: GenerationContext,
     logo = brand.logo_data_uri()
     mark = (f'<img class="logo" src="{logo}" alt="">' if logo
             else '<span class="wordmark">Deloitte</span>')
-    meta = " &middot; ".join(escape(part) for part in (
-        deliverable.audience_label, context.reporting_period,
-        context.transaction.integration_phase.replace("_", " ")
-        if context.transaction.integration_phase != "unknown" else "") if part)
-
-    banner = ""
-    if deliverable.planned_by == "fallback":
-        banner = (f'<p class="banner" role="status">'
-                  f'{escape(deliverable.warnings[0] if deliverable.warnings else "")}'
-                  f"</p>")
+    # Bare values made ``STEERING COMMITTEE · UNKNOWN`` impossible to
+    # understand: Unknown was the integration phase, not the audience or report
+    # status. Keep every value attached to its field name, including absences.
+    meta = " &middot; ".join(
+        f'<span><span class="meta-label">{escape(label)}:</span> '
+        f'{escape(_meta_value(value))}</span>'
+        for label, value in (
+            ("Audience", deliverable.audience_label),
+            ("Reporting period", context.reporting_period),
+            ("Integration phase", context.transaction.integration_phase),
+        )
+        if value
+    )
 
     takeaway = (f'<p class="takeaway">{escape(deliverable.executive_takeaway)}</p>'
                 if deliverable.executive_takeaway else "")
@@ -106,7 +109,7 @@ def _masthead(deliverable: Deliverable, context: GenerationContext,
             f'<p class="subtitle">{escape(deliverable.subtitle)}</p>\n'
             f'<p class="meta">{meta}</p>\n'
             f'<p class="governing">{escape(deliverable.governing_message)}</p>\n'
-            f"{takeaway}{banner}\n</header>")
+            f"{takeaway}\n</header>")
 
 
 def _rail(deliverable: Deliverable) -> str:
@@ -181,17 +184,18 @@ def _element(element, deliverable: Deliverable, brand: BrandSystem) -> str:
         spec = deliverable.specs.charts.get(element.spec_id)
         if spec is None:
             return ""
-        svg = chart_render.to_svg(spec, brand)
-        return (f'<figure class="chart">{svg}'
-                f"<figcaption>{escape(spec.caption)}</figcaption></figure>")
+        # SVG mark ``<title>`` nodes produce a browser-native tooltip. This page
+        # already has the styled delegated tooltip below, so enabling both shows
+        # the same value twice on hover.
+        svg = chart_render.to_svg(spec, brand, native_tooltips=False)
+        return f'<figure class="chart">{svg}</figure>'
 
     if isinstance(element, DiagramElement):
         spec = deliverable.specs.diagrams.get(element.spec_id)
         if spec is None:
             return ""
         svg = diagram_render.to_svg(spec, brand)
-        return (f'<figure class="diagram">{svg}'
-                f"<figcaption>{escape(spec.caption)}</figcaption></figure>")
+        return f'<figure class="diagram">{svg}</figure>'
 
     if isinstance(element, TableElement):
         spec = deliverable.specs.tables.get(element.spec_id)
@@ -220,20 +224,23 @@ def _kpis(element: KpiRowElement) -> str:
 def _table(spec) -> str:
     """A sortable, filterable table. Wide ones scroll inside their own box."""
     headers = "".join(
-        f'<th class="{_align(column.kind)}" data-kind="{escape(column.kind)}">'
+        f'<th class="{_align(column.kind)}{" source-col" if column.header == "Source" else ""}" '
+        f'data-kind="{escape(column.kind)}" '
+        f'{"style=\"width: 80px;\"" if column.header == "Source" else ""}>'
         f"{escape(column.header)}</th>" for column in spec.columns)
 
     rows = []
-    for index, row in enumerate(spec.rows):
+    for index, row in enumerate(spec.displayed_rows):
         emphasis = ' class="emphasis"' if index in spec.emphasis_rows else ""
         cells = "".join(
             f'<td class="{_align(spec.columns[position].kind)} '
-            f'{escape(cell.emphasis)}">{escape(cell.text)}</td>'
+            f'{escape(cell.emphasis)}{" source-col" if spec.columns[position].header == "Source" else ""}">'
+            f'{escape(cell.text)}</td>'
             for position, cell in enumerate(row) if position < len(spec.columns))
         rows.append(f"<tr{emphasis}>{cells}</tr>")
 
-    note = (f'<p class="note">{escape(spec.truncation_note())}</p>'
-            if spec.is_truncated else "")
+    note = (f'<p class="note">{escape(spec.note())}</p>'
+            if spec.has_note else "")
     caption = f"<caption>{escape(spec.caption)}</caption>" if spec.caption else ""
     return (f'<div class="table-wrap">'
             f'<input class="filter" type="search" placeholder="Filter rows" '
@@ -244,6 +251,11 @@ def _table(spec) -> str:
 
 def _align(kind: str) -> str:
     return "num" if kind in ("number", "currency", "percent") else "txt"
+
+
+def _meta_value(value: str) -> str:
+    text = " ".join(str(value or "").replace("_", " ").split())
+    return "Unknown" if text.casefold() == "unknown" else text
 
 
 def _methodology(deliverable: Deliverable, context: GenerationContext) -> str:
@@ -264,7 +276,7 @@ def _methodology(deliverable: Deliverable, context: GenerationContext) -> str:
         f"{escape('; '.join(f'{k} says {v}' for k, v in conflict.values.items()))}"
         f"</li>" for conflict in context.unresolved_critical_conflicts)
 
-    sections = [f"<h3>Sources</h3><ul>{rows}</ul>"]
+    sections = [f'<h3>Sources</h3><ul class="source-files">{rows}</ul>']
     if conflicts:
         sections.append("<h3>Unresolved disagreements between sources</h3>"
                         f"<ul>{conflicts}</ul>")
@@ -410,13 +422,18 @@ td.bad { color: var(--brand-rag-red); font-weight: 600; }
 td.warn { color: var(--brand-rag-amber); }
 td.good { color: var(--brand-rag-green); }
 td.muted { color: var(--brand-muted); }
+th.source-col, td.source-col { color: var(--brand-muted); font-size: 0.75rem;
+  font-weight: 500; width: 80px; }
 tr.emphasis td { background: var(--brand-surface-alt); }
 .note { margin: .4rem 0 0; font-size: .8rem; color: var(--brand-muted); }
-.sources, .methodology { margin-top: 1.2rem; font-size: .86rem; }
-.sources summary, .methodology summary { cursor: pointer; color: var(--brand-muted); }
+.sources { margin-top: .8rem; font-size: .68rem; color: #a3a3a3; }
+.sources summary { cursor: pointer; color: #a3a3a3; }
+.methodology { margin-top: 1.2rem; font-size: .86rem; }
+.methodology summary { cursor: pointer; color: var(--brand-muted); }
 .methodology { padding: 1.6rem 0 0; }
 .methodology h3 { margin: 1rem 0 .35rem; font-size: .95rem; }
 .methodology ul { margin: 0; padding-left: 1.15rem; }
+.methodology .source-files { font-size: .68rem; color: #a3a3a3; }
 footer { padding: 1.4rem clamp(1rem, 4vw, 3.5rem) 2.4rem; color: var(--brand-muted);
   font-size: .82rem; border-top: 1px solid var(--brand-rule); }
 #tooltip {

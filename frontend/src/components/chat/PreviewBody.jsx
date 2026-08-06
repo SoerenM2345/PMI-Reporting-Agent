@@ -28,7 +28,7 @@ export default function PreviewBody({ sections, onEdit, onProseEdit, busy }) {
           </p>
 
           {section.blocks.map((block) => (
-            <Block
+            <PreviewBlock
               key={block.block_id}
               block={block}
               onEdit={onEdit}
@@ -55,7 +55,7 @@ function hasContent(block) {
   return true;
 }
 
-function Block({ block, onEdit, onProseEdit, busy }) {
+export function PreviewBlock({ block, onEdit, onProseEdit, busy }) {
   if (block.kind === "bullets") {
     if (!block.items?.length) return null;
     return (

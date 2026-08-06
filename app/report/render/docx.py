@@ -38,6 +38,7 @@ def render(content: ReportContent, out_dir: Path) -> Path:
         _muted(document.add_paragraph(" · ".join(content.meta_line)))
 
     for section in content.narrative():
+        document.add_page_break()
         _section(document, section, content)
 
     if content.footer:

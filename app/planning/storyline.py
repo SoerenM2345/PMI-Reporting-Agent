@@ -181,11 +181,7 @@ def fallback_storyline(context: GenerationContext, brief: OutputBrief,
         governing_message=(f"Status of {context.display_name()}"
                            + (f" for {context.reporting_period}"
                               if context.reporting_period else "")),
-        executive_takeaway=(
-            "This document was assembled without a language model, so its "
-            "sections follow the topics requested and the evidence available "
-            "rather than a reasoned argument. The figures in it are validated; "
-            "the emphasis and the conclusions are not."),
+        executive_takeaway="",
         situation="", complication="", question="",
         supporting_arguments=[],
         narrative_flow="by_severity",
@@ -198,11 +194,33 @@ def _evidence_for_topic(topic: str, evidence: EvidenceIndex,
     from app.evidence.retrieval import retrieve as _retrieve
 
     kinds = _topic_kinds(topic)
-    hits = _retrieve(topic, evidence, kinds=kinds or None, k=12)
-    return [i.evidence_id for i in hits.included][:12]
+    hits = _retrieve(topic, evidence, kinds=kinds or None, k=24,
+                     include_mandatory=False)
+    # Project background belongs in the planning context and on the cover. It
+    # is not a row in a topical status table. When a topic has no explicit kind
+    # hint, BM25 otherwise ranks repeated words such as "integration" highly
+    # and fills Infrastructure Migration or Application Landscape with the deal
+    # description instead of operational evidence.
+    from app.evidence.scoring import expand, tokenize
+
+    topic_tokens = set(expand(tokenize(topic)))
+    topical = [item for item in hits.included
+               if item.kind not in ("context", "assumption")
+               and topic_tokens & set(tokenize(item.search_text))]
+    absence = evidence.get(f"ev:absence:{_slug(topic)}")
+    if absence is not None and not topical:
+        topical.append(absence)
+    return [i.evidence_id for i in topical][:12]
 
 
 _TOPIC_KIND_HINTS = (
+    (re.compile(r"\b(infrastructure|migration|cutover|cloud|hosting|"
+                r"data[ -]?cent(?:er|re))\b", re.I),
+     ("task", "milestone", "dependency", "workstream", "status_update",
+      "budget")),
+    (re.compile(r"\b(application|landscape|system|interface|erp|crm)\b", re.I),
+     ("task", "milestone", "dependency", "workstream", "status_update",
+      "kpi")),
     (re.compile(r"\bmilestone|date|timeline|roadmap\b", re.I), ("milestone",)),
     (re.compile(r"\brisk|issue|concern\b", re.I), ("risk", "issue")),
     (re.compile(r"\bbudget|cost|spend|financial\b", re.I), ("budget",)),

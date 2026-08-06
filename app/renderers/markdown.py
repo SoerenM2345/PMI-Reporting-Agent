@@ -63,9 +63,6 @@ def to_markdown(deliverable: Deliverable,
         parts.append(f"> {deliverable.governing_message}")
     if deliverable.executive_takeaway:
         parts.append(deliverable.executive_takeaway)
-    if deliverable.planned_by == "fallback" and deliverable.warnings:
-        parts.append(f"**Note:** {deliverable.warnings[0]}")
-
     for page in deliverable.pages:
         if page.purpose == "cover":
             continue
@@ -161,15 +158,20 @@ def _table(spec) -> str:
         "---:" if c.kind in ("number", "currency", "percent") else "---"
         for c in spec.columns)
     lines = [f"| {header} |", f"| {divider} |"]
-    for index, row in enumerate(spec.rows):
+    for index, row in enumerate(spec.displayed_rows):
         cells = []
-        for cell in row[:len(spec.columns)]:
+        for col_idx, cell in enumerate(row[:len(spec.columns)]):
             text = _escape(cell.text)
-            cells.append(f"**{text}**" if index in spec.emphasis_rows else text)
+            is_source = spec.columns[col_idx].header == "Source"
+            if index in spec.emphasis_rows and not is_source:
+                text = f"**{text}**"
+            elif is_source:
+                text = f"<small style=\"color: #888;\">{text}</small>"
+            cells.append(text)
         lines.append("| " + " | ".join(cells) + " |")
     out = "\n".join(lines)
-    if spec.is_truncated:
-        out += f"\n\n<sub>{spec.truncation_note()}</sub>"
+    if spec.has_note:
+        out += f"\n\n<sub>{spec.note()}</sub>"
     return out
 
 
@@ -195,8 +197,7 @@ def _appendix(deliverable: Deliverable,
     parts = ["## Sources and methodology"]
     files = context.evidence.projected_from_files if context else []
     if files:
-        parts.append("**Sources read**\n"
-                     + "\n".join(f"- {name}" for name in files))
+        parts.append("<sub>Sources read: " + "; ".join(files) + "</sub>")
     conflicts = context.unresolved_critical_conflicts if context else []
     if conflicts:
         claims = "\n".join(

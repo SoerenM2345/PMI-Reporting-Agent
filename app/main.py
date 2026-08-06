@@ -96,6 +96,15 @@ class GenerateRequest(BaseModel):
     #: request asked for. Re-rendering is cheap: the content is already planned,
     #: so no LLM call and no extraction happens, and the wording cannot change.
     format: Optional[str] = None
+    #: Required for user-facing reviewed drafts. It binds generation to the
+    #: exact version and format the user approved.
+    approval_id: Optional[str] = None
+    version: Optional[int] = None
+
+
+class ApproveContentRequest(BaseModel):
+    version: int
+    format: str
 
 
 # ================================================================== sessions
@@ -295,13 +304,36 @@ def generate(req: GenerateRequest) -> dict:
         # The analysis moved after this was planned — almost always because a
         # conflict was resolved. Rendering it would state the figure the user
         # has since corrected, so it is discarded rather than trusted.
+        if approved.review_required:
+            raise HTTPException(status_code=409, detail={
+                "error": "stale_content",
+                "message": "The source data changed. Review and approve a fresh preview first.",
+            })
         log.info("stored content for %s is stale; re-planning", req.session_id)
         approved = None
 
+    if approved is not None and approved.review_required:
+        from app.deliverable import approval as approval_store, workflow
+
+        requested_format = (workflow.normalize_format(req.format)
+                            or workflow.normalize_format(approved.primary_format))
+        record = approval_store.current(
+            req.session_id, approved, requested_format or "",
+            analysis=analysis, approval_id=req.approval_id)
+        if (record is None or req.version != approved.version):
+            raise HTTPException(status_code=409, detail={
+                "error": "approval_required",
+                "message": "Review and explicitly approve the current preview before generation.",
+                "version": approved.version,
+                "format": requested_format,
+            })
+
+    selected_output = req.format or (approved.primary_format if approved else None) \
+        or analysis.output_type
     state: AgentState = {
         "session_id": req.session_id,
         "request_text": analysis.request_text,
-        "output_type": req.format or analysis.output_type,
+        "output_type": selected_output,
         "topic": analysis.topic,
         "audience": analysis.audience,
         "data_model": analysis.data_model,
@@ -327,7 +359,7 @@ def generate(req: GenerateRequest) -> dict:
         "outputs": outputs,
         "summary": result.get("summary_bullets", []),
         "audience": _audience_str(analysis.audience),
-        "output_type": analysis.output_type,
+        "output_type": selected_output,
         "generated_with_unresolved_conflicts": [
             c.conflict_id for c in blocking
         ] if blocking else [],
@@ -350,7 +382,36 @@ def _content_payload(deliverable, analysis, *, stale: bool = False,
     """
     from app.deliverable import preview
 
-    return preview.payload(deliverable, stale=stale, stale_reason=reason)
+    from app.deliverable import approval as approval_store
+
+    conflicts = [item.model_dump(mode="json")
+                 for item in analysis.data_model.unresolved_conflicts()
+                 if item.critical]
+    body = preview.payload(
+        deliverable, stale=stale, stale_reason=reason,
+        source_files=list(analysis.data_model.source_files),
+        conflicts=conflicts,
+    )
+    if deliverable.session_id:
+        body["approval"] = approval_store.describe(
+            deliverable.session_id, deliverable, analysis=analysis)
+    return body
+
+
+@app.post("/api/content/{session_id}/approve")
+def approve_content(session_id: str, req: ApproveContentRequest) -> dict:
+    """Approve one exact preview version and format for generation."""
+    from app.deliverable import approval as approval_store
+
+    analysis = _analysis_or_404(session_id)
+    try:
+        record = approval_store.approve(
+            session_id, req.version, req.format, analysis=analysis)
+    except approval_store.ApprovalError as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": exc.code, "message": str(exc),
+        }) from exc
+    return record.model_dump(mode="json")
 
 
 def _evidence_corpus(session_id: str, analysis) -> set[str]:
@@ -359,7 +420,16 @@ def _evidence_corpus(session_id: str, analysis) -> set[str]:
 
     context = builder.build_for_session(session_id, analysis.request_text or "",
                                         analysis=analysis)
-    return context.evidence.numeric_corpus()
+    corpus = context.evidence.numeric_corpus()
+    from app.deliverable import session as session_plan
+    from app.report import guard
+
+    deliverable = session_plan.load(session_id)
+    if deliverable is not None:
+        for page in deliverable.pages:
+            if page.section_id == "source_reuse":
+                corpus |= guard.numbers_in(page.text_content())
+    return corpus
 
 
 @app.post("/api/content/{session_id}")
@@ -368,7 +438,17 @@ def plan_content_route(session_id: str) -> dict:
     from app.deliverable import session as session_plan
 
     analysis = _analysis_or_404(session_id)
-    stored = session_plan.plan(session_id, analysis)
+    existing = session_plan.load(session_id)
+    stored = session_plan.plan(
+        session_id, analysis,
+        request_text=(existing.request_text if existing else ""),
+        audience=(existing.audience_label if existing else ""),
+        fmt=(existing.primary_format if existing else None),
+        presentation_layout=(existing.presentation_layout if existing else False),
+        review_required=(existing.review_required if existing else False),
+        source_use_constraints=(existing.source_use_constraints
+                                if existing else None),
+    )
     return _content_payload(stored, analysis)
 
 
@@ -477,13 +557,22 @@ class PatchProjectRequest(BaseModel):
     name: Optional[str] = None
     icon: Optional[str] = None
     knowledge: Optional[str] = None
+    pinned: Optional[bool] = None
 
 
 class PatchChatRequest(BaseModel):
     title: Optional[str] = None
     archived: Optional[bool] = None
+    pinned: Optional[bool] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    #: Filing is also an import into project context. Explicit null removes the
+    #: chat from its folder; omission leaves the current project unchanged.
+    project_id: Optional[str] = None
+
+
+class ProjectRuleRequest(BaseModel):
+    rule: str
 
 
 class ChatMessageRequest(BaseModel):
@@ -541,8 +630,21 @@ def patch_project(project_id: str, req: PatchProjectRequest) -> dict:
     _project_or_404(project_id)
     project = chat_store.update_project(
         project_id, name=req.name, icon=req.icon, knowledge=req.knowledge,
+        pinned=req.pinned,
     )
     return {"project": project.model_dump()}
+
+
+@app.post("/api/projects/{project_id}/rules")
+def add_project_rule(project_id: str, req: ProjectRuleRequest) -> dict:
+    _project_or_404(project_id)
+    from app.project.chat_context import save_rule
+
+    try:
+        rule = save_rule(project_id, req.rule)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    return {"project": _project_or_404(project_id).model_dump(), "rule": rule}
 
 
 @app.delete("/api/projects/{project_id}")
@@ -797,6 +899,12 @@ def list_chats(include_archived: bool = False) -> dict:
                       for c in chat_store.list_chats(include_archived=include_archived)]}
 
 
+@app.get("/api/search")
+def search_app(q: str = "") -> dict:
+    """Search visible projects, chat titles, and decoded transcript text."""
+    return {"results": chat_store.search(q)}
+
+
 @app.get("/api/chats/{chat_id}")
 def get_chat(chat_id: str) -> dict:
     """The whole transcript, for reopening a chat from the sidebar."""
@@ -819,8 +927,23 @@ def patch_chat(chat_id: str, req: PatchChatRequest) -> dict:
         chat = chat_store.rename_chat(chat_id, req.title)
     if req.archived is not None:
         chat = chat_store.archive_chat(chat_id, req.archived)
+    if req.pinned is not None:
+        chat = chat_store.pin_chat(chat_id, req.pinned)
     if req.provider is not None or req.model is not None:
         chat = chat_store.set_model(chat_id, provider=req.provider, model=req.model)
+    if "project_id" in req.model_fields_set:
+        if req.project_id is None:
+            chat = chat_store.set_chat_project(chat_id, None)
+        else:
+            _project_or_404(req.project_id)
+            from app.project.chat_context import attach
+
+            try:
+                attach(chat_id, req.project_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400,
+                                    detail={"error": str(exc)}) from exc
+            chat = chat_store.get_chat(chat_id)
     return {"chat": chat.model_dump()}
 
 
@@ -885,6 +1008,8 @@ async def post_chat_message(chat_id: str, req: ChatMessageRequest,
     # The turn is stored either way. A stopped turn that vanished would leave
     # the user staring at their own message with no sign anything happened.
     stored = [_store_answer(chat_id, answer)]
+    _auto_name_chat(chat_id, req.text, answer)
+    _sync_chat_project(chat)
 
     # Keep the conversation inside the chosen model's window. Done after the
     # turn rather than before it, so the reply the user is waiting for is never
@@ -937,6 +1062,28 @@ def _store_answer(chat_id: str, answer) -> Any:
     return chat_store.add_message(
         chat_id, "agent", answer.model_dump(mode="json"),
         kind="notice" if answer.status == "failed" else "text")
+
+
+def _auto_name_chat(chat_id: str, user_text: str, answer) -> None:
+    """Name the first real exchange without ever replacing a chosen title."""
+    from app.agent import chat_titles
+    from app.config import get_settings
+    from app.llm import use_selection
+
+    chat = chat_store.get_chat(chat_id)
+    if chat is None or not chat_titles.is_default(chat.title):
+        return
+    selection = get_settings().models_for(chat.provider, chat.model)
+    with use_selection(selection):
+        # Naming is UI housekeeping and must not add a second provider round
+        # trip to the first visible reply. The user's own words make a stable,
+        # useful title immediately.
+        title = chat_titles.summarize(user_text, answer.content or "",
+                                      use_model=False)
+    # Re-read before writing so a concurrent/manual rename always wins.
+    current = chat_store.get_chat(chat_id)
+    if current is not None and chat_titles.is_default(current.title):
+        chat_store.rename_chat(chat_id, title)
 
 
 class CellEditRequest(BaseModel):
@@ -1168,7 +1315,8 @@ async def post_chat_turn(chat_id: str, request: Request,
         watch = asyncio.create_task(_watch_for_disconnect(request, token))
 
         if files:
-            ingested = await _ingest_into_chat(chat, files, token)
+            ingested = await _ingest_into_chat(
+                chat, files, token, has_message=bool(message))
 
         answer = ChatAnswer()
         if message:
@@ -1183,6 +1331,9 @@ async def post_chat_turn(chat_id: str, request: Request,
             answer = ingested.answer.then(answer)
         if not answer.is_empty:
             stored.append(_store_answer(chat_id, answer))
+        if message and not answer.is_empty:
+            _auto_name_chat(chat_id, message, answer)
+        _sync_chat_project(chat)
 
         return {
             "saved": ingested.saved if ingested else [],
@@ -1236,6 +1387,24 @@ async def _answer_in_thread(chat, text: str, token):
     return await run_in_threadpool(respond, chat, text, cancel=token)
 
 
+def _sync_chat_project(chat) -> None:
+    """Promote durable chat state after each turn for chats already filed.
+
+    Synchronisation is deliberately best-effort here: the session turn has
+    already succeeded and must not be changed into a failure because project
+    indexing needs attention. The next turn or an explicit re-attach retries it.
+    """
+    if not chat.project_id:
+        return
+    try:
+        from app.project.chat_context import attach
+
+        attach(chat.chat_id, chat.project_id)
+    except Exception as exc:                                  # noqa: BLE001
+        log.exception("could not sync chat %s into project %s: %s",
+                      chat.chat_id, chat.project_id, exc)
+
+
 class _Ingested(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
@@ -1245,7 +1414,8 @@ class _Ingested(BaseModel):
     answer: Any = None
 
 
-async def _ingest_into_chat(chat, files, token) -> "_Ingested":
+async def _ingest_into_chat(chat, files, token, *,
+                            has_message: bool = False) -> "_Ingested":
     """Store the files, record the turn, re-read everything."""
     from starlette.concurrency import run_in_threadpool
 
@@ -1274,8 +1444,9 @@ async def _ingest_into_chat(chat, files, token) -> "_Ingested":
         kind="files")
 
     check(token, "reading the files")
-    answer = await run_in_threadpool(_merge_uploaded, chat, before, names,
-                                     saved.get("rejected", []))
+    answer = await run_in_threadpool(
+        _merge_uploaded, chat, before, names, saved.get("rejected", []),
+        has_message)
     return _Ingested(saved=names, rejected=saved.get("rejected", []),
                      message=message, answer=answer)
 
@@ -1336,7 +1507,8 @@ def _session_snapshot(session_id: str) -> dict:
     }
 
 
-def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
+def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict],
+                    has_message: bool = False):
     """Re-read everything and say what moved."""
     from app.agent import knowledge
     from app.agent.conversation import _analyse, _found
@@ -1356,13 +1528,37 @@ def _merge_uploaded(chat, before: dict, added: list[str], rejected: list[dict]):
             if answer.is_empty else answer
 
     if not before:
-        # Nothing had been read yet: this is the first upload, and the useful
-        # answer is "what do you need?", not a diff against nothing.
-        return answer.then(say(chat_fmt.reply(
+        ready = say(chat_fmt.reply(
             f"{chat_fmt.count(len(added), 'file')} ready",
             body=chat_fmt.bullets(added),
-            action="Reading your files and analyzing the data now",
-        )))
+            action=("Using these files with your request" if has_message else
+                    "Reading your files and analyzing the data now"),
+        ))
+        answer = answer.then(ready)
+
+        pending = json_store.load_pending(chat.session_id)
+        waiting = pending if pending and pending.get("mode") == "awaiting_files" \
+            else None
+        if has_message:
+            # A message sent with the files supersedes an older request that was
+            # waiting for them; `post_chat_turn` routes that current message next.
+            if waiting:
+                json_store.clear_pending(chat.session_id)
+            return answer
+        if waiting and waiting.get("request_text"):
+            # Resume the original user turn. It is already in the transcript, so
+            # only its work and answer are repeated—not a duplicate user bubble.
+            from app.agent.conversation import respond
+
+            request_text = str(waiting["request_text"])
+            json_store.clear_pending(chat.session_id)
+            return answer.then(respond(chat, request_text))
+
+        # Do not claim analysis is running when there was no request to guide it.
+        return answer.then(say(
+            "The files are ready. Tell me what report or analysis you want from "
+            "them, including the audience if you know it."
+        ))
 
     kb = knowledge.load(chat.session_id)
     prior = json_store.load_analysis(chat.session_id)
@@ -1457,6 +1653,7 @@ def revise_content(session_id: str, req: ReviseRequest) -> dict:
         }
 
     stored = dlv_store.save(result.deliverable)
+    session_plan.remember_removals(session_id, stored)
     payload = _content_payload(stored, analysis)
     payload.update({
         "changed": True,

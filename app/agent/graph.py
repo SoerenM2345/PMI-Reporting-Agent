@@ -43,7 +43,7 @@ from app.agent.standardize import standardize
 from app.agent.state import AgentState
 from app.config import get_settings
 from app.extractors import SUPPORTED_EXTENSIONS, extract_file
-from app.generators import charts, pptx_report, xlsx_dashboard
+from app.generators import charts, pptx_report
 from app.generators.quality_report import write_conflict_report, write_quality_report
 from app.llm import tasks
 from app.models.pmi import Audience, PMIProject
@@ -209,7 +209,7 @@ def plan_content(state: AgentState) -> AgentState:
     deliverable = state.get("deliverable")
     output_type = _canonical_format(state.get("output_type", "powerpoint"))
     if deliverable is not None and output_type in (
-            "powerpoint", "word", "pdf", "html"):
+            "powerpoint", "word", "pdf", "html", "excel"):
         bullets = ([deliverable.executive_takeaway]
                    if deliverable.executive_takeaway else [])
         return {"report_content": None, "summary_bullets": bullets}
@@ -270,12 +270,6 @@ def _render_document(output_type: str, content, out_dir: Path, model=None) -> Pa
     # page still builds and names the charts instead.
     path.write_text(render_html(content, model, out_dir), encoding="utf-8")
     return path
-
-
-def _render_workbook(content, out_dir: Path, model):
-    from app.report.render import xlsx as renderer
-
-    return renderer.render(content, out_dir, model)
 
 
 def _render_charts(content, model, topic: str, out_dir: Path) -> list[Path]:
@@ -375,6 +369,10 @@ def _render_designed(state: AgentState, output_type: str,
 
         context = builder.build_for_session(
             session_id, state.get("request_text", "") or "", analysis=analysis)
+        from app.deliverable import references
+
+        references.apply_to_context(
+            session_id, context, deliverable.source_use_constraints)
         reviewed = review(deliverable, context, use_model=False)
         if not reviewed.passed:
             deliverable, _applied = repair(deliverable, context, reviewed)
@@ -417,12 +415,13 @@ def _analysis_for(state: AgentState):
 def generate_output(state: AgentState) -> AgentState:
     """§10.24-31: the deliverable, plus the two reports the spec always requires.
 
-    The designed formats render the approved `Deliverable`. The workbook and the
-    standalone charts still render from `ReportContent`, because a data dump and
-    a set of PNGs are not documents and gain nothing from a storyline.
+    The designed formats — including the workbook — render the approved
+    `Deliverable`, so the deck, the document, the PDF, the web page and the
+    workbook can never disagree about a figure the user corrected. Only the
+    standalone charts still render from `ReportContent`: a set of PNGs is not a
+    document and gains nothing from a storyline.
     """
     model = state["data_model"]
-    audience = state.get("audience") or Audience.PMO
     out_dir = _out_dir(state)
 
     content = state.get("report_content")
@@ -431,29 +430,30 @@ def generate_output(state: AgentState) -> AgentState:
     report = state.get("quality_report")
     files: list[str] = []
 
-    if output_type in ("powerpoint", "word", "pdf", "html"):
+    if output_type in ("powerpoint", "word", "pdf", "html", "excel"):
         # The designed formats render the *approved plan* — the very object the
-        # preview projected — so the deck, the document, the PDF and the web page
-        # state exactly what the user read. `ReportContent` remains the revision
-        # vocabulary; it is no longer the shape of the artifact.
+        # preview projected — so the deck, the document, the PDF, the web page
+        # and the workbook state exactly what the user read. `ReportContent`
+        # remains the revision vocabulary; it is no longer the shape of the
+        # artifact.
         files.extend(_render_designed(state, output_type, out_dir))
-    elif output_type == "excel":
-        # The workbook renders the same approved content as everything else.
-        # It used to re-walk `PMIDataModel`, which made it the one format that
-        # could contradict the preview the user had signed off.
-        files.append(str(
-            _render_workbook(content, out_dir, model)
-            if content is not None else
-            xlsx_dashboard.generate(model, audience, bullets, out_dir,
-                                    quality=report)
-        ))
     elif output_type == "chart":
-        # The approved content's own charts first, so a picture cannot show
-        # something the preview did not — then topic-driven extras. A chart the
-        # user read about in the preview and a chart the topic implies are both
-        # legitimate; a chart that contradicts the preview is not.
-        files.extend(str(p) for p in _render_charts(
-            content, model, state.get("topic", "status"), out_dir))
+        deliverable = state.get("deliverable")
+        if deliverable is not None:
+            from app.context import builder
+            from app.deliverable import chart_output, references
+
+            context = builder.build_for_session(
+                state.get("session_id", ""), state.get("request_text", "") or "",
+                analysis=_analysis_for(state))
+            references.apply_to_context(
+                state.get("session_id", ""), context,
+                deliverable.source_use_constraints)
+            files.extend(str(path) for path in chart_output.render(
+                deliverable, context, out_dir))
+        else:
+            files.extend(str(p) for p in _render_charts(
+                content, model, state.get("topic", "status"), out_dir))
 
     # §18.18-19: the conflict report and the data-quality report ship with EVERY run,
     # not only when the user thinks to ask. They are what make the deck defensible.

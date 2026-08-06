@@ -38,10 +38,14 @@ log = logging.getLogger("pmi.deliverable.preview")
 
 
 def payload(deliverable: Deliverable, *, stale: bool = False,
-            stale_reason: str = "") -> dict:
+            stale_reason: str = "", source_files: Optional[list[str]] = None,
+            conflicts: Optional[list[dict]] = None) -> dict:
     """The whole preview, in the shape the UI reads."""
     from app.renderers.markdown import to_markdown
 
+    from app.deliverable import workflow
+
+    selected_format = workflow.normalize_format(deliverable.primary_format)
     return {
         "version": deliverable.version,
         "stale": stale,
@@ -54,7 +58,18 @@ def payload(deliverable: Deliverable, *, stale: bool = False,
         "sections": [_section(page) for page in _content_pages(deliverable)],
         "blocks": blocks(deliverable),
         "warnings": list(deliverable.warnings),
-        "formats": _formats(deliverable),
+        "formats": list(workflow.FORMAT_LABELS),
+        "selected_format": selected_format,
+        "format_preview": format_preview(
+            deliverable, selected_format or "powerpoint",
+            source_files=source_files or [], conflicts=conflicts or []),
+        "source_use_constraints": [item.model_dump(mode="json")
+                                   for item in deliverable.source_use_constraints],
+        "review_question": (
+            f"Generate the {workflow.FORMAT_LABELS.get(selected_format or '', selected_format or 'file')} "
+            "now with this content, or change the layout, text, titles, "
+            "copywriting, language, or anything else?"
+        ),
     }
 
 
@@ -79,6 +94,8 @@ def _section(page: PageDesign) -> dict:
         "block_kinds": [element.role for element in page.elements],
         "empty_explanation": _empty_explanation(page),
         "composition": page.composition,
+        "purpose": page.purpose,
+        "is_divider": page.purpose == "divider",
         "warnings": list(page.warnings),
     }
 
@@ -105,6 +122,8 @@ def blocks(deliverable: Deliverable) -> list[dict]:
             "section_id": page.page_id,
             "label": page.subtitle or page.title,
             "headline": page.title,
+            "purpose": page.purpose,
+            "is_divider": page.purpose == "divider",
             "empty_explanation": _empty_explanation(page),
             "blocks": [_block(element, deliverable)
                        for element in page.elements],
@@ -136,8 +155,22 @@ def _block(element, deliverable: Deliverable) -> dict:
         # over empty space was the old preview's worst moment.
         return {**base, "caption": (spec.caption if spec else element.caption),
                 "chart_type": spec.chart_type if spec else "",
+                "title": spec.title if spec else None,
+                "subtitle": spec.subtitle if spec else "",
                 "insight": spec.insight if spec else "",
-                "series": [s.name for s in spec.series] if spec else []}
+                "categories": list(spec.categories) if spec else [],
+                "series": [_chart_series(series) for series in spec.series]
+                          if spec else [],
+                "category_axis": spec.category_axis.model_dump(mode="json")
+                                 if spec else {},
+                "value_axis": spec.value_axis.model_dump(mode="json")
+                              if spec else {},
+                "legend": spec.legend if spec else "none",
+                "data_labels": spec.data_labels if spec else "none",
+                "annotations": [a.model_dump(mode="json")
+                                for a in spec.annotations] if spec else [],
+                "source_note": spec.source_note if spec else "",
+                "intended_message": spec.insight if spec else ""}
     if isinstance(element, DiagramElement):
         spec = deliverable.specs.diagrams.get(element.spec_id)
         return {**base, "caption": (spec.caption if spec else element.caption),
@@ -148,6 +181,127 @@ def _block(element, deliverable: Deliverable) -> dict:
     if isinstance(element, ImageElement):
         return {**base, "alt": element.alt, "caption": element.caption}
     return base
+
+
+def _chart_series(series) -> dict:
+    return {
+        "name": series.name,
+        "unit": series.unit,
+        "currency": series.currency,
+        "period": series.period,
+        "kind_override": series.kind_override,
+        "points": [point.model_dump(mode="json") for point in series.points],
+    }
+
+
+def format_preview(deliverable: Deliverable, selected_format: str, *,
+                   source_files: Optional[list[str]] = None,
+                   conflicts: Optional[list[dict]] = None) -> dict:
+    """A complete, format-aware review description from the stored plan."""
+    pages = [_format_page(page, deliverable, selected_format)
+             for page in deliverable.pages]
+    if selected_format in ("pdf", "word"):
+        pages = _document_furniture(
+            pages, deliverable, source_files or [], conflicts or [])
+    common = {
+        "format": selected_format,
+        "title": deliverable.title,
+        "subtitle": deliverable.subtitle,
+        "governing_message": deliverable.governing_message,
+        "pages": pages,
+    }
+    if selected_format == "html":
+        common["layout"] = {
+            "header": "Branded masthead with report title, subtitle, audience and reporting period",
+            "navigation": "Sticky contents navigation linking to each report section",
+            "content": "Responsive section cards in the approved order, using each page composition",
+            "tables": "Responsive tables with horizontal scrolling on narrow screens",
+            "visuals": "Inline charts and diagrams generated from the approved specifications",
+            "interactions": ["section navigation", "responsive layout", "source-note disclosure"],
+            "responsive": "Multi-column compositions collapse to one column on small screens",
+            "footer": "Report identity, source notes and generation metadata",
+        }
+    if selected_format == "chart":
+        common["charts"] = [
+            _block(element, deliverable)
+            for page in deliverable.pages for element in page.elements
+            if isinstance(element, ChartElement)
+        ]
+    return common
+
+
+def _document_furniture(pages: list[dict], deliverable: Deliverable,
+                        source_files: list[str], conflicts: list[dict]) -> list[dict]:
+    """The TOC and methodology pages the Word/PDF renderers always add."""
+    output = list(pages)
+    content_pages = [page for page in pages if page["purpose"] != "cover"]
+    if len(content_pages) >= 3:
+        entries = [f"{page['title'] or page['page_id']} — planned page {index + 3}"
+                   for index, page in enumerate(content_pages)]
+        contents = {
+            "number": 0, "label": "Page", "page_id": "document-contents",
+            "purpose": "contents", "is_divider": False,
+            "layout": "Table of contents", "composition": "single",
+            "title": "Contents", "subtitle": "",
+            "content": [{
+                "kind": "bullets", "block_id": "document-contents.items",
+                "title": None, "authored_by": "python", "emphasis": "none",
+                "items": [{"text": entry, "emphasis": "none"}
+                          for entry in entries],
+            }],
+            "speaker_notes": "", "source_note": "", "warnings": [],
+        }
+        cover_index = next((index for index, page in enumerate(output)
+                            if page["purpose"] == "cover"), -1)
+        output.insert(cover_index + 1, contents)
+
+    methodology_items = list(source_files) or ["No files were read for this document."]
+    for conflict in conflicts:
+        values = "; ".join(f"{name} says {value}"
+                           for name, value in conflict.get("values", {}).items())
+        methodology_items.append(
+            f"Unresolved: {conflict.get('entity_key', 'source disagreement')} "
+            f"({conflict.get('field', 'value')}): {values}")
+    methodology_items.extend(deliverable.notes)
+    methodology_items.extend(deliverable.warnings[:15])
+    output.append({
+        "number": 0, "label": "Page", "page_id": "sources-and-methodology",
+        "purpose": "appendix", "is_divider": False,
+        "layout": "Sources and methodology", "composition": "single",
+        "title": "Sources and methodology", "subtitle": "Sources read, unresolved disagreements, and limitations",
+        "content": [{
+            "kind": "bullets", "block_id": "sources-and-methodology.items",
+            "title": None, "authored_by": "python", "emphasis": "none",
+            "items": [{"text": item, "emphasis": "none"}
+                      for item in methodology_items],
+        }],
+        "speaker_notes": "", "source_note": "", "warnings": [],
+    })
+    for index, page in enumerate(output, start=1):
+        page["number"] = index
+    return output
+
+
+def _format_page(page: PageDesign, deliverable: Deliverable,
+                 selected_format: str) -> dict:
+    label = ("Slide" if selected_format == "powerpoint"
+             else "Page" if selected_format in ("pdf", "word")
+             else "Section")
+    return {
+        "number": page.index + 1,
+        "label": label,
+        "page_id": page.page_id,
+        "purpose": page.purpose,
+        "is_divider": page.purpose == "divider",
+        "layout": page.layout_name or page.composition,
+        "composition": page.composition,
+        "title": page.title,
+        "subtitle": page.subtitle,
+        "content": [_block(element, deliverable) for element in page.elements],
+        "speaker_notes": page.speaker_notes,
+        "source_note": page.source_note,
+        "warnings": list(page.warnings),
+    }
 
 
 def _kind(element) -> str:
@@ -166,7 +320,7 @@ def _table(base: dict, element: TableElement, deliverable: Deliverable) -> dict:
     return {
         **base,
         "derived": False,
-        "note": spec.truncation_note(),
+        "note": spec.note(),
         "row_limit": spec.row_limit,
         "spec_id": spec.spec_id,
         "columns": [{"header": c.header, "kind": c.kind} for c in spec.columns],
@@ -183,7 +337,7 @@ def _table(base: dict, element: TableElement, deliverable: Deliverable) -> dict:
                 }
                 for cell in row
             ]
-            for row in spec.rows
+            for row in spec.displayed_rows
         ],
         "caption": spec.caption,
     }

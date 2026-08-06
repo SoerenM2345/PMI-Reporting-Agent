@@ -97,6 +97,9 @@ function ActionControl({ action, onAction, busy }) {
     case "choose_audience":
       return <AudienceChoice action={action} onAction={onAction} busy={busy} />;
 
+    case "choose_format":
+      return <FormatChoice action={action} onAction={onAction} busy={busy} />;
+
     case "review_low_confidence":
       return <LowConfidencePanel items={action.items ?? []} />;
 
@@ -107,6 +110,35 @@ function ActionControl({ action, onAction, busy }) {
       return null;
   }
 }
+
+function FormatChoice({ action, onAction, busy }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {(action.options ?? []).map((option) => (
+        <button
+          key={option}
+          type="button"
+          disabled={busy}
+          onClick={() => onAction({ type: "say", text: FORMAT_LABELS[option] ?? option })}
+          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs
+                     font-medium text-slate-700 hover:border-slate-500
+                     disabled:opacity-40"
+        >
+          {FORMAT_LABELS[option] ?? option}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const FORMAT_LABELS = {
+  powerpoint: "PowerPoint",
+  pdf: "PDF",
+  word: "Word",
+  excel: "Excel",
+  html: "HTML",
+  chart: "Chart",
+};
 
 /**
  * §4's audience question — open, with the four report shapes as examples.

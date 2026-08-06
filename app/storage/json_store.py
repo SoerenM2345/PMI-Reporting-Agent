@@ -132,8 +132,9 @@ def load_analysis(session_id: str) -> Optional[SessionAnalysis]:
 
 # ------------------------------------------------------------------- pending
 # A tiny, durable pointer for a multi-turn chat exchange — which missing value
-# the agent is currently asking for, or whether it is waiting for a "regenerate?"
-# yes/no. Deliberately *not* the transcript: the transcript is compacted
+# the agent is currently asking for, whether it is waiting for a "regenerate?"
+# yes/no, or which request should resume once files arrive. Deliberately *not*
+# the transcript: the transcript is compacted
 # (`chat_store`) and is explicitly not the source of truth. Only the pointer
 # lives here; the list of gaps is always recomputed from `analysis.json`, so this
 # file can never disagree with the data it points into.

@@ -1,0 +1,189 @@
+{
+  "corpus_version": "dellemc_vcio_v1.0",
+  "generated_from": [
+    "case.py",
+    "error_key.py"
+  ],
+  "conditions": {
+    "clean": {
+      "findable": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6"
+      ],
+      "count": 6
+    },
+    "with_errors": {
+      "findable": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6",
+        "E-01",
+        "E-02",
+        "E-03",
+        "E-04",
+        "E-05",
+        "E-06",
+        "E-07",
+        "E-08",
+        "E-09",
+        "E-10"
+      ],
+      "count": 16,
+      "note": "the with_errors corpus is a copy of clean, so both the 6 designed conflicts and the 10 injected errors are present and findable \u2014 16 total, not 10 (corpus_integration_plan.md Part 2)"
+    }
+  },
+  "conflicts": [
+    {
+      "id": "C1",
+      "field": "WS3 IT workstream progress percent",
+      "kind": "designed",
+      "claims": [
+        {
+          "file": "DellEMC_VCIO_Integration_Tracker_W3_2016-09-29.xlsx",
+          "sheet": "Massnahmenplan",
+          "value": 59,
+          "note": "average of the WS3 task rows' percent-complete column; authoritative, not a separately typed figure"
+        },
+        {
+          "file": "DellEMC_VCIO_Workstream_Status_IT_W3_2016-09-28.pptx",
+          "value": 66,
+          "note": "workstream one-pager rounds up"
+        },
+        {
+          "file": "DellEMC_VCIO_RAG_Dashboard_Screenshot_2016-09-29.png",
+          "value": 53,
+          "note": "dashboard screenshot cached before the last tracker update"
+        }
+      ],
+      "correct": 59,
+      "resolution_rule": "Excel wins, source priority 1",
+      "must_escalate": true
+    },
+    {
+      "id": "C2",
+      "field": "Milestone M-07 (ERP consolidation blueprint) forecast date",
+      "kind": "designed",
+      "claims": [
+        {
+          "file": "DellEMC_VCIO_Integration_Roadmap_Day1_to_Day100_2016-09-16.pptx",
+          "value": "2016-10-07",
+          "note": "still carries the original baseline, not the current forecast"
+        },
+        {
+          "file": "DellEMC_VCIO_Wochenprotokoll_KW39_2016-09-27.docx",
+          "value": "2016-10-14",
+          "note": "records the first slip"
+        },
+        {
+          "file": "DellEMC_VCIO_Eskalation_Mailverlauf_M-07_2016-09-28.html",
+          "value": "2016-10-21",
+          "note": "most recent; explicitly supersedes the Wochenprotokoll date in the same thread; matches the tracker"
+        }
+      ],
+      "correct": "2016-10-21",
+      "resolution_rule": "most recent dated source, which matches the tracker",
+      "must_escalate": true
+    },
+    {
+      "id": "C3",
+      "field": "Human Capital (WS4) workstream lead",
+      "kind": "designed",
+      "claims": [
+        {
+          "file": "DellEMC_VCIO_Rollenkarten_Integrationsorganisation_2016-08-01.docx",
+          "value": "V. Osei-Bonsu",
+          "note": "role card not updated after the handover"
+        },
+        {
+          "file": "DellEMC_VCIO_RACI_Matrix_Integration_Hub_2016-09-23.html",
+          "value": "J. Adeyemi",
+          "note": "states itself authoritative for current staffing"
+        }
+      ],
+      "correct": "J. Adeyemi",
+      "resolution_rule": "RACI page, which states itself to be authoritative for staffing",
+      "must_escalate": true
+    },
+    {
+      "id": "C4",
+      "field": "Secured synergy run-rate (USD m)",
+      "kind": "designed",
+      "claims": [
+        {
+          "file": "DellEMC_VCIO_SteerCo_Update_Session02_2016-09-29.pptx",
+          "value": 2410,
+          "note": "rounds up and counts initiatives Finance has not validated"
+        },
+        {
+          "file": "DellEMC_VCIO_Synergy_Tracker_W3_2016-09-28.xlsx",
+          "sheet": "Summary",
+          "value": 2354,
+          "note": "exact sum of the register"
+        },
+        {
+          "file": "DellEMC_VCIO_Synergy_Tracker_W3_2016-09-28.xlsx",
+          "sheet": "Summary",
+          "value": 711,
+          "note": "sum restricted to rows flagged Finance-validated ('Yes'); not a separately stated headline figure, derived from the tracker's own validated column per decision B-06"
+        }
+      ],
+      "correct": 711,
+      "resolution_rule": "Finance-validated figure only, per decision B-06",
+      "must_escalate": true
+    },
+    {
+      "id": "C5",
+      "field": "Severity of risk R-02 (works council consultation)",
+      "kind": "designed",
+      "claims": [
+        {
+          "file": "DellEMC_VCIO_RAID_Log_W3_2016-09-29.xlsx",
+          "sheet": "Risks",
+          "value": "12 (Medium)",
+          "note": "likelihood 4 x impact 3, per the register's own columns"
+        },
+        {
+          "file": "DellEMC_VCIO_Teams_Eskalation_R-02_2016-09-29.png",
+          "value": "20 (High)",
+          "note": "escalated in a Teams thread captured in this screenshot; never entered into the RAID log"
+        }
+      ],
+      "correct": null,
+      "resolution_rule": null,
+      "expected_behaviour": "flag_stale",
+      "must_escalate": true,
+      "note": "No resolvable 'correct' value \u2014 the point is that the register is out of date and the escalation never reached it. Silently keeping either number is a failure; the only correct behaviour is to flag the register as stale (see evaluation_study_design.md P2)."
+    },
+    {
+      "id": "C6",
+      "field": "Owner of action OP-01 (circulate the dependency map)",
+      "kind": "designed",
+      "claims": [
+        {
+          "file": "DellEMC_VCIO_SteerCo_Minutes_Session01_signed_2016-09-22.pdf",
+          "value": "D. Okonjo",
+          "note": "signed minutes; never amended"
+        },
+        {
+          "file": "DellEMC_VCIO_Eskalation_Mailverlauf_M-07_2016-09-28.html",
+          "value": "S. Lindqvist",
+          "note": "reassigned by e-mail after the meeting"
+        }
+      ],
+      "correct": "S. Lindqvist",
+      "resolution_rule": "later source, but the divergence itself must be flagged: the signed minutes were never amended to match",
+      "expected_behaviour": "flag_stale",
+      "must_escalate": true
+    }
+  ],
+  "known_gaps": [
+    "Per-entity `stated_in` provenance for the full entity set (milestones, tasks, risks, synergies, decisions, actions, dependencies, assumptions, issues) is not yet exported here \u2014 only the 6 planted conflicts and 10 injected errors are. Full entity-level export would require tracing every field through the g2_*.py generators the way this script's conflict mapping was traced, and is needed before metric S1 (extraction recall) can be scored per-entity. The gate metrics (P1-P5) and detection metrics (S2, S3) do not need it."
+  ]
+}

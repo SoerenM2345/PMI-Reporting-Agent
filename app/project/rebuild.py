@@ -66,7 +66,8 @@ def rebuild(project_id: str, *, repos: Optional[Repositories] = None,
             add_facts: Optional[list[ConfirmedFact]] = None,
             add_questions: Optional[list[OpenQuestion]] = None,
             add_assumptions: Optional[list[Assumption]] = None,
-            set_project_fields: Optional[dict[str, str]] = None) -> ProjectKnowledge:
+            set_project_fields: Optional[dict[str, str]] = None,
+            set_requested_structure: Optional[list[str]] = None) -> ProjectKnowledge:
     """Re-derive canonical knowledge from the active source set and persist it.
 
     Runs under the project lock; returns the newly written `ProjectKnowledge`.
@@ -94,6 +95,11 @@ def rebuild(project_id: str, *, repos: Optional[Repositories] = None,
         facts = [*(prev.confirmed_user_facts if prev else []), *add_facts]
         questions = [*(prev.open_questions if prev else []), *add_questions]
         assumptions = [*(prev.assumptions if prev else []), *add_assumptions]
+        requested_structure = (
+            list(set_requested_structure)
+            if set_requested_structure is not None
+            else list(prev.requested_structure if prev else [])
+        )
 
         records, source_files = files_mod.collect_active(project_id, repos=repos)
         project = _project_header(project_id, prev, source_files)
@@ -130,7 +136,8 @@ def rebuild(project_id: str, *, repos: Optional[Repositories] = None,
         new_version = expected + 1
         change = _change_log_entry(prev, model, source_files, new_version, trigger)
         has_additions = bool(add_decisions or add_facts or add_questions
-                             or add_assumptions or set_project_fields)
+                             or add_assumptions or set_project_fields
+                             or set_requested_structure is not None)
 
         # A rebuild that changed no entity *and* added no metadata does not mint a
         # new version — the version number stays a meaningful record of when
@@ -150,6 +157,7 @@ def rebuild(project_id: str, *, repos: Optional[Repositories] = None,
             assumptions=assumptions,
             open_questions=questions,
             user_decisions=decisions,
+            requested_structure=requested_structure,
             source_index=_source_index(project_id, repos),
             change_log=([*prev.change_log, change] if prev else [change]),
             updated_at=_now(),

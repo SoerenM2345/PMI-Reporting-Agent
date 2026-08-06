@@ -88,6 +88,51 @@ def ids(content) -> list[str]:
 
 
 # ======================================================= user-defined structure
+def test_a_saved_structure_can_be_edited_without_repeating_it():
+    from app.report.structure import SectionSpec, StructureSpec, revise
+
+    existing = StructureSpec(sections=[
+        SectionSpec(title="Integration status"),
+        SectionSpec(title="All workstreams"),
+        SectionSpec(title="Milestones"),
+    ]).model_dump(mode="json")
+
+    updated = revise(
+        existing,
+        "Please add also 4. Budget and eliminate all workstreams part",
+    )
+
+    assert [section.title for section in updated.sections] == [
+        "Integration status", "Milestones", "Budget",
+    ]
+
+
+def test_a_section_can_be_replaced_in_natural_language():
+    """"Instead of X I would like Y" changes the topic, not just its label.
+
+    Keeping the old ``section_id`` would put risk rows under a Budget heading,
+    so the replacement deliberately returns to an unmatched section spec and is
+    mapped to Budget evidence during the next plan.
+    """
+    from app.report.structure import SectionSpec, StructureSpec, revise
+
+    existing = StructureSpec(sections=[
+        SectionSpec(title="Headcount Integration"),
+        SectionSpec(title="Employee Risks", section_id="risks.critical"),
+        SectionSpec(title="Next Steps"),
+    ]).model_dump(mode="json")
+
+    updated = revise(
+        existing,
+        "instead of Employee Risks I would like to have Employee Budget",
+    )
+
+    assert [section.title for section in updated.sections] == [
+        "Headcount Integration", "Employee Budget", "Next Steps",
+    ]
+    assert updated.sections[1].section_id is None
+
+
 def test_a_requested_structure_replaces_the_house_deck(model):
     """§17. `DECKS` is a good default and used to be the only possible answer.
 

@@ -91,10 +91,17 @@ _CORRECTION = re.compile(
 def classify_message(text: str, *, provider: Optional[str] = None,
                      model: Optional[str] = None) -> Classification:
     """Classify one chat message. LLM when configured, keyword model otherwise."""
+    local = classify_by_keyword(text)
+    # Questions, explicit instructions, decisions and parseable values are
+    # unambiguous.  Paying for a network classifier before every project turn
+    # made latency at least two serial model calls even when a regex had already
+    # settled the route.  Reserve the model for genuinely ambiguous statements.
+    if local.contribution != "no_knowledge_change" or _is_question(text):
+        return local
     llm = _classify_llm(text, provider=provider, model=model)
     if llm is not None:
         return llm
-    return classify_by_keyword(text)
+    return local
 
 
 def classify_by_keyword(text: str) -> Classification:
@@ -185,14 +192,22 @@ formatting request or a question as a fact."""
 
 def _classify_llm(text: str, *, provider: Optional[str],
                   model: Optional[str]) -> Optional[Classification]:
+    from app.config import get_settings
     from app.llm import LLMError, get_client
 
     client = get_client(provider)
     if client.name == "none":
         return None
     try:
-        result = client.structured(system=_SYSTEM, user=text,
-                                   output_model=_LLMClassification, model=model)
+        # Classification is a tiny routing task.  Running it on a selected
+        # reasoning model (especially Opus) added the slowest model round-trip
+        # before the actual answer.  Keep the chat's provider, but use that
+        # provider's fast role and a tight response budget.
+        fast = get_settings().models_for(provider, model).fast
+        result = client.structured(
+            system=_SYSTEM, user=text, output_model=_LLMClassification,
+            model=fast, max_tokens=192,
+        )
     except LLMError as exc:
         log.warning("message classification failed (%s); using keywords", exc)
         return None

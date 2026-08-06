@@ -159,6 +159,127 @@ def test_sections_are_also_read_from_an_inline_list(model):
                                           "next steps"]
 
 
+def test_an_unpunctuated_chro_section_run_is_kept_verbatim(model):
+    request = (
+        "No, I need a CHRO report. Focus on Human Capital. Include Retention "
+        "Works Council Organization Design Talent Risks Compensation Critical "
+        "Milestones Recommendations"
+    )
+
+    context = build(model, request)
+
+    assert context.requested_sections == [
+        "Retention", "Works Council", "Organization Design", "Talent Risks",
+        "Compensation", "Critical Milestones", "Recommendations",
+    ]
+
+
+#: The reported request, typed the way a chat box actually receives it: an
+#: "Include:" line and then one section per line, with no bullets or numbers.
+CHRO_REQUEST = """Create a CHRO report.
+Focus on Human Capital.
+Include:
+Retention
+Works Council
+Organization Design
+Talent Risks
+Compensation
+Critical Milestones
+Recommendations"""
+
+CHRO_SECTIONS = ["Retention", "Works Council", "Organization Design",
+                 "Talent Risks", "Compensation", "Critical Milestones",
+                 "Recommendations"]
+
+
+def test_a_section_per_line_is_read_as_the_structure(model):
+    """The reported bug: seven named sections, and the house template instead.
+
+    Every parser here needed a marker the user had not typed — a bullet, a
+    number, or a comma — so a plain one-per-line list produced *no* sections,
+    and an empty `requested_sections` is indistinguishable downstream from "the
+    user did not say", which selects the default topics from the evidence.
+    """
+    assert build(model, CHRO_REQUEST).requested_sections == CHRO_SECTIONS
+
+
+def test_the_list_does_not_depend_on_whether_it_was_indented(model):
+    """It did, on exactly one leading space.
+
+    `Include\\n Retention` parsed and `Include:\\nRetention` did not, because the
+    intro pattern required a space or tab where the text had a newline. The
+    indented form is what a paste happens to produce, so the bug looked
+    intermittent rather than total.
+    """
+    indented = CHRO_REQUEST.replace("Include:", "Include").replace(
+        "\nRetention", "\n Retention")
+
+    assert build(model, indented).requested_sections[0] == "Retention"
+    assert build(model, indented).requested_sections == CHRO_SECTIONS
+
+
+def test_a_section_per_line_needs_no_known_vocabulary(model):
+    """Newlines delimit the titles, so nothing has to recognise them.
+
+    The vocabulary-gated parser could only read a list of topics it already knew
+    about, which is the wrong constraint for section titles the user invented.
+    """
+    context = build(model, "Create a CHRO report.\nInclude:\n"
+                           "Pension Harmonisation\nUnion Negotiations\n"
+                           "Shift Pattern Alignment")
+
+    assert context.requested_sections == [
+        "Pension Harmonisation", "Union Negotiations", "Shift Pattern Alignment"]
+
+
+def test_what_follows_the_list_is_not_swept_into_it(model):
+    """A format or an aside on the next line is not an eighth section."""
+    context = build(model, "Create a CHRO report.\nInclude:\nRetention\n"
+                           "Works Council\nCompensation\nAs PDF")
+
+    assert context.requested_sections == ["Retention", "Works Council",
+                                          "Compensation"]
+
+
+def test_a_blank_line_under_the_intro_does_not_end_the_list(model):
+    context = build(model, "Create a CHRO report.\nInclude:\n\nRetention\n"
+                           "Works Council\nCompensation")
+
+    assert context.requested_sections == ["Retention", "Works Council",
+                                          "Compensation"]
+
+
+def test_a_list_of_instructions_is_not_a_list_of_sections(model):
+    """The entry condition is a line that announces a list, and nothing else."""
+    context = build(model, "Do this:\nread the tracker\nthen tell me what is "
+                           "wrong\nand send it over")
+
+    assert context.requested_sections == []
+
+
+def test_an_ambiguous_include_sentence_is_not_invented_as_structure(model):
+    context = build(
+        model,
+        "Include a concise explanation of what changed and why it matters.",
+    )
+
+    assert context.requested_sections == []
+
+
+def test_slides_on_preserves_the_cfo_outline_verbatim(model):
+    context = build(
+        model,
+        "Create a Finance Status Report for the CFO based on the uploaded PMI "
+        "documents. Create slides on Budget Overview, Synergy Realization, "
+        "Cost Tracking, Financial Risks, Forecast vs. Actuals, and Key "
+        "Financial Decisions.",
+    )
+    assert context.requested_sections == [
+        "Budget Overview", "Synergy Realization", "Cost Tracking",
+        "Financial Risks", "Forecast vs. Actuals", "Key Financial Decisions",
+    ]
+
+
 def test_prose_does_not_get_mined_for_imaginary_sections(model):
     """Guessing sections out of a sentence invents structure the user did not
     ask for — the exact failure this redesign exists to end."""
@@ -262,6 +383,9 @@ def test_the_chat_summary_is_deterministic_and_needs_no_model(model):
 @pytest.mark.parametrize("request_text,expected", [
     ("Prepare a pack for the Steering Committee", "Steering Committee"),
     ("A one-pager for the CFO please", "CFO"),
+    ("Prepare a report for the CHRO", "CHRO"),
+    ("Prepare a report for the Chief Human Resources Officer", "Chief Human Resources Officer"),
+    ("Prepare a report for the HR Business Partner", "HR Business Partner"),
     ("Give the IMO a status update", None),
     ("board update on synergies", "board"),
 ])

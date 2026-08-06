@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import * as api from "./api";
+import ChatProjectPicker from "./components/chat/ChatProjectPicker";
 import Composer from "./components/chat/Composer";
 import MessageBubble from "./components/chat/MessageBubble";
 import ModelPicker from "./components/chat/ModelPicker";
 import ProjectPanel from "./components/chat/ProjectPanel";
 import Sidebar from "./components/chat/Sidebar";
 import Thinking from "./components/chat/Thinking";
-import ProjectWorkspace from "./components/report/ProjectWorkspace";
 
 /**
  * The §4 journey, as a conversation: upload → ask → resolve → *read the draft*
@@ -28,6 +28,13 @@ export default function App() {
   const [chat, setChat] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [chatSearchOpen, setChatSearchOpen] = useState(false);
+  const [chatSearchQuery, setChatSearchQuery] = useState("");
+  const [chatSearchIndex, setChatSearchIndex] = useState(0);
+
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [globalSearchResults, setGlobalSearchResults] = useState([]);
+  const [globalSearchBusy, setGlobalSearchBusy] = useState(false);
 
   // Projects are a filing layer over chats. `activeProject` non-null means the
   // main pane shows that project's knowledge editor instead of a conversation;
@@ -35,20 +42,24 @@ export default function App() {
   const [projects, setProjects] = useState([]);
   const [activeProject, setActiveProject] = useState(null);
 
-  // The project-centric workspace (Phase 3-5): a /api/chat conversation plus an
-  // editable, versioned report draft, both keyed by project_id. Lives here rather
-  // than in the component, per the app's "all state in App.jsx" convention.
-  const [projectTab, setProjectTab] = useState("workspace");
-  const [wsMessages, setWsMessages] = useState([]);
-  const [wsDraft, setWsDraft] = useState(null);
-  const [wsVersions, setWsVersions] = useState([]);
-  const [wsKnowledge, setWsKnowledge] = useState({ version: null, exists: false });
-  const [wsStale, setWsStale] = useState(0);
-
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const bottom = useRef(null);
   const messageCount = useRef(0);
+  const messageNodes = useRef(new Map());
+  const searchTimer = useRef(null);
+  const searchRequest = useRef(0);
+
+  const chatSearchMatches = useMemo(() => {
+    const needle = chatSearchQuery.trim().toLocaleLowerCase();
+    if (!needle) return [];
+    return messages.reduce((matches, message, index) => {
+      if (searchableText(message.content).toLocaleLowerCase().includes(needle)) {
+        matches.push(index);
+      }
+      return matches;
+    }, []);
+  }, [chatSearchQuery, messages]);
 
   useEffect(() => {
     refreshProjects();
@@ -70,8 +81,24 @@ export default function App() {
     messageCount.current = messages.length;
   }, [messages]);
 
-  const run = async (fn) => {
-    setBusy(true);
+  useEffect(() => {
+    setChatSearchIndex(0);
+  }, [chatSearchQuery]);
+
+  useEffect(() => {
+    const messageIndex = chatSearchMatches[chatSearchIndex];
+    if (messageIndex !== undefined) {
+      messageNodes.current.get(messageIndex)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }
+  }, [chatSearchIndex, chatSearchMatches]);
+
+  useEffect(() => () => clearTimeout(searchTimer.current), []);
+
+  const run = async (fn, { quiet = false } = {}) => {
+    if (!quiet) setBusy(true);
     setError(null);
     try {
       return await fn();
@@ -81,8 +108,40 @@ export default function App() {
       if (!(e instanceof api.Aborted)) setError(e.message);
       return null;
     } finally {
-      setBusy(false);
+      if (!quiet) setBusy(false);
     }
+  };
+
+  const searchEverywhere = (query) => {
+    setGlobalSearchQuery(query);
+    clearTimeout(searchTimer.current);
+    const requestId = searchRequest.current + 1;
+    searchRequest.current = requestId;
+
+    if (!query.trim()) {
+      setGlobalSearchResults([]);
+      setGlobalSearchBusy(false);
+      return;
+    }
+
+    setGlobalSearchBusy(true);
+    searchTimer.current = setTimeout(() => {
+      run(async () => {
+        const body = await api.searchApp(query);
+        if (searchRequest.current === requestId) {
+          setGlobalSearchResults(body.results || []);
+        }
+      }, { quiet: true }).finally(() => {
+        if (searchRequest.current === requestId) setGlobalSearchBusy(false);
+      });
+    }, 180);
+  };
+
+  const moveChatSearch = (direction) => {
+    if (!chatSearchMatches.length) return;
+    setChatSearchIndex((current) =>
+      (current + direction + chatSearchMatches.length) % chatSearchMatches.length,
+    );
   };
 
   /** Stop the running turn. The fetch aborts, the server sees the disconnect
@@ -111,6 +170,8 @@ export default function App() {
       setChatId(body.chat.chat_id);
       setChat(body.chat);
       setSessionId(body.session_id);
+      setChatSearchOpen(false);
+      setChatSearchQuery("");
       setMessages([
         agentSays(
           "Upload this week's PMI files and tell me what you need. I'll read " +
@@ -128,6 +189,8 @@ export default function App() {
       setChatId(id);
       setChat(body.chat);
       setSessionId(body.chat.session_id);
+      setChatSearchOpen(false);
+      setChatSearchQuery("");
       setMessages(body.messages);
     });
 
@@ -139,121 +202,8 @@ export default function App() {
       // knowledge text is only returned by the single-project read.
       const body = await api.getProject(id);
       setActiveProject(body.project);
-      setProjectTab("workspace");
-      setWsMessages([]);
-      setWsVersions([]);
-      setWsStale(0);
-      await loadWorkspace(id);
-    });
-
-  /* --------------------------------------------------- project workspace */
-  // The continuously-updating flow: files → knowledge → editable draft → export,
-  // all through the project-centric endpoints. Every call goes through `run(fn)`,
-  // and the refreshed draft/knowledge comes back into state so the UI can't drift
-  // from the server.
-  const loadWorkspace = async (projectId) => {
-    const kb = await api.getProjectKnowledge(projectId);
-    setWsKnowledge({ version: kb.exists ? kb.version : null, exists: kb.exists });
-    const drafts = await api.listDrafts(projectId);
-    setWsDraft(drafts.drafts?.[0] || null);
-  };
-
-  const wsUpload = (files) =>
-    run(async () => {
-      const pid = activeProject.project_id;
-      const body = await api.uploadProjectFiles(pid, files);
-      setWsKnowledge({ version: body.knowledge_version, exists: true });
-      setWsStale((body.stale_drafts || []).length);
-      if (wsDraft) {
-        const d = await api.getDraft(pid, wsDraft.draft_id);
-        setWsDraft(d.draft);
-      }
-      setWsMessages((prior) => [
-        ...prior,
-        wsTurn(`Processed ${body.ingested.length} file(s) — project knowledge ` +
-          `updated to version ${body.knowledge_version}.`),
-      ]);
-    });
-
-  const wsSend = (text) =>
-    run(async () => {
-      const pid = activeProject.project_id;
-      setWsMessages((prior) => [
-        ...prior,
-        { id: `u-${Date.now()}`, role: "user", text },
-      ]);
-      const resp = await api.chat({
-        project_id: pid,
-        message: text,
-        active_draft_id: wsDraft?.draft_id || null,
-      });
-      setWsMessages((prior) => [...prior, wsAgentTurn(pid, resp)]);
-      if (resp.knowledge_version != null) {
-        setWsKnowledge({ version: resp.knowledge_version, exists: true });
-      }
-      const staleActions = (resp.actions || []).filter((a) => a.type === "draft_stale");
-      if (staleActions.length) setWsStale(staleActions.length);
-      // A turn that created, updated or pointed at a draft → load it on the right.
-      const target =
-        resp.draft?.draft_id ||
-        (resp.actions || []).find((a) => a.draft_id)?.draft_id;
-      if (target) {
-        const d = await api.getDraft(pid, target);
-        setWsDraft(d.draft);
-      }
-    });
-
-  const wsCreateDraft = () =>
-    run(async () => {
-      const body = await api.createDraft(activeProject.project_id, {});
-      setWsDraft(body.draft);
-    });
-
-  const wsSaveSection = (sectionId, text) =>
-    run(async () => {
-      const body = await api.patchDraft(activeProject.project_id, wsDraft.draft_id, {
-        section_id: sectionId,
-        text,
-      });
-      setWsDraft(body.draft);
-    });
-
-  const wsRegenerate = (sectionId) =>
-    run(async () => {
-      const body = await api.regenerateSection(
-        activeProject.project_id, wsDraft.draft_id, sectionId);
-      setWsDraft(body.draft);
-    });
-
-  const wsExport = (format) =>
-    run(async () => {
-      const pid = activeProject.project_id;
-      const body = await api.exportDraft(pid, wsDraft.draft_id, format);
-      setWsMessages((prior) => [
-        ...prior,
-        {
-          id: `x-${Date.now()}`,
-          role: "agent",
-          text: `Exported the saved draft as **${format}**.`,
-          actions: [{ type: "download", file: body.file, url: body.download_url }],
-        },
-      ]);
-    });
-
-  const wsLoadVersions = () =>
-    run(async () => {
-      const body = await api.listDraftVersions(
-        activeProject.project_id, wsDraft.draft_id);
-      setWsVersions(body.versions);
-    });
-
-  const wsRestore = (version) =>
-    run(async () => {
-      const pid = activeProject.project_id;
-      const body = await api.restoreDraftVersion(pid, wsDraft.draft_id, version);
-      setWsDraft(body.draft);
-      const v = await api.listDraftVersions(pid, wsDraft.draft_id);
-      setWsVersions(v.versions);
+      setChatSearchOpen(false);
+      setChatSearchQuery("");
     });
 
   const createProject = ({ name, icon }) =>
@@ -285,6 +235,23 @@ export default function App() {
       setActiveProject(body.project);
       return body.project;
     });
+
+  const moveChatToProject = (existingChatId, projectId) =>
+    run(async () => {
+      const moved = await api.patchChat(existingChatId, { project_id: projectId });
+      if (existingChatId === chatId) setChat(moved.chat);
+      await refreshChats();
+      await refreshProjects();
+      // If the user is looking at a project, keep its counts, knowledge and
+      // workspace current whether a chat was moved into or out of it.
+      if (activeProject) {
+        const body = await api.getProject(activeProject.project_id);
+        setActiveProject(body.project);
+      }
+    });
+
+  const addExistingChat = (projectId, existingChatId) =>
+    moveChatToProject(existingChatId, projectId);
 
   const deleteProject = (id, name) =>
     run(async () => {
@@ -353,6 +320,7 @@ export default function App() {
         ...prior.filter((m) => !localIds.includes(m.message_id)),
         ...(body.messages ?? []),
       ]);
+      if (body.chat) setChat(body.chat);
 
       await refreshChats();
     });
@@ -442,6 +410,49 @@ export default function App() {
         return null;
       }
 
+      if (action.type === "approve_generate") {
+        const approval = await api.approveContent(
+          sessionId,
+          action.version,
+          action.format,
+        );
+        const body = await api.generateAs(
+          sessionId,
+          action.format,
+          true,
+          approval.approval_id,
+          action.version,
+        );
+        const unresolved = body.generated_with_unresolved_conflicts ?? [];
+        setMessages((prior) => [
+          ...prior,
+          {
+            message_id: `local-dl-${Date.now()}`,
+            role: "agent",
+            kind: "text",
+            content: {
+              format: "markdown",
+              content:
+                `Here is the approved ${action.format}.` +
+                (unresolved.length
+                  ? ` It carries ${unresolved.length} unresolved critical conflict(s), and says so.`
+                  : ""),
+              artifacts: (body.outputs ?? []).map((name) => ({
+                filename: name,
+                session_id: sessionId,
+                type: extensionOf(name),
+                title: name,
+                status: "ready",
+                download_url: api.downloadUrl(sessionId, name),
+              })),
+              actions: [],
+              status: "completed",
+            },
+          },
+        ]);
+        return body;
+      }
+
       return null;
     });
 
@@ -449,6 +460,20 @@ export default function App() {
     run(async () => {
       await api.patchChat(id, { title });
       await refreshChats();
+    });
+
+  const pinChat = (id, pinned) =>
+    run(async () => {
+      const body = await api.patchChat(id, { pinned });
+      if (id === chatId) setChat(body.chat);
+      await refreshChats();
+    });
+
+  const pinProject = (id, pinned) =>
+    run(async () => {
+      const body = await api.patchProject(id, { pinned });
+      if (activeProject?.project_id === id) setActiveProject(body.project);
+      await refreshProjects();
     });
 
   const archive = (id, archived) =>
@@ -487,6 +512,7 @@ export default function App() {
         onNew={newChat}
         onOpen={openChat}
         onRename={rename}
+        onPinChat={pinChat}
         onArchive={archive}
         onDelete={remove}
         onOpenProject={openProject}
@@ -494,6 +520,12 @@ export default function App() {
         onRenameProject={renameProject}
         onChangeProjectIcon={changeProjectIcon}
         onDeleteProject={deleteProject}
+        onPinProject={pinProject}
+        onMoveChat={moveChatToProject}
+        searchQuery={globalSearchQuery}
+        searchResults={globalSearchResults}
+        searchBusy={globalSearchBusy}
+        onSearchQueryChange={searchEverywhere}
         busy={busy}
       />
 
@@ -505,14 +537,6 @@ export default function App() {
             <span className="mr-3 truncate text-sm font-semibold text-slate-800">
               {activeProject.name}
             </span>
-            <TabButton active={projectTab === "workspace"}
-                       onClick={() => setProjectTab("workspace")}>
-              Workspace
-            </TabButton>
-            <TabButton active={projectTab === "knowledge"}
-                       onClick={() => setProjectTab("knowledge")}>
-              Knowledge &amp; chats
-            </TabButton>
           </div>
 
           {error && (
@@ -522,63 +546,80 @@ export default function App() {
             </div>
           )}
 
-          {projectTab === "workspace" ? (
-            <main className="flex min-h-0 flex-1 flex-col bg-slate-50">
-              <ProjectWorkspace
-                messages={wsMessages}
-                draft={wsDraft}
-                versions={wsVersions}
-                knowledgeVersion={wsKnowledge.version}
-                staleCount={wsStale}
-                hasKnowledge={wsKnowledge.exists}
-                busy={busy}
-                onUploadFiles={wsUpload}
-                onSend={wsSend}
-                onCreateDraft={wsCreateDraft}
-                onSaveSection={wsSaveSection}
-                onRegenerate={wsRegenerate}
-                onExport={wsExport}
-                onLoadVersions={wsLoadVersions}
-                onRestore={wsRestore}
-              />
-            </main>
-          ) : (
-            <ProjectPanel
-              project={activeProject}
-              chats={chats.filter((c) => c.project_id === activeProject.project_id)}
-              busy={busy}
-              onSaveKnowledge={(text) =>
-                saveProjectKnowledge(activeProject.project_id, text)
-              }
-              onNewChat={() => newChat(activeProject.project_id)}
-              onOpenChat={openChat}
-              onChangeIcon={(icon) =>
-                changeProjectIcon(activeProject.project_id, icon)
-              }
-              onRename={(name) => renameProject(activeProject.project_id, name)}
-            />
-          )}
+          <ProjectPanel
+            project={activeProject}
+            chats={chats.filter((c) => c.project_id === activeProject.project_id)}
+            availableChats={chats.filter((c) => !c.project_id)}
+            busy={busy}
+            onSaveKnowledge={(text) =>
+              saveProjectKnowledge(activeProject.project_id, text)
+            }
+            onNewChat={() => newChat(activeProject.project_id)}
+            onAddExistingChat={(existingChatId) =>
+              addExistingChat(activeProject.project_id, existingChatId)
+            }
+            onOpenChat={openChat}
+            onChangeIcon={(icon) =>
+              changeProjectIcon(activeProject.project_id, icon)
+            }
+            onRename={(name) => renameProject(activeProject.project_id, name)}
+          />
         </div>
       ) : (
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b
+        <header className="flex items-center justify-between gap-4 border-b
                            border-slate-200 bg-white px-6 py-3">
-          <div>
-            <h1 className="text-sm font-semibold text-slate-900">
-              
-            </h1>
-
+          {chatSearchOpen ? (
+            <ChatSearchBar
+              query={chatSearchQuery}
+              matchCount={chatSearchMatches.length}
+              activeIndex={chatSearchIndex}
+              onChange={setChatSearchQuery}
+              onPrevious={() => moveChatSearch(-1)}
+              onNext={() => moveChatSearch(1)}
+              onClose={() => {
+                setChatSearchOpen(false);
+                setChatSearchQuery("");
+              }}
+            />
+          ) : (
+            <div className="flex min-w-0 items-center">
+              <h1 className="max-w-72 truncate text-sm font-semibold text-slate-900">
+                {chat?.title || "New chat"}
+              </h1>
+            </div>
+          )}
+          <div className="flex shrink-0 items-center gap-2">
+            {!chatSearchOpen && (
+              <button
+                type="button"
+                onClick={() => setChatSearchOpen(true)}
+                aria-label="Search in this chat"
+                title="Search in this chat"
+                className="flex h-9 w-9 items-center justify-center rounded-lg
+                           border border-slate-200 text-slate-500 transition
+                           hover:bg-slate-50 hover:text-slate-800"
+              >
+                ⌕
+              </button>
+            )}
+            <ChatProjectPicker
+              chat={chat}
+              projects={projects}
+              busy={busy}
+              onChange={(projectId) => moveChatToProject(chatId, projectId)}
+            />
+            <ModelPicker
+              chat={chat}
+              busy={busy}
+              onChange={(choice) =>
+                run(async () => {
+                  const body = await api.patchChat(chatId, choice);
+                  setChat(body.chat);
+                })
+              }
+            />
           </div>
-          <ModelPicker
-            chat={chat}
-            busy={busy}
-            onChange={(choice) =>
-              run(async () => {
-                const body = await api.patchChat(chatId, choice);
-                setChat(body.chat);
-              })
-            }
-          />
         </header>
 
         {error && (
@@ -590,14 +631,34 @@ export default function App() {
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           <div className="mx-auto max-w-3xl space-y-4">
-            {messages.map((message) => (
-              <MessageBubble
-                key={message.message_id}
-                message={message}
-                onAction={handleAction}
-                busy={busy}
-              />
-            ))}
+            {messages.map((message, index) => {
+              const matchPosition = chatSearchMatches.indexOf(index);
+              const selected =
+                chatSearchQuery.trim() && matchPosition === chatSearchIndex;
+              const matched = chatSearchQuery.trim() && matchPosition >= 0;
+              return (
+                <div
+                  key={message.message_id}
+                  ref={(node) => {
+                    if (node) messageNodes.current.set(index, node);
+                    else messageNodes.current.delete(index);
+                  }}
+                  className={`rounded-2xl transition ${
+                    selected
+                      ? "ring-2 ring-amber-400 ring-offset-2"
+                      : matched
+                      ? "ring-1 ring-amber-200"
+                      : ""
+                  }`}
+                >
+                  <MessageBubble
+                    message={message}
+                    onAction={handleAction}
+                    busy={busy}
+                  />
+                </div>
+              );
+            })}
             {/* Sits where the reply will appear, so the eye is already there. */}
             <Thinking active={busy} />
             <div ref={bottom} />
@@ -616,35 +677,87 @@ export default function App() {
   );
 }
 
-function TabButton({ active, onClick, children }) {
+function ChatSearchBar({
+  query,
+  matchCount,
+  activeIndex,
+  onChange,
+  onPrevious,
+  onNext,
+  onClose,
+}) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-        active
-          ? "bg-slate-900 text-white"
-          : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-      }`}
-    >
-      {children}
-    </button>
+    <div className="flex min-w-0 flex-1 items-center gap-1">
+      <label className="relative min-w-0 max-w-lg flex-1">
+        <span className="sr-only">Search in this chat</span>
+        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
+          ⌕
+        </span>
+        <input
+          autoFocus
+          type="search"
+          value={query}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.shiftKey ? onPrevious() : onNext();
+            }
+            if (event.key === "Escape") onClose();
+          }}
+          placeholder="Search in this chat"
+          className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3
+                     text-sm text-slate-800 outline-none focus:border-slate-500
+                     focus:ring-2 focus:ring-slate-100"
+        />
+      </label>
+      <span className="min-w-16 px-1 text-center text-xs text-slate-400">
+        {query.trim()
+          ? matchCount
+            ? `${activeIndex + 1} of ${matchCount}`
+            : "No matches"
+          : ""}
+      </span>
+      <button
+        type="button"
+        onClick={onPrevious}
+        disabled={!matchCount}
+        aria-label="Previous chat search result"
+        className="flex h-8 w-8 items-center justify-center rounded-lg
+                   text-slate-500 hover:bg-slate-100 disabled:opacity-30"
+      >
+        ↑
+      </button>
+      <button
+        type="button"
+        onClick={onNext}
+        disabled={!matchCount}
+        aria-label="Next chat search result"
+        className="flex h-8 w-8 items-center justify-center rounded-lg
+                   text-slate-500 hover:bg-slate-100 disabled:opacity-30"
+      >
+        ↓
+      </button>
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="Close chat search"
+        className="flex h-8 w-8 items-center justify-center rounded-lg
+                   text-slate-500 hover:bg-slate-100"
+      >
+        ×
+      </button>
+    </div>
   );
 }
 
-// A workspace turn from /api/chat: the agent's Markdown reply, with any download
-// actions resolved to a URL so the bubble can offer the file directly.
-function wsAgentTurn(projectId, resp) {
-  const actions = (resp.actions || []).map((a) =>
-    a.type === "download" && a.file
-      ? { ...a, url: api.exportDownloadUrl(projectId, a.file) }
-      : a,
-  );
-  return { id: `a-${Date.now()}`, role: "agent", text: resp.message || "", actions };
-}
-
-function wsTurn(text) {
-  return { id: `s-${Date.now()}`, role: "agent", text };
+function searchableText(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(searchableText).join(" ");
+  if (value && typeof value === "object") {
+    return Object.values(value).map(searchableText).join(" ");
+  }
+  return "";
 }
 
 function agentSays(text, kind = "text") {

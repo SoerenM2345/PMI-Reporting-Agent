@@ -46,6 +46,7 @@ from app.planning.schemas import (
     SectionIntent,
     StorylinePlan,
 )
+from app.templates.layout_catalog import LayoutChoice
 
 log = logging.getLogger("pmi.planning.visual")
 
@@ -154,12 +155,16 @@ def fallback_design(context: GenerationContext, brief: OutputBrief,
     """One page per section, shaped by the evidence rather than by a template.
 
     The old fallback would have been "cover, four KPI cards, six tables". This
-    at least varies with what the evidence supports — but it makes no editorial
-    judgement, and the deliverable says so on its first page.
+    instead varies with what the evidence supports while keeping the requested
+    topics in the requested order.
     """
     pages: list[PageIntent] = [PageIntent(
         page_id="cover", section_id="", purpose="cover", composition="single",
-        message_title=context.display_name(),
+        # The deterministic storyline has already authored the honest report
+        # title (for example, "Status of GlobalMed x MediTexh"). Put that title
+        # in the cover placeholder instead of treating it as a floating thesis
+        # above a second, generic transaction name.
+        message_title=plan.governing_message or context.display_name(),
         supporting_message=context.company_names.as_sentence()
         or context.reporting_period,
     )]
@@ -197,8 +202,8 @@ def fallback_design(context: GenerationContext, brief: OutputBrief,
 
     return DocumentDesign(
         pages=pages,
-        rationale="Assembled without a language model: one page per requested "
-                  "topic, shaped by the evidence available to it.")
+        rationale="One page per requested topic, shaped by the evidence "
+                  "available to it.")
 
 
 # ============================================================ layout binding
@@ -211,9 +216,64 @@ def bind_layouts(design: DocumentDesign, context: GenerationContext,
     warnings: list[str] = []
     pages: list[PageDesign] = []
     seen: set[str] = set()
+    family = "white"
 
-    for index, intent in enumerate(design.pages):
-        page_id = _unique(intent.page_id or f"page-{index + 1}", seen)
+    # Requested report sections become native PowerPoint chapters. The divider
+    # is a real light-family master layout, not a content page painted to
+    # resemble one. Internal appendix/limitations sections are deliberately
+    # excluded: they belong to the report, but the user did not ask for a
+    # chapter break before them.
+    divider_sections = {
+        section.section_id for section in plan.sections
+        if section.section_id and section.covers_requested
+    }
+    add_dividers = context.presentation_layout and len(divider_sections) >= 2
+    divided: set[str] = set()
+
+    for source_index, intent in enumerate(design.pages):
+        if (add_dividers and intent.section_id in divider_sections
+                and intent.section_id not in divided
+                and intent.purpose in ("content", "appendix")):
+            section = plan.section(intent.section_id)
+            divider_choice = None
+            if catalog is not None:
+                # The PowerPoint brief calls for this exact native master.
+                # Choosing it by its catalogued name preserves the template's
+                # own background, typography and title geometry.
+                glow = catalog.by_name("Divider - Glow")
+                if glow is not None:
+                    divider_choice = LayoutChoice(layout=glow)
+                else:
+                    divider_choice = catalog.choose(
+                        composition="single", purpose="divider", family=family,
+                        needs_subtitle=False, needs_picture=False)
+                    divider_choice.exact = False
+                    divider_choice.reason = (
+                        "The template does not define 'Divider - Glow'; "
+                        f"used {divider_choice.layout.raw_name.strip()!r} instead.")
+            divider_id = _unique(f"{intent.section_id}-divider", seen)
+            seen.add(divider_id)
+            divider = PageDesign(
+                page_id=divider_id,
+                index=len(pages),
+                section_id=intent.section_id,
+                purpose="divider",
+                composition="single",
+                layout_id=(divider_choice.layout.layout_id
+                           if divider_choice else ""),
+                layout_name=(divider_choice.layout.raw_name.strip()
+                             if divider_choice else ""),
+                title=((section.working_title if section else "")
+                       or intent.message_title),
+                planned_by=planned_by,                          # type: ignore[arg-type]
+            )
+            if divider_choice is not None and divider_choice.degraded:
+                divider.warnings.append(divider_choice.reason)
+                warnings.append(f"{divider_id}: {divider_choice.reason}")
+            pages.append(divider)
+            divided.add(intent.section_id)
+
+        page_id = _unique(intent.page_id or f"page-{source_index + 1}", seen)
         seen.add(page_id)
 
         needs_picture = any(e.role == "image" for e in intent.elements)
@@ -222,13 +282,14 @@ def bind_layouts(design: DocumentDesign, context: GenerationContext,
             choice = catalog.choose(
                 composition=intent.composition,
                 purpose=intent.purpose,
+                family=family,
                 needs_subtitle=bool(intent.supporting_message),
                 needs_picture=needs_picture,
             )
 
         page = PageDesign(
             page_id=page_id,
-            index=index,
+            index=len(pages),
             section_id=intent.section_id,
             purpose=intent.purpose,
             composition=intent.composition,

@@ -76,9 +76,24 @@ def reconcile(brief: OutputBrief, context: GenerationContext) -> OutputBrief:
                 "direct", "neutral", "diplomatic"):
             brief.tone = constraint.value                        # type: ignore[assignment]
 
+    # Exclusion is a hard user instruction, not merely advice to the storyline
+    # model. Remove a matching topic here as well so the keyless planner and the
+    # coverage repair cannot put it back into the document.
+    excluded_words = [_topic_words(value) for value in brief.excluded_topics]
+    brief.scope_topics = [
+        topic for topic in brief.scope_topics
+        if not any(words and words <= _topic_words(topic)
+                   for words in excluded_words)
+    ]
+
     if not brief.title_proposal:
         brief.title_proposal = context.display_name()
     return brief
+
+
+def _topic_words(value: str) -> set[str]:
+    return {word for word in re.split(r"[^a-z0-9]+", (value or "").casefold())
+            if len(word) > 2 and word not in {"slide", "section", "page", "the"}}
 
 
 def _payload(context: GenerationContext) -> str:

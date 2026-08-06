@@ -175,6 +175,11 @@ def _payload(question: str, context: GenerationContext) -> str:
     if project:
         parts.append("## The project\n" + "\n".join(project))
 
+    active_report = _active_report(context)
+    if active_report:
+        parts.append("## The active report\n"
+                     + prompts.data_block("active_report", active_report))
+
     parts.append("## Evidence\n" + packed.disclosure)
     parts.append(prompts.data_block("evidence", packed.text, limit=200_000))
 
@@ -220,6 +225,52 @@ def _project_lines(context: GenerationContext) -> list[str]:
     if knowledge:
         lines.append(prompts.data_block("project_knowledge", knowledge))
     return lines
+
+
+def _active_report(context: GenerationContext) -> str:
+    """Visible report metadata, so the model can explain what the user points at.
+
+    Evidence answers "what do the files say?" but not "what does this word on
+    the cover refer to?". The latter needs the current deliverable and the
+    labelled metadata the renderer used. This remains data for the prompt; the
+    model may explain it but may not alter it.
+    """
+    from app.deliverable import store
+
+    deliverable = None
+    if context.session_id:
+        deliverable = store.load(session_id=context.session_id)
+    elif context.project_id:
+        deliverable = store.load(project_id=context.project_id)
+
+    if deliverable is None:
+        return ""
+
+    phase = " ".join(
+        str(context.transaction.integration_phase or "").replace("_", " ").split()
+    ) or "Not Reported"
+    period = context.reporting_period or "Not Reported"
+    audience = deliverable.audience_label or context.audience or "Not Reported"
+    pages = [page.title for page in deliverable.pages
+             if page.purpose != "cover" and page.title]
+
+    lines = [
+        f"Document title: {deliverable.title or 'Not Reported'}",
+        f"Document subtitle: {deliverable.subtitle or 'Not Reported'}",
+        "Cover metadata:",
+        f"- Audience: {audience}",
+        f"- Reporting period: {period}",
+        f"- Integration phase: {phase}",
+    ]
+    if phase.casefold() == "unknown":
+        lines.append(
+            "The cover's value “Unknown” belongs to Integration phase. It means "
+            "no supplied source or confirmed user value states that phase; it "
+            "is not a calculated project assessment."
+        )
+    if pages:
+        lines.append("Pages: " + " | ".join(pages[:20]))
+    return "\n".join(lines)
 
 
 def _corrected(payload: str, offending: Sequence[str]) -> str:
@@ -287,7 +338,7 @@ def _state_of_play(context: GenerationContext) -> str:
     return " ".join(lines)
 
 
-def summarize_plan(deliverable, *, limit: int = 8) -> str:
+def summarize_plan(deliverable, *, limit: int | None = None) -> str:
     """Say what a drafted report contains, in prose rather than as a card."""
     titles = [page.title for page in deliverable.pages
               if page.purpose not in ("cover", "divider") and page.title]
@@ -295,9 +346,9 @@ def summarize_plan(deliverable, *, limit: int = 8) -> str:
     if deliverable.governing_message:
         lines.append(deliverable.governing_message)
     if titles:
-        shown = titles[:limit]
-        lines.append("It covers:\n"
+        shown = titles if limit is None else titles[:limit]
+        lines.append("The report will generate these sections:\n"
                      + "\n".join(f"- {title}" for title in shown)
                      + (f"\n- …and {len(titles) - limit} more"
-                        if len(titles) > limit else ""))
+                        if limit is not None and len(titles) > limit else ""))
     return "\n\n".join(lines)

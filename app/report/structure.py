@@ -131,14 +131,214 @@ _INLINE_ITEM = re.compile(r"\d+[.)]\s*(?P<title>.+?)(?=\s+\d+[.)]|\s*$)")
 
 def _detect_deterministically(text: str) -> Optional[StructureSpec]:
     """A numbered or bulleted list, when something in the text says it is one."""
-    if not _INTRODUCES.search(text):
+    bare = bare_topic_titles(text)
+    listed = listed_titles(text)
+    if not _INTRODUCES.search(text) and not bare and not listed:
         return None
 
-    titles = _multiline_titles(text) or _inline_titles(text)
+    titles = (_multiline_titles(text) or listed or _inline_titles(text)
+              or bare)
     if len(titles) < 2:
         # One "section" is a mention, not a structure.
         return None
     return StructureSpec(sections=[SectionSpec(title=t) for t in titles])
+
+
+# People often type a title-cased contents list without punctuation:
+# ``Include Retention Works Council Organization Design Talent Risks``.  A
+# general word splitter cannot know whether "Works Council Organization" is one
+# title or two. This vocabulary makes the safe cases deterministic: parsing is
+# accepted only when two or more known PMI/report topics cover the entire
+# include-clause. Ordinary prose, or a clause containing unknown words, remains
+# untouched and can be interpreted semantically by the report planner.
+#: `\s+` and not `[ \t]+`: the separator is very often a newline, and requiring
+#: a space made the whole parser depend on whether the pasted list happened to
+#: be indented. "Include:\nRetention" found nothing; "Include\n Retention"
+#: worked, on the strength of one leading space.
+_BARE_TOPIC_INTRO = re.compile(
+    r"\b(?:include|including|cover|covering|sections?|topics?)\b\s*:?\s+",
+    re.I,
+)
+
+_COMMON_TOPIC_TITLES = (
+    # Human capital / CHRO
+    "Retention", "Talent Retention", "Works Council", "Organization Design",
+    "Organisation Design", "Talent Risks", "Compensation", "Benefits",
+    "Payroll", "Workforce Planning", "Employee Engagement", "HR Operations",
+    "Change Management", "Culture", "Communications", "Leadership",
+    "Operating Model",
+    # Cross-functional PMI topics commonly written as an unpunctuated run
+    "Executive Summary", "Overall Integration Status", "Workstream Status",
+    "Critical Milestones", "Key Milestones", "Critical Risks and Issues",
+    "Open Risks", "Open Issues", "Budget Position", "Synergy Realisation",
+    "Synergy Realization", "Decisions Required", "Recommended Next Steps",
+    "Recommendations", "Next Steps", "Data Quality and Limitations",
+    "Dependencies", "Actions",
+)
+
+
+def bare_topic_titles(text: str) -> list[str]:
+    """Read a fully recognisable, unpunctuated title run after ``include``.
+
+    The last valid clause wins, which matters for a revision request appended
+    to the report's original brief: the new structure is the user's latest
+    contract, not an addition to the old default.
+    """
+    for intro in reversed(list(_BARE_TOPIC_INTRO.finditer(text or ""))):
+        tail = (text or "")[intro.end():]
+        # A following sentence is another instruction, not another title. The
+        # user's final include-clause naturally runs to the end.
+        tail = re.split(r"\.\s+(?=[A-Z])|\n\s*\n", tail, maxsplit=1)[0]
+        titles = _segment_known_topics(tail)
+        if len(titles) >= 2:
+            return titles
+    return []
+
+
+def _segment_known_topics(tail: str) -> list[str]:
+    phrases = set(_COMMON_TOPIC_TITLES)
+    # Reuse the report's established aliases as vocabulary too. ``ALIASES`` is
+    # defined later in this module but is available whenever this function is
+    # called after import has completed.
+    for aliases in globals().get("ALIASES", {}).values():
+        phrases.update(aliases)
+
+    candidates: list[tuple[int, int, str]] = []
+    for phrase in phrases:
+        escaped = re.escape(phrase).replace("\\ ", r"\s+")
+        pattern = re.compile(rf"(?<!\w){escaped}(?!\w)", re.I)
+        for found in pattern.finditer(tail):
+            candidates.append((found.start(), found.end(), found.group(0)))
+
+    # Earlier starts win; at one start, take the longest title so "Talent
+    # Risks" is not reduced to "Risks".
+    candidates.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    selected: list[tuple[int, int, str]] = []
+    cursor = 0
+    for start, end, title in candidates:
+        if start < cursor:
+            continue
+        between = tail[cursor:start]
+        if re.sub(r"[\s,;:&/\-–—]+|\b(?:and|then|also)\b", "", between,
+                  flags=re.I):
+            continue
+        selected.append((start, end, " ".join(title.split())))
+        cursor = end
+
+    remainder = tail[cursor:]
+    if re.sub(r"[\s,;:.!?&/\-–—]+|\b(?:and|then|also|please)\b", "", remainder,
+              flags=re.I):
+        return []
+    return [title for _start, _end, title in selected]
+
+
+# A later turn often edits a structure rather than restating it: “add Budget and
+# remove Workstreams”.  This is deliberately deterministic.  The stored titles
+# are the user's exact contract, so a language model must not silently rename or
+# retain a topic the user explicitly removed.
+_REMOVE = re.compile(
+    r"\b(?:remove|drop|delete|exclude|omit|eliminate|leave out)\s+(?:the\s+)?"
+    r"(?P<title>.+?)(?=\s+(?:and|but)\s+(?:add|include|remove|drop|delete|"
+    r"exclude|omit|eliminate|leave out)\b|[,;]|$)", re.I)
+_ADD = re.compile(
+    r"\b(?:add|include)\s+(?:also\s+)?(?:the\s+)?(?P<title>.+?)"
+    r"(?=\s+(?:and|but)\s+(?:add|include|remove|drop|delete|exclude|omit|"
+    r"eliminate|leave out)\b|[,;]|$)", re.I)
+_RENAME = re.compile(
+    r"\b(?:rename|retitle)\s+(?:the\s+)?(?P<old>.+?)\s+"
+    r"(?:to|as|into)\s+(?P<new>.+?)\s*[.!?]?\s*$", re.I)
+_REPLACE = (
+    re.compile(
+        r"\breplace\s+(?:the\s+)?(?P<old>.+?)\s+(?:with|by)\s+"
+        r"(?:the\s+)?(?P<new>.+?)\s*[.!?]?\s*$", re.I),
+    re.compile(
+        r"\binstead of\s+(?:the\s+)?(?P<old>.+?)\s+"
+        r"(?:i(?:'d|\s+would)?\s+(?:like|prefer|want)\s+(?:to\s+)?"
+        r"(?:have|use|include|show)|(?:please\s+)?(?:have|use|include|show))\s+"
+        r"(?:the\s+)?(?P<new>.+?)\s*[.!?]?\s*$", re.I),
+    re.compile(
+        r"\bi(?:'d|\s+would)?\s+(?:like|prefer|want)\s+(?:to\s+)?"
+        r"(?:have|use|include|show)\s+(?:the\s+)?(?P<new>.+?)\s+"
+        r"instead of\s+(?:the\s+)?(?P<old>.+?)\s*[.!?]?\s*$", re.I),
+)
+
+
+def revise(existing: Optional[dict], instruction: str) -> Optional[StructureSpec]:
+    """Apply explicit add/remove/rename instructions to a stored structure."""
+    if not isinstance(existing, dict):
+        return None
+    try:
+        current = StructureSpec.model_validate(existing)
+    except (TypeError, ValueError):
+        return None
+
+    replacement = None
+    for pattern in _REPLACE:
+        replacement = pattern.search(instruction)
+        if replacement:
+            break
+    if replacement:
+        old = _clean_edit(replacement.group("old"))
+        new = _clean_edit(replacement.group("new"))
+        changed = False
+        sections: list[SectionSpec] = []
+        for section in current.sections:
+            if not changed and old and new and _same_topic(section.title, old):
+                # This is a semantic replacement, not a cosmetic rename. Clear
+                # any prior builder match so the new topic is matched to its own
+                # evidence (Budget must not keep rendering Risk rows).
+                sections.append(SectionSpec(title=new))
+                changed = True
+            else:
+                sections.append(section)
+        return StructureSpec(sections=sections) if changed else None
+
+    rename = _RENAME.search(instruction)
+    if rename:
+        old = _clean_edit(rename.group("old"))
+        new = _clean_edit(rename.group("new"))
+        changed = False
+        sections: list[SectionSpec] = []
+        for section in current.sections:
+            if not changed and old and new and _same_topic(section.title, old):
+                sections.append(section.model_copy(update={"title": new}))
+                changed = True
+            else:
+                sections.append(section)
+        return StructureSpec(sections=sections) if changed else None
+
+    removals = [_clean_edit(m.group("title")) for m in _REMOVE.finditer(instruction)]
+    additions = [_clean_edit(m.group("title")) for m in _ADD.finditer(instruction)]
+    removals = [value for value in removals if value]
+    additions = [value for value in additions if value]
+    if not removals and not additions:
+        return None
+
+    kept = [section for section in current.sections
+            if not any(_same_topic(section.title, removed) for removed in removals)]
+    for title in additions:
+        if not any(_same_topic(section.title, title) for section in kept):
+            kept.append(SectionSpec(title=title))
+    return StructureSpec(sections=kept) if kept else None
+
+
+def _clean_edit(value: str) -> str:
+    value = re.sub(r"^\s*\d+[.)]\s*", "", value)
+    value = re.sub(r"\b(?:part|section|slide|topic)s?\b\s*$", "", value,
+                   flags=re.I)
+    value = re.sub(r"^(?:all|any)\s+", "", value.strip(), flags=re.I)
+    return value.strip(" .,:;-")
+
+
+def _same_topic(left: str, right: str) -> bool:
+    a, b = _normalise(left), _normalise(right)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    left_id = match(left, set(ALIASES))
+    right_id = match(right, set(ALIASES))
+    return bool(left_id and left_id == right_id)
 
 
 def _multiline_titles(text: str) -> list[str]:
@@ -151,6 +351,85 @@ def _multiline_titles(text: str) -> list[str]:
         if title and not _NOT_A_TITLE.search(title) and len(title) <= 60:
             titles.append(title)
     return titles
+
+
+#: A line whose whole job is to announce the list under it — "Include",
+#: "Sections:", "Structure". It must be the entire line: "include the budget
+#: figures" introduces nothing.
+_INTRO_LINE = re.compile(
+    r"^[\s\-*•·]*(?:please\s+)?(?:include|includes|including|cover|covering|"
+    r"contents|sections?|chapters?|topics?|structure|agenda|outline)"
+    r"\s*[:\-–—]?\s*$", re.I)
+
+#: A title is a noun phrase, not a sentence. Eight words is generous for one and
+#: short for the other.
+_MAX_TITLE_WORDS = 8
+
+#: Openers that mark a line as a continuation or an aside rather than a title.
+#: "As PDF" on the line after the last section is the case that matters: it read
+#: as a perfectly good two-word title and became a page.
+_NOT_TITLE_OPENER = re.compile(
+    r"^(?:and|or|then|also|plus|please|thanks?|in|as|for|by|with|to|at|from|"
+    r"about|but|so|if|when|make|use)\b", re.I)
+
+#: A line naming only an output format is answering "which file", not "which
+#: section".
+_FORMAT_ONLY = re.compile(
+    r"^(?:pdf|pptx|powerpoint|ppt|word|docx|doc|excel|xlsx|html|markdown|md|"
+    r"deck|slides?|presentation|document|spreadsheet|workbook|dashboard)$", re.I)
+
+
+def listed_titles(text: str) -> list[str]:
+    """Titles written one per line under a line that announces them.
+
+    ``Include:\\n Retention\\n Works Council\\n …`` is how people actually type a
+    contents list, and every other shape here missed it: `_multiline_titles`
+    needs a bullet or a number on each line, and `bare_topic_titles` needs each
+    title to be in a fixed vocabulary, so an ordinary section name like "Pension
+    Harmonisation" was invisible. The whole structure was then silently dropped
+    and the house template used instead.
+
+    Safe without a vocabulary because the *newlines* are the delimiter — there
+    is no guessing where one title ends. The conservatism sits in the entry
+    condition instead: a line that does nothing but announce a list, followed by
+    lines that each read as a title. Anything sentence-shaped ends the run, so
+    prose after the list is never swept in.
+    """
+    lines = (text or "").splitlines()
+    for index, line in enumerate(lines):
+        if not _INTRO_LINE.match(line):
+            continue
+        titles: list[str] = []
+        for candidate in lines[index + 1:]:
+            if not candidate.strip():
+                if not titles:
+                    continue                # blank line under "Include:" — the
+                break                       # list starts below it
+            title = _title_line(candidate)
+            if title is None:
+                break                       # anything sentence-shaped ends it
+            titles.append(title)
+        if len(titles) >= 2:
+            return titles
+    return []
+
+
+def _title_line(line: str) -> Optional[str]:
+    """The section title this line states, or `None` if it states something else."""
+    bullet = _LIST_LINE.match(line)
+    title = (bullet.group("title") if bullet else line).strip(" \t.;:,-–—")
+    title = " ".join(title.split())
+    if not (2 <= len(title) <= 90) or len(title.split()) > _MAX_TITLE_WORDS:
+        return None
+    if _NOT_A_TITLE.search(title) or _FORMAT_ONLY.match(title):
+        return None
+    if _NOT_TITLE_OPENER.match(title):
+        return None
+    # An internal sentence break means prose resumed: "Retention. Send it to me
+    # by Friday" is an instruction that happens to start with a title.
+    if re.search(r"[.!?]\s+\S", title):
+        return None
+    return title
 
 
 def _inline_titles(text: str) -> list[str]:

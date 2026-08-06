@@ -28,7 +28,13 @@ from typing import Optional
 
 from docx import Document
 from docx.enum.section import WD_SECTION
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.text import (
+    WD_ALIGN_PARAGRAPH,
+    WD_BREAK,
+    WD_TAB_ALIGNMENT,
+    WD_TAB_LEADER,
+)
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
@@ -72,9 +78,11 @@ def render(deliverable: Deliverable, context: GenerationContext,
     _cover(document, deliverable, context, brand)
     _contents(document, deliverable, brand)
 
-    for page in deliverable.pages:
-        if page.purpose == "cover":
-            continue
+    planned_pages = [page for page in deliverable.pages
+                     if page.purpose != "cover"]
+    for index, page in enumerate(planned_pages):
+        if index:
+            document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         boxes.extend(_section(document, page, deliverable, context, brand,
                               assets, figure_number))
 
@@ -113,6 +121,7 @@ def _cover(document, deliverable: Deliverable, context: GenerationContext,
         try:
             document.add_picture(io.BytesIO(base64.b64decode(brand.logo_png_b64)),
                                  height=Inches(0.34))
+            document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.RIGHT
         except Exception:                                      # noqa: BLE001
             pass                           # a missing logo is not worth failing on
 
@@ -130,36 +139,41 @@ def _cover(document, deliverable: Deliverable, context: GenerationContext,
     if deliverable.executive_takeaway:
         _para(document, deliverable.executive_takeaway, styles.BODY)
 
-    if deliverable.planned_by == "fallback" and deliverable.warnings:
-        _para(document, deliverable.warnings[0], styles.CALLOUT)
-
     document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
 
 
 def _contents(document, deliverable: Deliverable, brand: BrandSystem) -> None:
-    """A real TOC field, plus a static list for readers who never refresh it."""
+    """A refreshable TOC whose cached fallback also shows page numbers.
+
+    The visible entries live *inside* the TOC field result. Word replaces that
+    cached result with its authoritative pagination when it opens the file;
+    viewers that do not refresh fields still show titles, dot leaders and a
+    useful page-number fallback instead of the former title-only list.
+    """
     sections = [p for p in deliverable.pages if p.purpose != "cover"]
     if len(sections) < 3:
         return
 
-    _para(document, "Contents", styles.H1)
+    heading = _para(document, "Contents", styles.H1)
+    _set_outline_level(heading, 9)  # keep the TOC from listing itself
+    _set_update_fields(document)
 
-    paragraph = document.add_paragraph()
-    run = paragraph.add_run()
-    begin = run._r.makeelement(qn("w:fldChar"), {})
-    begin.set(qn("w:fldCharType"), "begin")
-    instruction = run._r.makeelement(qn("w:instrText"), {})
-    instruction.set(qn("xml:space"), "preserve")
-    instruction.text = r'TOC \o "1-3" \h \z \u'
-    separate = run._r.makeelement(qn("w:fldChar"), {})
-    separate.set(qn("w:fldCharType"), "separate")
-    end = run._r.makeelement(qn("w:fldChar"), {})
-    end.set(qn("w:fldCharType"), "end")
-    for node in (begin, instruction, separate, end):
-        run._r.append(node)
-
-    for page in sections:
-        _para(document, page.title or page.page_id, styles.BODY)
+    for index, page in enumerate(sections):
+        paragraph = document.add_paragraph(style=document.styles[styles.BODY])
+        paragraph.paragraph_format.tab_stops.add_tab_stop(
+            Inches(CONTENT_WIDTH_IN), WD_TAB_ALIGNMENT.RIGHT,
+            WD_TAB_LEADER.DOTS)
+        if index == 0:
+            _toc_field_start(paragraph)
+        paragraph.add_run((page.title or page.page_id) + "\t")
+        # Sections are explicitly page-broken, so 3 + index is a useful cached
+        # value even in a viewer that never evaluates fields. PAGEREF replaces
+        # it with the exact page when Word/LibreOffice refreshes the document.
+        _field_with_result(
+            paragraph, f"PAGEREF {_toc_bookmark(page, index)} \\h",
+            str(index + 3))
+        if index == len(sections) - 1:
+            _toc_field_end(paragraph)
 
     document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
 
@@ -174,7 +188,10 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
         _para(document, page.title, styles.QUOTE)
         return boxes
 
-    _para(document, page.title, styles.H1)
+    heading = _para(document, page.title, styles.H1)
+    section_index = [p for p in deliverable.pages
+                     if p.purpose != "cover"].index(page)
+    _bookmark(heading, _toc_bookmark(page, section_index), section_index + 1)
     if page.subtitle:
         _para(document, page.subtitle, styles.H3)
 
@@ -202,8 +219,7 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 _figure(document, chart_render.to_png(spec, brand, assets,
                                                       size_in=(9.0, 4.6)),
-                        spec.caption, figure_number, brand,
-                        editable_note=spec.is_native_pptx)
+                        "", figure_number, brand)
                 boxes.append(_box(page, "chart", spec.caption))
 
         elif isinstance(element, DiagramElement):
@@ -211,7 +227,7 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
             if spec is not None:
                 _figure(document, diagram_render.to_png(spec, brand, assets,
                                                         size_in=(9.0, 3.8)),
-                        spec.caption, figure_number, brand)
+                        "", figure_number, brand)
                 boxes.append(_box(page, "diagram", spec.caption))
 
         elif isinstance(element, TableElement):
@@ -230,10 +246,6 @@ def _section(document, page: PageDesign, deliverable: Deliverable,
     if page.source_note:
         _para(document, page.source_note, styles.SOURCE_NOTE)
 
-    # A page break between top-level sections, so a section starts where the
-    # reader expects it rather than four lines down the previous page.
-    if page is not deliverable.pages[-1]:
-        document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
     return boxes
 
 
@@ -289,7 +301,7 @@ def _table(document, spec, brand: BrandSystem) -> None:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         styles.shade_cell(cell, brand.color("primary"))
 
-    for row_index, row in enumerate(spec.rows):
+    for row_index, row in enumerate(spec.displayed_rows):
         cells = table.add_row()
         styles.cannot_split(cells)
         emphasised = row_index in spec.emphasis_rows
@@ -301,8 +313,11 @@ def _table(document, spec, brand: BrandSystem) -> None:
             paragraph = cell.paragraphs[0]
             paragraph.style = document.styles[styles.TABLE_BODY]
             run = paragraph.add_run(value.text)
-            run.bold = emphasised
-            colour = _emphasis_colour(value.emphasis, brand)
+
+            is_source = spec.columns[column_index].header == "Source"
+            run.bold = emphasised and not is_source
+            run.font.size = 80000  # 8pt for source column, else default
+            colour = _emphasis_colour("muted" if is_source else value.emphasis, brand)
             if colour:
                 run.font.color.rgb = styles.rgb(colour)
             if spec.columns[column_index].kind in ("number", "currency",
@@ -313,8 +328,8 @@ def _table(document, spec, brand: BrandSystem) -> None:
 
     if spec.caption:
         _para(document, spec.caption, styles.CAPTION)
-    if spec.is_truncated:
-        _para(document, spec.truncation_note(), styles.SOURCE_NOTE)
+    if spec.has_note:
+        _para(document, spec.note(), styles.SOURCE_NOTE)
 
 
 def _emphasis_colour(emphasis: str, brand: BrandSystem) -> Optional[str]:
@@ -358,7 +373,7 @@ def _appendix(document, deliverable: Deliverable, context: GenerationContext,
     files = context.evidence.projected_from_files
     if files:
         for name in files:
-            _para(document, name, styles.BULLET, bullet=True)
+            _para(document, name, styles.SOURCE_NOTE)
     else:
         _para(document, "No files were read for this document.", styles.BODY)
 
@@ -411,6 +426,78 @@ def _field(paragraph, instruction: str) -> None:
     end.set(qn("w:fldCharType"), "end")
     for node in (begin, text, end):
         run._r.append(node)
+
+
+def _field_with_result(paragraph, instruction: str, result: str) -> None:
+    """Insert a field with visible cached text for non-updating viewers."""
+    run = paragraph.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    begin.set(qn("w:dirty"), "true")
+    text = OxmlElement("w:instrText")
+    text.set(qn("xml:space"), "preserve")
+    text.text = f" {instruction} "
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    visible = OxmlElement("w:t")
+    visible.text = result
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    for node in (begin, text, separate, visible, end):
+        run._r.append(node)
+
+
+def _toc_field_start(paragraph) -> None:
+    run = paragraph.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    begin.set(qn("w:dirty"), "true")
+    instruction = OxmlElement("w:instrText")
+    instruction.set(qn("xml:space"), "preserve")
+    instruction.text = r' TOC \o "1-3" \h \z \u '
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    for node in (begin, instruction, separate):
+        run._r.append(node)
+
+
+def _toc_field_end(paragraph) -> None:
+    run = paragraph.add_run()
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    run._r.append(end)
+
+
+def _toc_bookmark(page: PageDesign, index: int) -> str:
+    return f"pmi_section_{index + 1}"
+
+
+def _bookmark(paragraph, name: str, bookmark_id: int) -> None:
+    start = OxmlElement("w:bookmarkStart")
+    start.set(qn("w:id"), str(bookmark_id))
+    start.set(qn("w:name"), name)
+    end = OxmlElement("w:bookmarkEnd")
+    end.set(qn("w:id"), str(bookmark_id))
+    paragraph._p.insert(0, start)
+    paragraph._p.append(end)
+
+
+def _set_update_fields(document) -> None:
+    settings = document.settings.element
+    update = settings.find(qn("w:updateFields"))
+    if update is None:
+        update = OxmlElement("w:updateFields")
+        settings.insert(0, update)
+    update.set(qn("w:val"), "true")
+
+
+def _set_outline_level(paragraph, level: int) -> None:
+    properties = paragraph._p.get_or_add_pPr()
+    outline = properties.find(qn("w:outlineLvl"))
+    if outline is None:
+        outline = OxmlElement("w:outlineLvl")
+        properties.append(outline)
+    outline.set(qn("w:val"), str(level))
 
 
 # ================================================================== helpers

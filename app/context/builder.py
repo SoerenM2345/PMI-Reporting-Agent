@@ -61,7 +61,10 @@ def build_for_project(project_id: str, request_text: str, *,
     record = chat_store.get_project(project_id)
 
     digest = _project_digest(knowledge, record)
-    messages = chat_store.list_messages(chat_id) if chat_id else []
+    # Every filed chat contributes retrieval context.  Canonical facts still
+    # come only from ProjectKnowledge; this transcript layer supplies the
+    # conversational history without treating questions as facts.
+    messages = chat_store.list_project_messages(project_id)
 
     return _assemble(
         scope="project", project_id=project_id, chat_id=chat_id,
@@ -100,13 +103,17 @@ def build_for_session(session_id: str, request_text: str, *,
         project_knowledge = default_repositories().knowledge.current(
             linked_project_id)
 
+    session_kb = kb_store.load(session_id)
     digest = _merge_digests(
         _project_digest(project_knowledge, record),
-        _session_digest(kb_store.load(session_id)),
+        _session_digest(session_kb),
     )
     active_chat_id = chat.chat_id if chat is not None else chat_id
-    messages = (chat_store.list_messages(active_chat_id)
-                if active_chat_id else [])
+    messages = (
+        chat_store.list_project_messages(linked_project_id)
+        if linked_project_id
+        else (chat_store.list_messages(active_chat_id) if active_chat_id else [])
+    )
 
     context = _assemble(
         scope="session", project_id=linked_project_id, chat_id=active_chat_id,
@@ -347,7 +354,8 @@ def _transaction(header: PMIProject) -> TransactionContext:
 # ============================================== what the user explicitly asked
 _SECTION_PREAMBLE = re.compile(
     r"\b(?:sections?|chapters?|slides?|topics?|cover(?:ing|s)?|"
-    r"includ(?:e|ing|es)|containing|contains|with|comprising)\b\s*[:\-]", re.I)
+    r"includ(?:e|ing|es)|containing|contains|with|comprising)\b\s*"
+    r"(?::|\-|\bon\b|\babout\b)", re.I)
 _NUMBERED = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+(?P<text>.+?)\s*[.;]?$", re.M)
 _INLINE_NUMBERED = re.compile(
     r"(?:(?<=\s)|^)\d{1,2}[.)]\s*(?P<text>.+?)(?=\s+\d{1,2}[.)]\s|\s*$)")
@@ -372,6 +380,16 @@ def requested_sections(request: str) -> list[str]:
     if len(listed) >= 2:
         return _dedupe(listed)
 
+    # The same list with no bullets at all, under a line that announces it.
+    # Shares one parser with `structure.detect` so the sections stored in the
+    # knowledge base and the sections planned from cannot disagree.
+    from app.report.structure import listed_titles
+
+    plain = [_clean_section(title) for title in listed_titles(request)]
+    plain = [s for s in plain if s]
+    if len(plain) >= 2:
+        return _dedupe(plain)
+
     # The same list typed on one line — "sections: 1. Risks 2. Budget 3.
     # Milestones" — which is how people write it in a chat box. Only attempted
     # after a "sections:" preamble, so a sentence that happens to contain
@@ -386,7 +404,10 @@ def requested_sections(request: str) -> list[str]:
 
     if match:
         tail = request[match.end():]
-        tail = re.split(r"(?:\.\s+[A-Z])|\n\n", tail, maxsplit=1)[0]
+        # Stop at the next sentence, but not at the period in a section title
+        # such as "Forecast vs. Actuals".
+        tail = re.split(r"(?:(?<!vs)(?<!Vs)(?<!VS)\.\s+(?=[A-Z]))|\n\n",
+                        tail, maxsplit=1)[0]
         parts = [_clean_section(p) for p in re.split(r"[;,]|\band\b", tail)]
         parts = [p for p in parts if p and not _STOP_SECTION.match(p)]
         if len(parts) >= 2:
@@ -396,6 +417,16 @@ def requested_sections(request: str) -> list[str]:
     semis = [s for s in semis if s and 2 <= len(s.split()) <= 8]
     if len(semis) >= 3:
         return _dedupe(semis)
+
+    # A title-cased run without commas is still an explicit structure when the
+    # whole include-clause can be segmented into known report topics. The
+    # guarded parser rejects partial/ambiguous prose rather than inventing a
+    # table of contents from it.
+    from app.report.structure import bare_topic_titles
+
+    bare = bare_topic_titles(request)
+    if len(bare) >= 2:
+        return _dedupe(bare)
     return []
 
 
@@ -440,11 +471,24 @@ def requested_visuals(request: str) -> list[str]:
 
 _AUDIENCE_PATTERNS = (
     re.compile(r"\bfor (?:the )?(?P<who>steering committee|steerco|board|"
-               r"executive committee|exco|cfo|ceo|cio|coo|management team|"
+               r"executive committee|exco|cfo|ceo|cio|coo|cto|cmo|chro|cpo|"
+               r"cdo|clo|cso|ciso|management team|"
                r"leadership team|imo|pmo|integration management office|"
                r"workstream leads?|finance team|audit committee)\b", re.I),
     re.compile(r"\b(?P<who>steering committee|steerco|board|exco|cfo|ceo)\b"
                r"\s+(?:report|update|pack|presentation|deck)", re.I),
+    # Preserve arbitrary spelled-out job titles rather than maintaining an
+    # impossible exhaustive list (for example, "Chief People and Culture
+    # Officer" or "HR Business Partner"). The terminal role noun keeps a topic
+    # phrase such as "for supply chain" from being mistaken for a reader.
+    re.compile(
+        r"\bfor (?:the )?(?P<who>"
+        r"(?:[\w&/-]+\s+){0,8}"
+        r"(?:officer|director|manager|lead|leads|owner|partner|counsel|"
+        r"president|executive|analyst|specialist|coordinator|architect|"
+        r"engineer|team|committee|board|office))\b",
+        re.I,
+    ),
 )
 
 
@@ -466,7 +510,9 @@ _FORMAT_WORDS = (
     (re.compile(r"\b(powerpoint|pptx|deck|slides?|presentation)\b", re.I), "pptx"),
     (re.compile(r"\b(word|docx|document|report document)\b", re.I), "docx"),
     (re.compile(r"\b(pdf)\b", re.I), "pdf"),
+    (re.compile(r"\b(excel|xlsx|workbook|spreadsheet)\b", re.I), "xlsx"),
     (re.compile(r"\b(html|dashboard|web page|webpage|interactive)\b", re.I), "html"),
+    (re.compile(r"\b(chart|charts|graph|graphs|plot|image|png)\b", re.I), "chart"),
 )
 
 
@@ -562,6 +608,7 @@ def _project_digest(knowledge, record) -> KnowledgeDigest:
     digest.open_questions = [q.text for q in knowledge.open_questions if q.text]
     digest.decisions = [_decision_text(d) for d in knowledge.user_decisions]
     digest.decisions = [d for d in digest.decisions if d]
+    digest.requested_structure = list(knowledge.requested_structure)
     return digest
 
 

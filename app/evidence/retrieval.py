@@ -100,6 +100,7 @@ def retrieve(query: str, evidence: EvidenceIndex, *,
              kinds: Optional[Sequence[str]] = None,
              k: int = 60,
              force_include: Sequence[str] = (),
+             include_mandatory: bool = True,
              reporting_date: Optional[date] = None,
              named_terms: Sequence[str] = ()) -> RetrievalResult:
     """The `k` most relevant items, plus everything that may never be dropped."""
@@ -113,7 +114,13 @@ def retrieve(query: str, evidence: EvidenceIndex, *,
     named = {t for term in named_terms for t in tokenize(term)}
     kind_tokens = {t for t in tokens}
 
-    forced = set(force_include) | set(evidence.must_include())
+    forced = set(force_include)
+    if include_mandatory:
+        forced |= set(evidence.must_include())
+    # A kind-restricted retrieval cannot return an item outside its pool. Do not
+    # report that deliberate scope boundary as an accidental dropped finding;
+    # whole-document retrieval remains responsible for mandatory disclosures.
+    forced &= {item.evidence_id for item in pool}
     scored = [_score(item, index, tokens, kind_tokens, named, reporting_date,
                      forced) for item in pool]
     scored.sort(key=lambda s: (not s.forced, -s.score, s.item.evidence_id))
