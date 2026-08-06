@@ -52,6 +52,27 @@ class SummaryBullets(BaseModel):
     )
 
 
+class Recommendations(BaseModel):
+    """Forward-looking recommendations for a section the sources do not answer.
+
+    The only task in this file whose output is *not* a restatement of the
+    evidence, and the reason it is safe: a recommendation proposes an action, so
+    it asserts nothing about the project's present state. `guard.check_text` still
+    rejects any figure outside the evidence corpus, so this cannot smuggle in a
+    number — which is why the schema carries prose and nothing else (§11).
+    """
+
+    recommendations: list[str] = Field(
+        min_length=1,
+        max_length=6,
+        description=(
+            "2-4 recommended actions, each one sentence starting with a verb "
+            "(Establish, Accelerate, Confirm...). Propose what to DO next. "
+            "Never state a figure, percentage, date or amount."
+        ),
+    )
+
+
 # ------------------------------------------------------- image interpretation (§5.6)
 ImageContent = Literal[
     "text", "table", "chart", "timeline", "diagram", "dashboard", "handwriting"

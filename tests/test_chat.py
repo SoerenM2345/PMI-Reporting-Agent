@@ -1961,3 +1961,54 @@ def test_the_rest_endpoint_still_fills_a_gap(client, loaded):
         assert client.post(f"/api/issues/{session_id}/fill",
                            json={"issue_id": issue["issue_id"], "value": "x"}
                            ).status_code == 404, "a closed gap is still offered"
+
+
+def test_removing_the_data_quality_page_is_carried_out_and_stays_carried_out(
+        client, loaded):
+    """The reported bug, end to end.
+
+    "remove Data quality and limitations" was answered with "I read that as a
+    wording change but couldn't match it to anything in the report" — and the
+    section was then printed in the file anyway. Two failures in one: an
+    instruction declined, and a document that disagreed with the reply.
+
+    The second half of this is the half that used to lapse silently. Asking for
+    the same report in another format re-plans it, and planning appends the
+    data-quality section on Python's authority, so the removal has to outlive
+    the draft it was made on.
+    """
+    from app.deliverable import session as session_plan
+
+    chat_id, session_id = loaded
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "Create a PowerPoint SteerCo status report"})
+
+    def limitations_pages(deliverable):
+        from app.deliverable.revise import is_disclosure_page
+
+        return [p.title or p.page_id for p in deliverable.pages
+                if is_disclosure_page(p)]
+
+    drafted = session_plan.load(session_id)
+    assert limitations_pages(drafted), \
+        "the fixture is wrong: there was nothing to remove"
+
+    removed = agent_reply(client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"text": "remove Data quality and limitations"}))
+
+    assert prose(removed).startswith("Done —")
+    assert "couldn't match" not in prose(removed)
+    revised = session_plan.load(session_id)
+    assert limitations_pages(revised) == []
+    # Nor by the back door: the revision note is rendered into the appendix, so
+    # quoting the instruction there reprints the heading that was just removed.
+    assert "quality and limitations" not in " ".join(revised.notes).casefold()
+
+    # And in the report the user asks for next, which is planned from scratch.
+    client.post(f"/api/chats/{chat_id}/messages",
+                json={"text": "create a Word report"})
+    replanned = session_plan.load(session_id)
+    assert replanned.version > revised.version, \
+        "this asserts nothing unless asking for another format re-plans"
+    assert limitations_pages(replanned) == []

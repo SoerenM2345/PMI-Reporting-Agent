@@ -114,6 +114,48 @@ def test_an_editorial_audience_label_does_not_stale_a_new_draft(
     assert approved.status_code == 200
 
 
+def test_the_sections_the_user_listed_are_the_sections_planned(
+        client, sample_files):
+    """The reported bug, end to end.
+
+    Seven sections were named one per line and the report came back with the
+    default topics read off the evidence — "Open risks", "Milestones and
+    dates", "Budget position". Nothing downstream was at fault: the parser
+    returned no sections, and no sections means "the user did not say", which
+    is what selects those defaults.
+    """
+    chat_id, session_id = _chat(client, sample_files)
+
+    client.post(f"/api/chats/{chat_id}/messages", json={"text": (
+        "Create a CHRO report.\n"
+        "Focus on Human Capital.\n"
+        "Include:\n"
+        "Retention\n"
+        "Works Council\n"
+        "Organization Design\n"
+        "Talent Risks\n"
+        "Compensation\n"
+        "Critical Milestones\n"
+        "Recommendations\n"
+        "As PDF")})
+
+    from app.deliverable import session as session_plan
+
+    titles = [page.title for page in session_plan.load(session_id).pages]
+
+    # In the user's order, and with nothing invented between them.
+    assert [t for t in titles if t in _CHRO_SECTIONS] == _CHRO_SECTIONS
+    # §12.5's page is appended whatever was asked for; the defaults are not.
+    assert "Data quality and limitations" in titles
+    assert "Budget position" not in titles
+    assert "As PDF" not in titles
+
+
+_CHRO_SECTIONS = ["Retention", "Works Council", "Organization Design",
+                  "Talent Risks", "Compensation", "Critical Milestones",
+                  "Recommendations"]
+
+
 def test_a_standalone_format_from_an_earlier_turn_is_remembered(
         client, sample_files):
     chat_id, _session_id = _chat(client, sample_files)

@@ -5,9 +5,10 @@ a revision op could reach a figure. These assert the same thing about the new
 one — the op vocabulary reorders, removes and rewords, and a number outside the
 evidence is refused with the offending value named rather than quietly dropped.
 
-The rest is about what a revision must *not* be allowed to do: remove the page
-that says what the report could not establish, invent a page id, or lose a page
-so completely that "put it back" needs a re-plan.
+The rest is about what a revision must *not* be allowed to do: remove the cover,
+invent a page id, or lose a page so completely that "put it back" needs a
+re-plan. The data-quality page is no longer on that list — see
+`test_the_data_quality_page_is_removed_when_the_user_asks`.
 """
 from __future__ import annotations
 
@@ -100,11 +101,32 @@ def test_wording_with_no_figure_at_all_is_always_allowed(deliverable):
 
 
 # ================================================================ §12.5 and ids
-def test_the_data_quality_page_cannot_be_removed(deliverable):
+def test_the_data_quality_page_is_removed_when_the_user_asks(deliverable):
+    """Refusing produced a report the author could not shape.
+
+    §12.5 is a rule about what this system may hide from a reader, not about
+    what an author may leave out of their own document. The old refusal was also
+    the worst of both: the instruction was declined *and* the page was rendered
+    anyway, so the agent told the user something it had not done.
+    """
     result = _apply(deliverable, PageOp(op="drop_page", page_id="limits"))
 
-    assert result.deliverable is None
-    assert "entitled to see" in result.rejected[0].reason
+    assert result.deliverable is not None
+    assert "limits" not in [p.page_id for p in result.deliverable.pages]
+    assert result.applied == ["removed “Data quality and limitations”"]
+    # Removed, not destroyed: "put it back" must not need a re-plan.
+    assert [p.page_id for p in result.deliverable.dropped_pages] == ["limits"]
+    # And the note that reaches the rendered appendix does not reprint the
+    # heading the user just took out.
+    assert "limitations" not in result.deliverable.notes[-1].casefold()
+
+
+def test_the_data_quality_page_is_removed_by_name_without_a_model(deliverable):
+    """The instruction the bug report was filed about, on the keyless path."""
+    revision = keyword_ops("remove Data quality and limitations", deliverable)
+
+    assert [(op.op, op.page_id) for op in revision.ops] == \
+        [("drop_page", "limits")]
 
 
 def test_an_unknown_page_is_refused_rather_than_guessed(deliverable):
@@ -140,17 +162,17 @@ def test_one_refused_op_does_not_discard_the_ones_that_worked(deliverable):
     result = _apply(
         deliverable,
         PageOp(op="rewrite_title", page_id="spend", text="Spend is under control"),
-        PageOp(op="drop_page", page_id="limits"),
+        PageOp(op="drop_page", page_id="cover"),
     )
 
     assert result.deliverable is not None
     assert result.applied and result.rejected
     assert result.deliverable.page("spend").title == "Spend is under control"
-    assert result.deliverable.page("limits") is not None
+    assert result.deliverable.page("cover") is not None
 
 
 def test_a_revision_that_changes_nothing_returns_no_document(deliverable):
-    result = _apply(deliverable, PageOp(op="drop_page", page_id="limits"))
+    result = _apply(deliverable, PageOp(op="drop_page", page_id="cover"))
 
     assert result.deliverable is None, \
         "handing back the old version would look like the edit succeeded"

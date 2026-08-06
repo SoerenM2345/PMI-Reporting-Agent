@@ -224,7 +224,9 @@ def _kpis(element: KpiRowElement) -> str:
 def _table(spec) -> str:
     """A sortable, filterable table. Wide ones scroll inside their own box."""
     headers = "".join(
-        f'<th class="{_align(column.kind)}" data-kind="{escape(column.kind)}">'
+        f'<th class="{_align(column.kind)}{" source-col" if column.header == "Source" else ""}" '
+        f'data-kind="{escape(column.kind)}" '
+        f'{"style=\"width: 80px;\"" if column.header == "Source" else ""}>'
         f"{escape(column.header)}</th>" for column in spec.columns)
 
     rows = []
@@ -232,7 +234,8 @@ def _table(spec) -> str:
         emphasis = ' class="emphasis"' if index in spec.emphasis_rows else ""
         cells = "".join(
             f'<td class="{_align(spec.columns[position].kind)} '
-            f'{escape(cell.emphasis)}">{escape(cell.text)}</td>'
+            f'{escape(cell.emphasis)}{" source-col" if spec.columns[position].header == "Source" else ""}">'
+            f'{escape(cell.text)}</td>'
             for position, cell in enumerate(row) if position < len(spec.columns))
         rows.append(f"<tr{emphasis}>{cells}</tr>")
 
@@ -419,6 +422,8 @@ td.bad { color: var(--brand-rag-red); font-weight: 600; }
 td.warn { color: var(--brand-rag-amber); }
 td.good { color: var(--brand-rag-green); }
 td.muted { color: var(--brand-muted); }
+th.source-col, td.source-col { color: var(--brand-muted); font-size: 0.75rem;
+  font-weight: 500; width: 80px; }
 tr.emphasis td { background: var(--brand-surface-alt); }
 .note { margin: .4rem 0 0; font-size: .8rem; color: var(--brand-muted); }
 .sources { margin-top: .8rem; font-size: .68rem; color: #a3a3a3; }

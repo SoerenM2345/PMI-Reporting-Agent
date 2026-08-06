@@ -16,8 +16,6 @@ Concretely, per page:
 * a diagram becomes grouped `AutoShape`s a partner can drag;
 * unused content placeholders are released, so no slide shows "Click to add
   text";
-* the footer band is drawn, because this template has no footer placeholder to
-  switch on.
 
 Nothing in here decides what the deck says. Every string was written and every
 figure resolved before this module ran.
@@ -77,11 +75,6 @@ def render(deliverable: Deliverable, context: GenerationContext,
         pptx_base.release_unused(slide, used, layout)
         if page.source_note and page.purpose not in ("cover", "closing"):
             pptx_base.draw_source_note(slide, brand, page.source_note)
-        if page.purpose != "cover":
-            pptx_base.draw_footer(
-                slide, brand,
-                left_text=_footer_text(deliverable, context),
-                page_number=page.index + 1)
         if page.speaker_notes:
             slide.notes_slide.notes_text_frame.text = page.speaker_notes
 
@@ -106,15 +99,6 @@ def _fallback_brand() -> BrandSystem:
     from app.templates import template_registry
 
     return template_registry.default().brand
-
-
-def _footer_text(deliverable: Deliverable, context: GenerationContext) -> str:
-    parts = [context.display_name()]
-    if context.reporting_period:
-        parts.append(context.reporting_period)
-    if deliverable.audience_label:
-        parts.append(deliverable.audience_label)
-    return "  |  ".join(p for p in parts if p)
 
 
 # ================================================================== one page

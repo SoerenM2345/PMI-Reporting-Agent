@@ -94,6 +94,29 @@ class GeneratedOutput(BaseModel):
     when: datetime = Field(default_factory=datetime.now)
 
 
+class RemovedPage(BaseModel):
+    """A page the user took out of the report, named three ways.
+
+    A removal has to survive a re-plan, and a re-plan is exactly what loses the
+    identity: `page_id` comes from the design and may be reassigned, `title` is
+    rewritten each time, and `section_id` is stable only for the sections Python
+    appends itself. Any one of the three matching is treated as the same page —
+    the cost of a false positive is a page the user asked to lose staying lost,
+    which is what they asked for, and it is restorable either way.
+    """
+
+    page_id: str = ""
+    section_id: str = ""
+    title: str = ""
+
+    def matches(self, page) -> bool:
+        return bool(
+            (self.page_id and self.page_id == page.page_id)
+            or (self.section_id and self.section_id == getattr(page, "section_id", ""))
+            or (self.title and self.title.casefold()
+                == (page.title or "").casefold()))
+
+
 class KnowledgeBase(BaseModel):
     session_id: str
     #: Bumped on every write — the KB's own version, for logging and debugging.
@@ -130,6 +153,13 @@ class KnowledgeBase(BaseModel):
     #: Figures are validated before an override is stored (`guard.check_text`), so
     #: nothing here can smuggle a number past §11.
     prose_overrides: dict[str, str] = Field(default_factory=dict)
+
+    #: Pages the user asked to take out, for the same reason `prose_overrides`
+    #: exists: a re-plan rebuilds the document from the model and would put them
+    #: straight back. Asking for the report in a second format re-plans, so
+    #: without this "remove the data quality page" held for the deck the user was
+    #: looking at and silently lapsed in the Word version of it.
+    removed_pages: list[RemovedPage] = Field(default_factory=list)
 
     #: Gap keys already answered or explicitly skipped, so the same question is
     #: never asked twice across turns.

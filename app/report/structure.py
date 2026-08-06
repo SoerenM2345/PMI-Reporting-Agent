@@ -132,10 +132,11 @@ _INLINE_ITEM = re.compile(r"\d+[.)]\s*(?P<title>.+?)(?=\s+\d+[.)]|\s*$)")
 def _detect_deterministically(text: str) -> Optional[StructureSpec]:
     """A numbered or bulleted list, when something in the text says it is one."""
     bare = bare_topic_titles(text)
-    if not _INTRODUCES.search(text) and not bare:
+    listed = listed_titles(text)
+    if not _INTRODUCES.search(text) and not bare and not listed:
         return None
 
-    titles = (_multiline_titles(text) or _inline_titles(text)
+    titles = (_multiline_titles(text) or listed or _inline_titles(text)
               or bare)
     if len(titles) < 2:
         # One "section" is a mention, not a structure.
@@ -150,8 +151,12 @@ def _detect_deterministically(text: str) -> Optional[StructureSpec]:
 # accepted only when two or more known PMI/report topics cover the entire
 # include-clause. Ordinary prose, or a clause containing unknown words, remains
 # untouched and can be interpreted semantically by the report planner.
+#: `\s+` and not `[ \t]+`: the separator is very often a newline, and requiring
+#: a space made the whole parser depend on whether the pasted list happened to
+#: be indented. "Include:\nRetention" found nothing; "Include\n Retention"
+#: worked, on the strength of one leading space.
 _BARE_TOPIC_INTRO = re.compile(
-    r"\b(?:include|including|cover|covering|sections?|topics?)\b\s*:?[ \t]+",
+    r"\b(?:include|including|cover|covering|sections?|topics?)\b\s*:?\s+",
     re.I,
 )
 
@@ -346,6 +351,85 @@ def _multiline_titles(text: str) -> list[str]:
         if title and not _NOT_A_TITLE.search(title) and len(title) <= 60:
             titles.append(title)
     return titles
+
+
+#: A line whose whole job is to announce the list under it — "Include",
+#: "Sections:", "Structure". It must be the entire line: "include the budget
+#: figures" introduces nothing.
+_INTRO_LINE = re.compile(
+    r"^[\s\-*•·]*(?:please\s+)?(?:include|includes|including|cover|covering|"
+    r"contents|sections?|chapters?|topics?|structure|agenda|outline)"
+    r"\s*[:\-–—]?\s*$", re.I)
+
+#: A title is a noun phrase, not a sentence. Eight words is generous for one and
+#: short for the other.
+_MAX_TITLE_WORDS = 8
+
+#: Openers that mark a line as a continuation or an aside rather than a title.
+#: "As PDF" on the line after the last section is the case that matters: it read
+#: as a perfectly good two-word title and became a page.
+_NOT_TITLE_OPENER = re.compile(
+    r"^(?:and|or|then|also|plus|please|thanks?|in|as|for|by|with|to|at|from|"
+    r"about|but|so|if|when|make|use)\b", re.I)
+
+#: A line naming only an output format is answering "which file", not "which
+#: section".
+_FORMAT_ONLY = re.compile(
+    r"^(?:pdf|pptx|powerpoint|ppt|word|docx|doc|excel|xlsx|html|markdown|md|"
+    r"deck|slides?|presentation|document|spreadsheet|workbook|dashboard)$", re.I)
+
+
+def listed_titles(text: str) -> list[str]:
+    """Titles written one per line under a line that announces them.
+
+    ``Include:\\n Retention\\n Works Council\\n …`` is how people actually type a
+    contents list, and every other shape here missed it: `_multiline_titles`
+    needs a bullet or a number on each line, and `bare_topic_titles` needs each
+    title to be in a fixed vocabulary, so an ordinary section name like "Pension
+    Harmonisation" was invisible. The whole structure was then silently dropped
+    and the house template used instead.
+
+    Safe without a vocabulary because the *newlines* are the delimiter — there
+    is no guessing where one title ends. The conservatism sits in the entry
+    condition instead: a line that does nothing but announce a list, followed by
+    lines that each read as a title. Anything sentence-shaped ends the run, so
+    prose after the list is never swept in.
+    """
+    lines = (text or "").splitlines()
+    for index, line in enumerate(lines):
+        if not _INTRO_LINE.match(line):
+            continue
+        titles: list[str] = []
+        for candidate in lines[index + 1:]:
+            if not candidate.strip():
+                if not titles:
+                    continue                # blank line under "Include:" — the
+                break                       # list starts below it
+            title = _title_line(candidate)
+            if title is None:
+                break                       # anything sentence-shaped ends it
+            titles.append(title)
+        if len(titles) >= 2:
+            return titles
+    return []
+
+
+def _title_line(line: str) -> Optional[str]:
+    """The section title this line states, or `None` if it states something else."""
+    bullet = _LIST_LINE.match(line)
+    title = (bullet.group("title") if bullet else line).strip(" \t.;:,-–—")
+    title = " ".join(title.split())
+    if not (2 <= len(title) <= 90) or len(title.split()) > _MAX_TITLE_WORDS:
+        return None
+    if _NOT_A_TITLE.search(title) or _FORMAT_ONLY.match(title):
+        return None
+    if _NOT_TITLE_OPENER.match(title):
+        return None
+    # An internal sentence break means prose resumed: "Retention. Send it to me
+    # by Friday" is an instruction that happens to start with a title.
+    if re.search(r"[.!?]\s+\S", title):
+        return None
+    return title
 
 
 def _inline_titles(text: str) -> list[str]:

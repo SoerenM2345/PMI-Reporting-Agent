@@ -229,52 +229,6 @@ def release_unused(slide, used_slot_ids: Iterable[str],
 
 
 # ================================================================ furniture
-def draw_footer(slide, brand: BrandSystem, *, left_text: str = "",
-                page_number: Optional[int] = None,
-                right_text: str = "") -> None:
-    """Draw the footer band.
-
-    This template defines **no** `FOOTER`, `SLIDE_NUMBER` or `DATE` placeholder
-    on any of its 59 layouts, so there is nothing to inherit and nothing to
-    switch on. The geometry mirrors the hand-drawn `CaseCode`/`Copyright` boxes
-    the template's own divider layouts use, so a generated footer reads as
-    native rather than bolted on.
-    """
-    from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
-
-    width = brand.slide_w_in - 2 * brand.grid.margin_x_in
-    box = slide.shapes.add_textbox(
-        Inches(brand.grid.margin_x_in), Inches(brand.footer_top_in),
-        Inches(width), Inches(brand.footer_height_in))
-    box.name = "pmi:footer"
-    frame = box.text_frame
-    frame.word_wrap = False
-    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-    frame.margin_left = frame.margin_right = 0
-    frame.margin_top = frame.margin_bottom = 0
-
-    right = right_text or (str(page_number) if page_number is not None else "")
-    paragraph = frame.paragraphs[0]
-    paragraph.text = left_text
-    paragraph.alignment = PP_ALIGN.LEFT
-    paragraph.font.size = Pt(brand.footer_pt)
-    paragraph.font.color.rgb = brand.pptx_rgb("muted")
-
-    if right:
-        # A second right-aligned box: one paragraph cannot hold two alignments.
-        number = slide.shapes.add_textbox(
-            Inches(brand.slide_w_in - brand.grid.margin_x_in - 1.0),
-            Inches(brand.footer_top_in), Inches(1.0),
-            Inches(brand.footer_height_in))
-        number.name = "pmi:page-number"
-        number.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-        number_paragraph = number.text_frame.paragraphs[0]
-        number_paragraph.text = right
-        number_paragraph.alignment = PP_ALIGN.RIGHT
-        number_paragraph.font.size = Pt(brand.footer_pt)
-        number_paragraph.font.color.rgb = brand.pptx_rgb("muted")
-
-
 def draw_source_note(slide, brand: BrandSystem, text: str, *,
                      top_in: Optional[float] = None) -> None:
     """The page's provenance, under the content and above the footer."""
@@ -361,6 +315,7 @@ def draw_table(slide, brand: BrandSystem, spec, box: Box,
     switch on. Every fill, rule and alignment below has to be stated.
     """
     from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+    from pptx.util import Inches as PptxInches
 
     left, top, width, height = box
     rows = len(spec.rows) + 1
@@ -377,6 +332,23 @@ def draw_table(slide, brand: BrandSystem, spec, box: Box,
     graphic.name = f"pmi:table:{spec.spec_id}"
     table = graphic.table
 
+    # Apply column widths if specified (width stored in column spec as points)
+    col_widths = []
+    used_width = 0
+    for col_spec in spec.columns:
+        if col_spec.width:
+            # Convert points to EMU (English Metric Units): 1 point = 12700 EMUs
+            col_width_emu = int(col_spec.width * 12700)
+            col_widths.append(col_width_emu)
+            used_width += col_spec.width
+        else:
+            col_widths.append(None)
+
+    # Set column widths
+    for col_idx, col_width_emu in enumerate(col_widths):
+        if col_width_emu is not None:
+            table.columns[col_idx].width = col_width_emu
+
     for index, column in enumerate(spec.columns):
         cell = table.cell(0, index)
         cell.text = column.header
@@ -391,10 +363,13 @@ def draw_table(slide, brand: BrandSystem, spec, box: Box,
             cell = table.cell(row_index, column_index)
             cell.text = _shorten_table_cell(cell_value.text)
             column = spec.columns[column_index] if column_index < columns else None
+
+            is_source_column = column and column.header == "Source"
             _style_cell(
-                cell, brand, size_pt=brand.font("small").size_pt,
+                cell, brand,
+                size_pt=brand.font("small").size_pt if not is_source_column else 8,
                 bold=emphasised,
-                color=_cell_color(cell_value.emphasis),
+                color="muted" if is_source_column else _cell_color(cell_value.emphasis),
                 fill="surface_alt" if row_index % 2 == 0 else "surface")
             if column is not None and column.kind in ("number", "currency",
                                                       "percent"):

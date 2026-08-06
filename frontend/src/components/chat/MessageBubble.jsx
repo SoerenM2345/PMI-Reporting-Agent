@@ -135,6 +135,7 @@ const FORMAT_LABELS = {
   powerpoint: "PowerPoint",
   pdf: "PDF",
   word: "Word",
+  excel: "Excel",
   html: "HTML",
   chart: "Chart",
 };

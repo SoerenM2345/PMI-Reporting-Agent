@@ -380,6 +380,16 @@ def requested_sections(request: str) -> list[str]:
     if len(listed) >= 2:
         return _dedupe(listed)
 
+    # The same list with no bullets at all, under a line that announces it.
+    # Shares one parser with `structure.detect` so the sections stored in the
+    # knowledge base and the sections planned from cannot disagree.
+    from app.report.structure import listed_titles
+
+    plain = [_clean_section(title) for title in listed_titles(request)]
+    plain = [s for s in plain if s]
+    if len(plain) >= 2:
+        return _dedupe(plain)
+
     # The same list typed on one line — "sections: 1. Risks 2. Budget 3.
     # Milestones" — which is how people write it in a chat box. Only attempted
     # after a "sections:" preamble, so a sentence that happens to contain
@@ -500,6 +510,7 @@ _FORMAT_WORDS = (
     (re.compile(r"\b(powerpoint|pptx|deck|slides?|presentation)\b", re.I), "pptx"),
     (re.compile(r"\b(word|docx|document|report document)\b", re.I), "docx"),
     (re.compile(r"\b(pdf)\b", re.I), "pdf"),
+    (re.compile(r"\b(excel|xlsx|workbook|spreadsheet)\b", re.I), "xlsx"),
     (re.compile(r"\b(html|dashboard|web page|webpage|interactive)\b", re.I), "html"),
     (re.compile(r"\b(chart|charts|graph|graphs|plot|image|png)\b", re.I), "chart"),
 )

@@ -79,7 +79,7 @@ FORMAT_ALIASES = {"image": "chart", "images": "chart", "picture": "chart",
 
 #: Offered under every preview. One list, so the buttons and what the classifier
 #: accepts cannot drift.
-PREVIEW_FORMATS = ["powerpoint", "pdf", "word", "html", "chart"]
+PREVIEW_FORMATS = ["powerpoint", "pdf", "word", "excel", "html", "chart"]
 
 
 class TurnIntent(BaseModel):
@@ -428,7 +428,7 @@ def _format_gate(chat: Chat, text: str) -> tuple[str, Optional[ChatAnswer]]:
 def _ask_format() -> ChatAnswer:
     return ChatAnswer(
         content=("Which output format would you like: PowerPoint, PDF, Word, "
-                 "HTML, or chart?"),
+                 "Excel, HTML, or chart?"),
         actions=[ChooseFormatAction()],
     )
 
@@ -893,6 +893,9 @@ def _revise(chat: Chat, analysis, text: str) -> ChatAnswer:
         )
 
     stored = dlv_store.save(result.deliverable)
+    # A removal has to outlive this draft: asking for the same report as a Word
+    # file re-plans it, and the page would come straight back.
+    session_plan.remember_removals(chat.session_id, stored)
     from app.deliverable import workflow
 
     selected = (workflow.normalize_format(stored.primary_format)
@@ -910,6 +913,7 @@ def _revise(chat: Chat, analysis, text: str) -> ChatAnswer:
                  + ("\n\nI couldn't do the rest:\n"
                     + "\n".join(f"- {reason}" for reason in refused)
                     if refused else "")
+                 + _disclosure_note(deliverable, stored)
                  + ("\n\n" + "\n".join(f"*{w}*" for w in warnings)
                     if warnings else "")
                  + "\n\n" + _approval_question(selected)),
@@ -920,6 +924,26 @@ def _revise(chat: Chat, analysis, text: str) -> ChatAnswer:
                                    open_by_default=True,
                                    approval_required=True)],
     )
+
+
+def _disclosure_note(before, after) -> str:
+    """Said once, when the §12.5 page is the page that just went.
+
+    The removal is carried out — it is the user's document. But a deck no longer
+    carries what the report could not establish anywhere else, so the one thing
+    owed to whoever asked is that they know that, and know how to undo it. Once,
+    not on every subsequent revision: `before` is why this compares the two
+    versions rather than reading the current one.
+    """
+    from app.deliverable.revise import is_disclosure_page
+
+    known = {page.page_id for page in before.dropped_pages}
+    gone = [page for page in after.dropped_pages
+            if page.page_id not in known and is_disclosure_page(page)]
+    if not gone:
+        return ""
+    return ("\n\n*The report no longer states its own data-quality limitations. "
+            "Say “restore the data quality page” to bring it back.*")
 
 
 def _numeric_corpus(session_id: str, analysis) -> set[str]:

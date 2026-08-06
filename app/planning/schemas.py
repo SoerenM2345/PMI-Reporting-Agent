@@ -25,7 +25,7 @@ DocumentKind = Literal[
     "deep_dive", "one_pager", "financial_review", "risk_review",
     "readiness_assessment", "decision_paper", "custom",
 ]
-OutputFormat = Literal["pptx", "docx", "pdf", "html", "chart"]
+OutputFormat = Literal["pptx", "docx", "pdf", "xlsx", "html", "chart"]
 Seniority = Literal["board", "executive", "management", "operational"]
 Tone = Literal["direct", "neutral", "diplomatic"]
 Length = Literal["tight", "standard", "thorough"]

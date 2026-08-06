@@ -134,6 +134,18 @@ def text_of(path: Path) -> str:
 
         with fitz.open(str(path)) as document:
             return "\n".join(page.get_text() for page in document)
+    if suffix == ".xlsx":
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(str(path))
+        parts = []
+        for sheet in workbook.sheetnames:
+            ws = workbook[sheet]
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        parts.append(str(cell.value))
+        return "\n".join(parts)
     return path.read_text(encoding="utf-8")
 
 
@@ -141,10 +153,10 @@ def normalized(text: str) -> str:
     return " ".join(text.split())
 
 
-# ==================================================================== all four
+# ==================================================================== all formats
 def test_all_four_formats_are_produced(built):
     _deliverable, _context, results = built
-    assert set(results) == {"pptx", "docx", "pdf", "html"}
+    assert set(results) == {"pptx", "docx", "pdf", "html", "xlsx"}
     for fmt, result in results.items():
         assert result.path.is_file(), fmt
         assert result.path.stat().st_size > 3000, fmt

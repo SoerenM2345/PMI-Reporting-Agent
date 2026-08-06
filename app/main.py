@@ -1653,6 +1653,7 @@ def revise_content(session_id: str, req: ReviseRequest) -> dict:
         }
 
     stored = dlv_store.save(result.deliverable)
+    session_plan.remember_removals(session_id, stored)
     payload = _content_payload(stored, analysis)
     payload.update({
         "changed": True,

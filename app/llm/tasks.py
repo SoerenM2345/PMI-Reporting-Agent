@@ -22,8 +22,9 @@ from pydantic import BaseModel, ValidationError
 
 from app.llm import fallbacks, fast_model, get_client, reasoning_model
 from app.llm.base import ImagePart, LLMError
+from app.llm.prompts import data_block
 from app.llm.prompts import load as load_prompt
-from app.llm.schemas import RequestParse, SummaryBullets
+from app.llm.schemas import Recommendations, RequestParse, SummaryBullets
 from app.llm.serialize import budgeted_json, truncation_note
 from app.models.pmi import Audience, PMIDataModel
 
@@ -134,6 +135,40 @@ def write_summary(
         model=reasoning_model(),
         fallback=lambda: fallbacks.template_summary(model, audience),
     ).bullets
+
+
+def write_recommendations(topic: str, *, audience: str = "",
+                          project_context: str = "") -> list[str]:
+    """Recommended actions for a topic no source covers.
+
+    Returns `[]` rather than template prose when the model is unavailable. Every
+    other task here has a deterministic fallback because it is *restating*
+    evidence, which Python can do. This one has nothing to restate — a canned
+    "consider reviewing your approach" would be advice with no thought behind it,
+    and the empty-section explanation the planner already writes is more honest.
+    """
+    # `topic` and `project_context` are both user-written free text reaching a
+    # prompt, so both are fenced as data rather than interpolated as instruction
+    # (see `GenerationContext`'s module docstring).
+    parts = ["## The section", data_block("topic", topic)]
+    if audience:
+        parts.append(data_block("reader", audience))
+    if project_context:
+        parts.append(data_block("project_context", project_context))
+
+    result = run_task(
+        "write.recommendations",
+        system=load_prompt("write_recommendations"),
+        user="\n\n".join(parts),
+        output_model=Recommendations,
+        model=reasoning_model(),
+        max_tokens=1024,
+        # `model_construct` skips validation, which is the only way to express
+        # "nothing" against a schema whose whole point is that a real answer has
+        # at least one item. `run_task` has already recorded the warning.
+        fallback=lambda: Recommendations.model_construct(recommendations=[]),
+    )
+    return [text.strip() for text in result.recommendations if text and text.strip()]
 
 
 # ------------------------------------------------------------------- helpers

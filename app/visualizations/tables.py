@@ -173,7 +173,8 @@ GENERIC_COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("Item", read=lambda i: i.label),
     ColumnSpec("What it says", read=lambda i: i.statement),
     ColumnSpec("Value", read=lambda i: i.display),
-    ColumnSpec("Source", read=lambda i: ", ".join(i.source_files) or "computed"),
+    ColumnSpec("Source", read=lambda i: ", ".join(i.source_files) or "computed",
+               field="sources"),  # field name marks this for special styling
 )
 
 
@@ -196,7 +197,8 @@ def build_table(spec_id: str, items: Sequence[EvidenceItem], *,
         spec_id=spec_id,
         title=title,
         columns=[Column(header=c.header, kind=c.kind, rag=c.rag,
-                        negative_is_bad=c.negative_is_bad) for c in columns],
+                        negative_is_bad=c.negative_is_bad,
+                        width=80 if c.field == "sources" else None) for c in columns],
         rows=rows,
         row_evidence_ids=[i.evidence_id for i in usable],
         total_rows=total,

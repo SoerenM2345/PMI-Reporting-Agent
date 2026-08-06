@@ -363,3 +363,77 @@ def test_an_override_names_the_page_it_was_written_for():
     )])
 
     assert "Open risks" in apply_overrides(replanned, kb)[0]
+
+
+# ------------------------------------------------- pages the user took out
+def _replanned_with_limitations() -> Deliverable:
+    """What planning always produces: `enforce_limitations` appends the page."""
+    return Deliverable(deliverable_id="d", pages=[
+        PageDesign(page_id="cover", index=0, purpose="cover", title="Aurora"),
+        PageDesign(page_id="risks", index=1, section_id="risks",
+                   title="Talent Risks"),
+        PageDesign(page_id="page-3", index=2, purpose="appendix",
+                   section_id="data-quality-and-limitations",
+                   title="Data quality and limitations"),
+    ])
+
+
+def test_a_removed_page_stays_removed_when_the_report_is_replanned():
+    """The bug: "remove Data quality and limitations", then "now as Word".
+
+    A format change re-plans, and `enforce_limitations` appends the page again
+    on Python's authority — so the removal held for the deck the user was
+    looking at and silently lapsed in every later format. The page id is not
+    what finds it again: the design assigns those, and this re-plan called it
+    `page-3`.
+    """
+    from app.agent.knowledge import KnowledgeBase, RemovedPage
+    from app.deliverable.session import apply_removals
+
+    kb = KnowledgeBase(session_id="s1", removed_pages=[
+        RemovedPage(page_id="data-quality-and-limitations",
+                    section_id="data-quality-and-limitations",
+                    title="Data quality and limitations")])
+    replanned = _replanned_with_limitations()
+
+    apply_removals(replanned, kb)
+
+    assert [p.page_id for p in replanned.pages] == ["cover", "risks"]
+    assert [p.page_id for p in replanned.dropped_pages] == ["page-3"]
+    assert [p.index for p in replanned.pages] == [0, 1]
+
+
+def test_a_removal_is_remembered_from_the_document_not_from_the_instruction():
+    """`dropped_pages` is the one description of what is out, so a restore
+    un-remembers the removal by the same route that remembered it."""
+    from app.agent import knowledge as kb_store
+    from app.deliverable.session import remember_removals
+
+    deliverable = _replanned_with_limitations()
+    dropped = deliverable.pages.pop()
+    deliverable.dropped_pages.append(dropped)
+    remember_removals("s1", deliverable)
+
+    assert [item.title for item in kb_store.load("s1").removed_pages] == \
+        ["Data quality and limitations"]
+
+    # Restored: the memory of the removal goes with it.
+    deliverable.dropped_pages.clear()
+    deliverable.pages.append(dropped)
+    remember_removals("s1", deliverable)
+
+    assert kb_store.load("s1").removed_pages == []
+
+
+def test_the_cover_is_never_held_out_of_a_replan():
+    """A stale or mistaken entry must not be able to behead the document."""
+    from app.agent.knowledge import KnowledgeBase, RemovedPage
+    from app.deliverable.session import apply_removals
+
+    kb = KnowledgeBase(session_id="s1",
+                       removed_pages=[RemovedPage(page_id="cover")])
+    replanned = _replanned_with_limitations()
+
+    apply_removals(replanned, kb)
+
+    assert replanned.pages[0].page_id == "cover"

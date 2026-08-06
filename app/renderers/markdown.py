@@ -160,9 +160,14 @@ def _table(spec) -> str:
     lines = [f"| {header} |", f"| {divider} |"]
     for index, row in enumerate(spec.displayed_rows):
         cells = []
-        for cell in row[:len(spec.columns)]:
+        for col_idx, cell in enumerate(row[:len(spec.columns)]):
             text = _escape(cell.text)
-            cells.append(f"**{text}**" if index in spec.emphasis_rows else text)
+            is_source = spec.columns[col_idx].header == "Source"
+            if index in spec.emphasis_rows and not is_source:
+                text = f"**{text}**"
+            elif is_source:
+                text = f"<small style=\"color: #888;\">{text}</small>"
+            cells.append(text)
         lines.append("| " + " | ".join(cells) + " |")
     out = "\n".join(lines)
     if spec.has_note:
