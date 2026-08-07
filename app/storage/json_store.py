@@ -158,3 +158,21 @@ def load_pending(session_id: str) -> Optional[dict]:
 
 def clear_pending(session_id: str) -> None:
     (session_dir(session_id) / "pending.json").unlink(missing_ok=True)
+
+
+def save_session_state(session_id: str, namespace: str, state: dict) -> None:
+    """Save typed state to session storage (e.g., llm_loop state)."""
+    path = session_dir(session_id) / f"{namespace}_state.json"
+    import json
+    with open(path, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+
+
+def load_session_state(session_id: str, namespace: str) -> dict | None:
+    """Load typed state from session storage."""
+    path = session_dir(session_id) / f"{namespace}_state.json"
+    if not path.exists():
+        return None
+    import json
+    with open(path) as f:
+        return json.load(f)

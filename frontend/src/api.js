@@ -363,3 +363,70 @@ export function fillIssue(sessionId, issueId, value) {
     body: JSON.stringify({ issue_id: issueId, value }),
   });
 }
+
+// ============================================================ LLM-driven flow
+
+/** Generate content from uploaded files using LLM. */
+export function generateContent(sessionId, request, { outputFormat = "PowerPoint", audience = null } = {}) {
+  return call("/api/llm/generate", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, request, output_format: outputFormat, audience }),
+    abortable: true,
+  });
+}
+
+/** Revise generated content based on user feedback. */
+export function reviseContent(sessionId, revision) {
+  return call("/api/llm/revise", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, revision }),
+    abortable: true,
+  });
+}
+
+/** Get current generated content. */
+export function getContent(sessionId) {
+  return call(`/api/llm/content/${sessionId}`);
+}
+
+/** Get HTML preview of current content. */
+export function getPreview(sessionId) {
+  return call(`/api/llm/preview/${sessionId}`);
+}
+
+/** Approve current content for rendering. */
+export function approveContent(sessionId) {
+  return call("/api/llm/approve", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+/** Generate output files in specified formats. */
+export function generateFiles(sessionId, version, formats) {
+  return call("/api/llm/generate-files", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, version, formats }),
+    abortable: true,
+  });
+}
+
+/** List all approved content versions. */
+export function listVersions(sessionId) {
+  return call(`/api/llm/versions/${sessionId}`);
+}
+
+/** Get specific version content. */
+export function getVersion(sessionId, version) {
+  return call(`/api/llm/versions/${sessionId}/${version}`);
+}
+
+/** Get HTML preview of specific version. */
+export function getVersionPreview(sessionId, version) {
+  return call(`/api/llm/versions/${sessionId}/${version}/preview`);
+}
+
+/** Download URL for generated file. */
+export function downloadUrl(sessionId, filename) {
+  return `/api/llm/download/${sessionId}/${encodeURIComponent(filename)}`;
+}

@@ -1932,3 +1932,338 @@ def _analysis_payload(analysis: SessionAnalysis) -> dict:
         "errors": analysis.errors,
         "warnings": analysis.warnings,
     }
+
+
+# ============================================================ LLM-driven flow
+# Phase 1: Simple LLM-first generation without complex analysis
+
+
+class LLMGenerateRequest(BaseModel):
+    """Request to generate document content using LLM."""
+    session_id: str
+    request: str = Field(description="What the user wants (e.g., 'Create a risk report')")
+    output_format: str = Field(default="PowerPoint")
+    audience: Optional[str] = None
+
+
+class LLMReviseRequest(BaseModel):
+    """Request to revise generated content."""
+    session_id: str
+    revision: str = Field(description="Revision request (e.g., 'make this shorter')")
+
+
+@app.post("/api/llm/generate")
+def llm_generate(req: LLMGenerateRequest) -> dict:
+    """Generate document content using LLM from uploaded files.
+
+    Phase 1 endpoint: simple LLM-driven generation without complex analysis.
+    """
+    from app.agent.llm_loop import get_session
+    from app.storage.file_storage import get_file_text
+
+    session = get_session(req.session_id)
+
+    # Load file contents
+    meta = json_store.load_meta(req.session_id)
+    if not meta or not meta.get("files"):
+        raise HTTPException(
+            status_code=400,
+            detail="No files uploaded. Upload PMI files first."
+        )
+
+    file_names = [
+        f if isinstance(f, str) else f.get("name", "")
+        for f in meta.get("files", [])
+    ]
+
+    # Get file text
+    try:
+        file_contents = [
+            get_file_text(req.session_id, fname)
+            for fname in file_names
+            if fname
+        ]
+        session.load_files(file_contents)
+    except Exception as e:
+        log.exception("Failed to load files: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read files: {str(e)}"
+        )
+
+    # Generate content
+    content, warnings = session.generate(
+        request=req.request,
+        output_format=req.output_format,
+        audience=req.audience,
+    )
+    session.save()
+
+    return {
+        "session_id": req.session_id,
+        "title": content.title,
+        "subtitle": content.subtitle,
+        "sections": [s.model_dump() for s in content.sections],
+        "metadata": content.metadata,
+        "warnings": warnings,
+    }
+
+
+@app.post("/api/llm/revise")
+def llm_revise(req: LLMReviseRequest) -> dict:
+    """Revise generated content based on user request."""
+    from app.agent.llm_loop import get_session
+
+    session = get_session(req.session_id)
+
+    if not session.file_text:
+        raise HTTPException(
+            status_code=400,
+            detail="No files in session. Generate content first."
+        )
+
+    # Revise content
+    content, warnings = session.revise(req.revision)
+    session.save()
+
+    return {
+        "session_id": req.session_id,
+        "title": content.title,
+        "subtitle": content.subtitle,
+        "sections": [s.model_dump() for s in content.sections],
+        "metadata": content.metadata,
+        "warnings": warnings,
+    }
+
+
+@app.get("/api/llm/content/{session_id}")
+def get_llm_content(session_id: str) -> dict:
+    """Get current generated content for preview."""
+    from app.agent.llm_loop import get_session
+
+    session = get_session(session_id)
+
+    if not session.current_content:
+        raise HTTPException(
+            status_code=404,
+            detail="No content generated yet"
+        )
+
+    return {
+        "session_id": session_id,
+        "title": session.current_content.title,
+        "subtitle": session.current_content.subtitle,
+        "sections": [s.model_dump() for s in session.current_content.sections],
+        "metadata": session.current_content.metadata,
+    }
+
+
+class ApproveRequest(BaseModel):
+    """Request to approve content for rendering."""
+    session_id: str
+
+
+@app.post("/api/llm/approve")
+def llm_approve(req: ApproveRequest) -> dict:
+    """Approve content and prepare for rendering."""
+    from app.agent.llm_loop import get_session
+    from app.generation.content_store import save_approved_content
+
+    session = get_session(req.session_id)
+
+    if not session.current_content:
+        raise HTTPException(
+            status_code=404,
+            detail="No content to approve"
+        )
+
+    approved = session.approve()
+    session.save()
+
+    # Save as approved version
+    version = save_approved_content(
+        session_id=req.session_id,
+        content=approved,
+        output_format=session.output_format or "PowerPoint",
+    )
+
+    return {
+        "session_id": req.session_id,
+        "status": "approved",
+        "title": approved.title,
+        "version": version.version,
+        "ready_to_render": True,
+    }
+
+
+@app.get("/api/llm/preview/{session_id}")
+def get_preview(session_id: str) -> HTMLResponse:
+    """Get HTML preview of current content."""
+    from app.agent.llm_loop import get_session
+    from app.generation.preview import content_to_html
+
+    session = get_session(session_id)
+
+    if not session.current_content:
+        raise HTTPException(
+            status_code=404,
+            detail="No content to preview"
+        )
+
+    html = content_to_html(session.current_content)
+    return HTMLResponse(content=html)
+
+
+class ContentApprovalRequest(BaseModel):
+    """Request to approve a specific version."""
+    session_id: str
+    version: int
+    output_format: str = "PowerPoint"
+
+
+@app.post("/api/llm/versions/approve")
+def approve_version(req: ContentApprovalRequest) -> dict:
+    """Approve a specific version for rendering."""
+    from app.generation.content_store import get_version, save_approved_content
+
+    version = get_version(req.session_id, req.version)
+    if not version:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {req.version} not found"
+        )
+
+    # Re-save as new current version with new format
+    current = save_approved_content(
+        session_id=req.session_id,
+        content=version.content,
+        output_format=req.output_format,
+    )
+
+    return {
+        "session_id": req.session_id,
+        "version": current.version,
+        "output_format": req.output_format,
+        "approved_at": current.approved_at,
+    }
+
+
+@app.get("/api/llm/versions/{session_id}")
+def list_content_versions(session_id: str) -> dict:
+    """List all approved versions for a session."""
+    from app.generation.content_store import list_versions
+
+    versions = list_versions(session_id)
+
+    return {
+        "session_id": session_id,
+        "versions": [
+            {
+                "version": v.version,
+                "title": v.content.title,
+                "output_format": v.output_format,
+                "approved_at": v.approved_at,
+            }
+            for v in versions
+        ],
+    }
+
+
+@app.get("/api/llm/versions/{session_id}/{version}")
+def get_version_content(session_id: str, version: int) -> dict:
+    """Get content for a specific version."""
+    from app.generation.content_store import get_version
+
+    v = get_version(session_id, version)
+    if not v:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {version} not found"
+        )
+
+    return {
+        "session_id": session_id,
+        "version": v.version,
+        "title": v.content.title,
+        "subtitle": v.content.subtitle,
+        "sections": [s.model_dump() for s in v.content.sections],
+        "metadata": v.content.metadata,
+        "approved_at": v.approved_at,
+    }
+
+
+@app.get("/api/llm/versions/{session_id}/{version}/preview")
+def preview_version(session_id: str, version: int) -> HTMLResponse:
+    """Get HTML preview of a specific version."""
+    from app.generation.content_store import get_version
+    from app.generation.preview import content_to_html
+
+    v = get_version(session_id, version)
+    if not v:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {version} not found"
+        )
+
+    html = content_to_html(v.content)
+    return HTMLResponse(content=html)
+
+
+class GenerateFileRequest(BaseModel):
+    """Request to generate output files from approved content."""
+    session_id: str
+    version: int
+    formats: list[str] = Field(default_factory=lambda: ["powerpoint"])
+
+
+@app.post("/api/llm/generate-files")
+def generate_files(req: GenerateFileRequest) -> dict:
+    """Generate output files for approved content.
+
+    Formats: powerpoint, excel, pdf, word, html, chart
+    """
+    from app.generation.content_store import get_version
+    from app.generation.render_adapter import generate_outputs
+
+    version = get_version(req.session_id, req.version)
+    if not version:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {req.version} not found"
+        )
+
+    # Generate files
+    output_dir = json_store.session_dir(req.session_id) / "outputs"
+    try:
+        outputs = generate_outputs(version.content, req.formats, output_dir)
+    except Exception as e:
+        log.exception("file generation failed: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate files: {str(e)}"
+        )
+
+    return {
+        "session_id": req.session_id,
+        "version": req.version,
+        "generated_formats": list(outputs.keys()),
+        "files": outputs,
+    }
+
+
+@app.get("/api/llm/download/{session_id}/{filename}")
+def download_file(session_id: str, filename: str) -> FileResponse:
+    """Download a generated file."""
+    output_path = json_store.session_dir(session_id) / "outputs" / filename
+
+    if not output_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"File not found: {filename}"
+        )
+
+    return FileResponse(
+        path=output_path,
+        filename=output_path.name,
+        media_type="application/octet-stream",
+    )
