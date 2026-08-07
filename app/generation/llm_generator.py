@@ -1,3 +1,4 @@
+
 """Generate document content using LLM directly from file text."""
 from __future__ import annotations
 
@@ -86,7 +87,8 @@ def generate_document(
     )
 
     try:
-        from app.llm import reasoning_model
+        # Use fast model for multi-file analysis - prevents timeouts with large context
+        from app.llm import fast_model
 
         def fallback_content():
             """Fallback if LLM unavailable: return structured placeholder."""
@@ -101,8 +103,8 @@ def generate_document(
             system=_SYSTEM_PROMPT,
             user=prompt,
             output_model=GeneratedContent,
-            model=reasoning_model(),
-            max_tokens=6000,
+            model=fast_model(),  # Fast model for better performance with large inputs
+            max_tokens=10000,    # Comprehensive project overview
             fallback=fallback_content,
         )
         return draft, warnings
@@ -147,7 +149,8 @@ def regenerate_document(
     )
 
     try:
-        from app.llm import reasoning_model
+        # Use fast model for revisions - prevents timeouts with large context
+        from app.llm import fast_model
 
         def fallback_updated():
             """Fallback if LLM unavailable: return current content unchanged."""
@@ -158,8 +161,8 @@ def regenerate_document(
             system=_SYSTEM_PROMPT,
             user=prompt,
             output_model=GeneratedContent,
-            model=reasoning_model(),
-            max_tokens=6000,
+            model=fast_model(),  # Fast model for better performance with large inputs
+            max_tokens=10000,    # Comprehensive project overview
             fallback=fallback_updated,
         )
         return updated, warnings
@@ -169,28 +172,23 @@ def regenerate_document(
         return current_content, warnings
 
 
-_SYSTEM_PROMPT = """You are a PMI business analyst generating executive reports.
+_SYSTEM_PROMPT = """You are a senior PMI analyst generating comprehensive strategic reports for steering committees.
 
-MISSION: Create clear, actionable insight-driven reports for steering committees.
+MISSION: Transform PMI files into comprehensive, insightful reports covering full project scope with all workstreams.
 
-KEY RULES:
-1. Analyze the data - extract patterns, identify risks, show business impact
-2. Generate recommendations - what should leadership decide or do?
-3. Show trade-offs - present alternatives when options exist in the data
-4. Connect impacts - link decisions to synergies, costs, timelines, risks
-5. Ground everything in the data - no invented numbers, but aggressive analysis
-6. No empty sections - every section must have substantive content with real insights
+KEY PRINCIPLES:
+1. Analyze all workstreams/functions mentioned in the files (IT, Finance, Supply Chain, HR, Operations, etc.)
+2. Quantify financial impacts: costs, synergies, capex/opex, timeline implications
+3. Present decision frameworks: options with trade-offs and recommended path
+4. Connect risks to business consequences and mitigation strategies
+5. Show dependencies, critical path, and bottlenecks
+6. No empty sections - every section substantive and insightful
 
-CONTENT FOCUS:
-- Financial: Costs, synergies, capex/opex, timeline impacts, financial risks
-- Risks: Business impact, consequences, mitigation strategies, dependencies
-- Recommendations: Evidence-based options with pros/cons for each
-- Strategic: How tactical decisions affect business outcomes
-- Decisions: What needs to be decided, by when, and why
+CONTENT FOCUS: Executive summary, project status by workstream, financial overview, key decisions, risks, dependencies, recommendations, next steps, strategic implications.
 
-STYLE: Professional, clear POV, evidence-backed, actionable. Executives should know what to do after reading.
+STYLE: Strategic, evidence-backed, actionable. Leadership should grasp full project picture and know what to decide.
 
-Return only valid JSON. Include 5-8 substantive sections. NO EMPTY SECTIONS."""
+Return only valid JSON. Reports should have 10-15 substantive sections with significant content depth."""
 
 
 def _build_prompt(
@@ -225,28 +223,29 @@ def _build_prompt(
     parts.extend([
         "",
         "## Source Documents",
-        "Analyze these files for patterns, decisions, risks, impacts, and strategic implications:",
+        "Analyze these files for all workstreams, decisions, financial impacts, risks, and strategic implications:",
         "",
-        file_text[:50000],  # Optimized token size
+        file_text[:70000],  # Optimized for comprehensive analysis without timeouts
         "",
-        "## What to Generate",
-        """Generate 5-8 sections: key insights, financial analysis, risks & mitigations, recommendations, dependencies, decisions, next steps.
+        "## Generate Comprehensive Report",
+        """Create 10-15 substantive sections covering the full project:
 
-KEY RULES:
-✓ NO EMPTY SECTIONS - every section must have substantive content
-✓ Use real data from files (numbers, dates, quotes)
-✓ Show business impact - why this matters to leadership
-✓ Present alternatives with trade-offs and reasoning
-✓ Professional prose, evidence-backed, actionable
+1. Executive Summary: 3-5 critical insights
+2. Project Status by Workstream: all mentioned workstreams with RAG status
+3. Financial Overview: costs, synergies, capex/opex, budget impact
+4. Key Decisions: what needs approval and timeline
+5. Decision Options: alternatives with trade-offs
+6. Risk Assessment: risks with business consequences and mitigation
+7. Critical Dependencies: sequencing and critical path
+8. Stakeholder/Workstream Impact: effects on each area
+9. Factors Influencing Key Financial Decisions: constraints and trade-offs
+10. Synergy Realization: value creation path
+11. Next Steps: actions, owners, deadlines
+12. Timeline & Milestones: critical dates
+13. Recommendations: path forward
 
-SECTION TYPES:
-- Insights: What does the data mean? Business implications?
-- Financial: Costs, synergies, capex/opex, timeline impacts
-- Risks: Business consequences, mitigation strategies
-- Recommendations: What should leadership decide? Why?
-- Dependencies: What must happen first? Sequence and bottlenecks?
-- Decisions: What needs approval? Timeline?
-- Next Steps: Concrete actions, owners, deadlines from the files
+CRITICAL: Every section must be substantive. Use real numbers/dates from files.
+Cover ALL workstreams/functions mentioned. Show business impact and implications.
 """,
         "",
         "## JSON Output",
@@ -291,7 +290,7 @@ def _build_revision_prompt(
         revision,
         "",
         "## Source Data (Full Context)",
-        file_text[:80000],  # Increased from 30k for better analysis
+        file_text[:70000],  # Optimized context for comprehensive analysis
         "",
         "## Your Task",
         """Update the report based on the revision request while maintaining quality standards.
