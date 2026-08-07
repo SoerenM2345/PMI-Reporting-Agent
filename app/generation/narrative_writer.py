@@ -150,6 +150,7 @@ def _recommendations_for(page: PageDesign, context: GenerationContext,
 
     section = plan.section(page.section_id) if plan is not None else None
     topic = (section.working_title if section is not None else "") or page.title
+
     proposed = tasks.write_recommendations(
         topic,
         audience=context.audience or "",

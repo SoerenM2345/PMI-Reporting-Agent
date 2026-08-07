@@ -14,9 +14,22 @@ not drop the one you think is redundant, and do not add topics they did not ask
 for. Later stages are allowed to retitle and regroup; this list is what
 coverage is checked against, so anything missing here can never be checked.
 
-If the user named no sections at all, leave `scope_topics` empty rather than
-inventing a table of contents. A later stage will decide the shape from the
-evidence.
+A topic named in a sentence is a named topic. "A KPI dashboard tracking Day 1
+readiness, completion % and overdue tasks" names three, and they are the whole
+contract: it is a request for those three things, not for a status pack that
+happens to mention them. Carry them across even though the user typed no
+bulleted list, and add nothing beside them.
+
+If the user named no topics at all — "put together the usual SteerCo pack",
+"how are we doing?" — leave `scope_topics` empty rather than inventing a table
+of contents. A later stage will decide the shape from the evidence.
+
+**The reader is not the document.** "For SteerCo" tells you `audience_label`
+and nothing about scope. A request addressed to a Steering Committee is not
+thereby a request for the eight-section Steering Committee pack, and where the
+user asked for something narrower — a dashboard, a one-pager, three named
+topics — giving them the pack is ignoring them. `document_kind` follows the
+form the user asked for; `custom` is the honest answer for a dashboard.
 
 **`audience_label` is the reader in the user's own words.** "the CFO", "the
 Steering Committee", "Anna's workstream leads". Do not normalise these to a

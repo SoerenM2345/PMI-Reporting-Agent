@@ -320,11 +320,15 @@ def _ensure_readable_page(page: PageDesign, deliverable: Deliverable) -> None:
     if any(visible(element) for element in page.elements):
         return
 
+    # Honest message about what's missing, not a generic excuse. Mirroring
+    # the language of app/report/planner.py's _uncovered() pattern.
+    title = page.title or page.page_id
+    fallback_text = f"{title} — the uploaded files don't cover this."
     page.elements.append(TextElement(
         element_id=f"{page.page_id}.body-empty",
         slot="col1",
         role="body",
-        text="Not enough data",
+        text=fallback_text,
         authored_by="python",
         prominence="primary",
     ))

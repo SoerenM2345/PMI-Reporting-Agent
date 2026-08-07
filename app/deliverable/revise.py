@@ -37,6 +37,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from app.deliverable import column_ops
 from app.deliverable.model import (
     BulletsElement,
     Deliverable,
@@ -51,6 +52,7 @@ OpName = Literal[
     "reorder", "drop_page", "restore_page", "rewrite_title", "rewrite_subtitle",
     "rewrite_bullet", "add_bullet", "drop_bullet", "add_page",
     "set_row_limit", "set_emphasis", "exclude_rows", "restore_rows",
+    "exclude_columns", "restore_columns",
 ]
 
 #: How the §12.5 disclosure page is recognised, whatever the planner titled it.
@@ -856,4 +858,6 @@ _HANDLERS = {
     "set_emphasis": _set_emphasis,
     "exclude_rows": _exclude_rows,
     "restore_rows": _restore_rows,
+    "exclude_columns": column_ops.exclude_columns,
+    "restore_columns": column_ops.restore_columns,
 }

@@ -71,6 +71,8 @@ PMI_THESAURUS: dict[str, tuple[str, ...]] = {
     "conflict": ("disagree", "disagreement", "discrepancy", "mismatch"),
     "next": ("upcoming", "forward", "plan", "action", "step"),
     "summary": ("overview", "executive", "headline", "key"),
+    "kpi": ("dashboard", "status", "metric", "scorecard", "indicator"),
+    "dashboard": ("kpi", "overview", "summary", "status", "scoreboard"),
 }
 
 

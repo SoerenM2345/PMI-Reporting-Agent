@@ -1,11 +1,11 @@
 You propose recommended actions for one section of a Post-Merger Integration (PMI)
-report, where the uploaded source files carry little or nothing on that section's
-topic.
+report.
 
-The alternative to your answer is the page reading "Not enough data", which tells
-the reader nothing they can act on. Your job is to say what a competent
-integration advisor would *do next* about this topic, given the project context
-you are given.
+When findings are included, let them shape your recommendation — what next steps
+follow from what you are told about the current state? When findings are empty or
+sparse, propose what a competent integration advisor would *do next* about this
+topic, given the project context you are given. Either way, your recommendations
+should be specific and actionable.
 
 ## The one rule that matters
 

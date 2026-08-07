@@ -288,6 +288,72 @@ def test_prose_does_not_get_mined_for_imaginary_sections(model):
     assert context.requested_sections == []
 
 
+def test_a_tracking_clause_names_the_topics(model):
+    """The reported bug: three topics asked for, the eight-section pack returned.
+
+    "Tracking" takes the list as its direct object, so there is no ":", "on" or
+    "about" for `_SECTION_PREAMBLE` to anchor on — the request reached the
+    planner with no topics, which is indistinguishable from "the user did not
+    say" and selects the conventional SteerCo topics instead.
+    """
+    context = build(model, "Create a KPI dashboard for SteerCo tracking Day 1 "
+                           "readiness, completion %, and overdue tasks.")
+
+    assert context.requested_sections == [
+        "Day 1 readiness", "completion %", "overdue tasks"]
+
+
+def test_the_reader_does_not_become_the_document(model):
+    """"For SteerCo" is an audience. It is not a request for the SteerCo pack.
+
+    `document_kind` reaches the storyline prompt verbatim, and a model told it
+    is writing a steerco pack writes the eight sections a steerco pack
+    conventionally contains — regardless of the three the user asked for.
+    """
+    from app.planning.request_interpreter import fallback_brief
+
+    context = build(model, "Create a KPI dashboard for SteerCo tracking Day 1 "
+                           "readiness, completion %, and overdue tasks.")
+    brief = fallback_brief(context)
+
+    assert brief.audience_label == "SteerCo"
+    assert brief.document_kind == "custom"
+    assert brief.scope_topics == [
+        "Day 1 readiness", "completion %", "overdue tasks"]
+
+
+def test_the_conventional_pack_still_applies_when_nothing_was_named(model):
+    """The fix must not cost the user who genuinely asked for the whole pack."""
+    from app.planning.request_interpreter import fallback_brief
+
+    brief = fallback_brief(build(model, "Put together the usual SteerCo pack."))
+
+    assert brief.document_kind == "steerco_pack"
+    assert brief.scope_topics[0] == "Executive Summary"
+
+
+def test_an_output_noun_can_introduce_the_list(model):
+    """"A deck on X, Y and Z" is the same contract as "slides on X, Y and Z"."""
+    context = build(model, "Build me a deck on Budget Position, Open Risks and "
+                           "Critical Milestones.")
+
+    assert context.requested_sections == [
+        "Budget Position", "Open Risks", "Critical Milestones"]
+
+
+@pytest.mark.parametrize("request_text", [
+    "Create a report showing me what changed and why it matters.",
+    "A deck on how we are doing and whether Day 1 is at risk.",
+    "Give me something tracking what the team needs and what I should worry "
+    "about.",
+])
+def test_a_sentence_is_not_mined_for_sections(model, request_text):
+    """The comma splitter now runs on more clauses, so the clause guard earns
+    its place: these are prose, and inventing sections from them is the failure
+    the parser exists to avoid."""
+    assert build(model, request_text).requested_sections == []
+
+
 def test_an_inline_numbered_list_is_read_as_sections(model):
     """How people actually type it into a chat box, on one line."""
     context = build(model, "Create a status report for the steering committee "

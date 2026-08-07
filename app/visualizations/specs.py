@@ -301,6 +301,20 @@ class ExcludedRow(BaseModel):
     emphasised: bool = False
 
 
+class ExcludedColumn(BaseModel):
+    """A column taken out at the user's request, kept so the request can be undone.
+
+    Excluded rather than deleted so the exclusion can be reversed.
+    """
+
+    header: str = ""
+    #: Where it sat in `columns`, so restoring puts it back in the right place.
+    position: int = 0
+    column: Optional["Column"] = None
+    #: The cells from this column across all rows, for restoration.
+    cells: list[Cell] = Field(default_factory=list)
+
+
 class TableSpec(BaseModel):
     """Reuses `Column`/`Cell` from the existing IR — including `Cell.ref`, which
     is what makes a table cell editable and writable back to the data model."""
@@ -317,6 +331,8 @@ class TableSpec(BaseModel):
     emphasis_rows: list[int] = Field(default_factory=list)
     #: Rows the user asked to leave out. See `ExcludedRow`.
     excluded_rows: list[ExcludedRow] = Field(default_factory=list)
+    #: Columns the user asked to leave out. See `ExcludedColumn`.
+    excluded_columns: list[ExcludedColumn] = Field(default_factory=list)
     caption: str = ""
     source_note: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
@@ -362,6 +378,13 @@ class TableSpec(BaseModel):
         return (f"{len(self.excluded_rows)} row(s) excluded at the "
                 f"author's request.")
 
+    def column_exclusion_note(self) -> str:
+        """That columns were hidden at the author's request."""
+        if not self.excluded_columns:
+            return ""
+        return (f"{len(self.excluded_columns)} column(s) excluded at the "
+                f"author's request.")
+
     def note(self) -> str:
         """Everything the reader needs about what this table is *not*.
 
@@ -370,7 +393,8 @@ class TableSpec(BaseModel):
         `test_api_content.py::test_what_the_preview_says_is_what_the_deck_says`.
         """
         return " ".join(note for note in (self.truncation_note(),
-                                          self.exclusion_note()) if note)
+                                          self.exclusion_note(),
+                                          self.column_exclusion_note()) if note)
 
     @property
     def has_note(self) -> bool:
@@ -416,6 +440,52 @@ class TableSpec(BaseModel):
                               for row in self.emphasis_rows]
         if excluded.emphasised:
             self.emphasis_rows.append(index)
+
+    # ---------------------------------------------------------- column edits
+    def exclude_column(self, index: int) -> ExcludedColumn:
+        """Take one column out, remembering enough to put it back.
+
+        Removes the column from `columns` and pops the cell at that index from
+        every row (and from any previously-excluded rows, to keep them aligned).
+        """
+        if index < 0 or index >= len(self.columns):
+            raise IndexError(f"column index {index} out of range [0, {len(self.columns)})")
+
+        column = self.columns.pop(index)
+        column_cells = []
+        for row_idx, row in enumerate(self.rows):
+            if index < len(row):
+                column_cells.append(row.pop(index))
+        # Also remove from any previously-excluded rows to keep them aligned.
+        for excluded_row in self.excluded_rows:
+            if index < len(excluded_row.cells):
+                excluded_row.cells.pop(index)
+
+        excluded = ExcludedColumn(
+            header=column.header, position=index, column=column,
+            cells=column_cells)
+        self.excluded_columns.append(excluded)
+        return excluded
+
+    def restore_column(self, excluded: ExcludedColumn) -> None:
+        """Put an excluded column back where it was."""
+        if excluded in self.excluded_columns:
+            self.excluded_columns.remove(excluded)
+        if excluded.column is None:
+            return
+        index = min(max(excluded.position, 0), len(self.columns))
+        self.columns.insert(index, excluded.column)
+        # Restore cells to each row, in order.
+        for row_idx, row in enumerate(self.rows):
+            cell = (excluded.cells[row_idx] if row_idx < len(excluded.cells)
+                    else Cell())
+            row.insert(index, cell)
+        # Also restore to any previously-excluded rows.
+        for excluded_row in self.excluded_rows:
+            cell = (excluded.cells[len(self.rows) + excluded_row.position]
+                    if len(self.rows) + excluded_row.position < len(excluded.cells)
+                    else Cell())
+            excluded_row.cells.insert(index, cell)
 
 
 def _row_label(cells: list[Cell]) -> str:

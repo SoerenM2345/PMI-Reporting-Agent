@@ -365,7 +365,7 @@ def test_an_empty_chapter_says_not_enough_data_instead_of_staying_blank():
 
     assert page.subtitle == ""
     assert [element.text for element in page.of_role("body")] == [
-        "Not enough data"]
+        "Open Decisions — the uploaded files don't cover this."]
     assert not page.of_role("headline")
 
 

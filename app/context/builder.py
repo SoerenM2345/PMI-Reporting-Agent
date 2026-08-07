@@ -354,7 +354,13 @@ def _transaction(header: PMIProject) -> TransactionContext:
 # ============================================== what the user explicitly asked
 _SECTION_PREAMBLE = re.compile(
     r"\b(?:sections?|chapters?|slides?|topics?|cover(?:ing|s)?|"
-    r"includ(?:e|ing|es)|containing|contains|with|comprising)\b\s*"
+    r"includ(?:e|ing|es)|containing|contains|with|comprising|"
+    # The output noun introduces the list just as often as the word "sections"
+    # does — "a deck on X, Y and Z" is the same contract as "slides on X, Y and
+    # Z", which was already read. The connector is still required, and
+    # `_CLAUSE_FRAGMENT` throws out "a report on how we are doing".
+    r"deck|report|pack|presentation|document|dashboard|overview|"
+    r"summary|update)\b\s*"
     r"(?::|\-|\bon\b|\babout\b)", re.I)
 _NUMBERED = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+(?P<text>.+?)\s*[.;]?$", re.M)
 _INLINE_NUMBERED = re.compile(
@@ -362,15 +368,40 @@ _INLINE_NUMBERED = re.compile(
 _STOP_SECTION = re.compile(
     r"^(?:and|then|also|please|thanks?|in|as|for|the|a|an)\b", re.I)
 
+#: Verbs that take the topic list as their direct object, with no connector in
+#: between: "a KPI dashboard **tracking** Day 1 readiness, completion %, and
+#: overdue tasks". `_SECTION_PREAMBLE` cannot see these — it requires a ":",
+#: "on" or "about" after its keyword — so a request phrased this way reached
+#: the planner with *no* topics, which is indistinguishable downstream from
+#: "the user did not say" and selects the house template instead. Same failure
+#: mode as the one-section-per-line list, in a different sentence shape.
+_TRACKING_PREAMBLE = re.compile(
+    r"\b(?:track(?:ing|s)?|show(?:ing|s)?|display(?:ing|s)?|"
+    r"list(?:ing|s)?|highlight(?:ing|s)?|summaris(?:ing|es)?|"
+    r"summariz(?:ing|es)?|reporting on|focus(?:ed|ing)? on|"
+    r"broken down by|breaking down|comparing)\b\s+", re.I)
+
+#: A fragment carrying a finite verb or a question word is a sentence the user
+#: wrote, not a section title. Without this the comma splitter reads "a deck
+#: showing me what changed and why it matters" as two sections — inventing
+#: structure from prose, which is the failure the parser exists to avoid.
+_CLAUSE_FRAGMENT = re.compile(
+    r"^(?:what|why|how|when|where|who|whether|that|if|me|us|it|them|they|"
+    r"we|you|i|our|my)\b"
+    r"|\b(?:is|are|was|were|be|will|would|should|shall|can|could|may|might|"
+    r"must|have|has|had|do|does|did|need|needs|want|wants|look|looks|"
+    r"seem|seems|go|goes|going)\b", re.I)
+
 
 def requested_sections(request: str) -> list[str]:
     """The section titles the user named, verbatim and in order.
 
-    Three shapes, in priority order: a numbered or bulleted list; a
-    "sections: a, b, c" preamble; a semicolon-separated run. Anything else
-    yields nothing here and is left to the request interpreter — guessing at
-    prose would invent sections the user did not ask for, which is exactly the
-    failure this redesign exists to end.
+    Four shapes, in priority order: a numbered or bulleted list; a
+    "sections: a, b, c" preamble; a "tracking a, b and c" clause, where the verb
+    takes the topics directly; a semicolon-separated run. Anything else yields
+    nothing here and is left to the request interpreter — guessing at prose
+    would invent sections the user did not ask for, which is exactly the failure
+    this redesign exists to end.
     """
     if not request:
         return []
@@ -403,13 +434,17 @@ def requested_sections(request: str) -> list[str]:
             return _dedupe(inline)
 
     if match:
-        tail = request[match.end():]
-        # Stop at the next sentence, but not at the period in a section title
-        # such as "Forecast vs. Actuals".
-        tail = re.split(r"(?:(?<!vs)(?<!Vs)(?<!VS)\.\s+(?=[A-Z]))|\n\n",
-                        tail, maxsplit=1)[0]
-        parts = [_clean_section(p) for p in re.split(r"[;,]|\band\b", tail)]
-        parts = [p for p in parts if p and not _STOP_SECTION.match(p)]
+        parts = _comma_separated_topics(request[match.end():])
+        if len(parts) >= 2:
+            return _dedupe(parts)
+
+    # "a KPI dashboard tracking Day 1 readiness, completion %, and overdue
+    # tasks" — the topics are the verb's object, so there is no connector for
+    # `_SECTION_PREAMBLE` to anchor on. Tried after it so an explicit
+    # "sections:" list still wins where a request contains both.
+    tracking = _TRACKING_PREAMBLE.search(request)
+    if tracking:
+        parts = _comma_separated_topics(request[tracking.end():])
         if len(parts) >= 2:
             return _dedupe(parts)
 
@@ -428,6 +463,17 @@ def requested_sections(request: str) -> list[str]:
     if len(bare) >= 2:
         return _dedupe(bare)
     return []
+
+
+def _comma_separated_topics(tail: str) -> list[str]:
+    """Split one clause into topic phrases, rejecting anything sentence-shaped."""
+    # Stop at the next sentence, but not at the period in a section title
+    # such as "Forecast vs. Actuals".
+    tail = re.split(r"(?:(?<!vs)(?<!Vs)(?<!VS)\.\s+(?=[A-Z]))|\n\n",
+                    tail, maxsplit=1)[0]
+    parts = [_clean_section(p) for p in re.split(r"[;,]|\band\b", tail)]
+    return [p for p in parts
+            if p and not _STOP_SECTION.match(p) and not _CLAUSE_FRAGMENT.search(p)]
 
 
 def _clean_section(text: str) -> str:

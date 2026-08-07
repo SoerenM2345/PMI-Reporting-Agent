@@ -125,8 +125,17 @@ def _payload(context: GenerationContext) -> str:
 
 
 # ------------------------------------------------------------ keyless path
+#: Matched in order, and the order carries the rule: **a form the user named
+#: outranks the reader they named it for.** "A KPI dashboard for SteerCo" is a
+#: dashboard; reading it as a `steerco_pack` because the word "SteerCo" appears
+#: is how a three-tile request became the eight-section house pack — the kind
+#: reaches the storyline prompt as "Document: steerco pack", and a model told it
+#: is writing a SteerCo pack writes what a SteerCo pack conventionally contains.
+#: An audience is an audience; only "the SteerCo pack" names the document.
 _KIND_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"\bone[- ]pager\b", re.I), "one_pager"),
+    (re.compile(r"\b(dashboard|scorecard|kpi)\b", re.I), "custom"),
+    (re.compile(r"\b(deep[- ]dive|detailed analysis)\b", re.I), "deep_dive"),
     (re.compile(r"\b(steerco|steering committee)\b", re.I), "steerco_pack"),
     (re.compile(r"\bboard\b", re.I), "board_update"),
     (re.compile(r"\b(budget|financial|finance|synerg|cost|cash)\w*\b", re.I),
@@ -136,7 +145,6 @@ _KIND_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
      "readiness_assessment"),
     (re.compile(r"\b(decision|approval|approve)\w*\b", re.I), "decision_paper"),
     (re.compile(r"\bworkstream\b", re.I), "workstream_review"),
-    (re.compile(r"\b(deep[- ]dive|detailed analysis)\b", re.I), "deep_dive"),
 )
 
 _SENIORITY = (
