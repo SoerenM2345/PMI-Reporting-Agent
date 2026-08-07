@@ -52,7 +52,7 @@ log = logging.getLogger("pmi.conversation")
 
 Intent = Literal[
     "request_report", "set_audience", "revise_content", "render",
-    "resolve_conflict", "question", "unclear",
+    "resolve_conflict", "question", "recommendations", "unclear",
 ]
 
 #: What "generate it as X" can mean. Order matters — the first format whose
@@ -104,7 +104,7 @@ is not stated."""
 
 #: Intents that cannot be answered without having read the files.
 NEEDS_ANALYSIS = frozenset(
-    {"render", "revise_content", "request_report", "set_audience"}
+    {"render", "revise_content", "request_report", "set_audience", "recommendations"}
 )
 
 
@@ -353,6 +353,8 @@ def _respond_turn(chat: Chat, text: str, *, cancel=None) -> ChatAnswer:
         return preamble.then(_plan(chat, analysis, turn, text, cancel=cancel))
     if turn.intent == "resolve_conflict":
         return preamble.then(_offer_conflicts(analysis))
+    if turn.intent == "recommendations":
+        return preamble.then(_generate_recommendations(chat, analysis, text))
 
     # Anything else is a message to answer. This used to be `_help`, which
     # recited the feature list at anyone whose phrasing the keyword ladder did
@@ -578,6 +580,47 @@ def _analyse(chat: Chat, request_text: str, audience: Optional[Audience],
         force=True,
     )
     return analysis, needs_audience
+
+
+def _generate_recommendations(chat: Chat, analysis, text: str) -> ChatAnswer:
+    """Generate recommendations or insights based on the uploaded files.
+
+    Uses the same recommendation generation as the narrative writer but for a
+    general audience asking for insights rather than as part of a report page.
+    """
+    from app.context import builder
+    from app.llm import tasks
+
+    context = builder.build_for_session(
+        chat.session_id, text, analysis=analysis
+    )
+
+    if not context.has_evidence:
+        return say("No data has been uploaded yet. Upload your PMI files first "
+                   "and I can provide recommendations based on them.")
+
+    # Use the LLM to generate recommendations for the project/integration
+    topic = text or "this integration project"
+    proposed = tasks.write_recommendations(
+        topic,
+        audience=context.audience or "Steering Committee",
+        project_context=context.project_context or "",
+    )
+
+    if not proposed:
+        return say("I could not generate recommendations based on the current data. "
+                   "Try asking for recommendations on a specific topic, like risks, "
+                   "milestones, or readiness.")
+
+    # Format the recommendations nicely
+    content = f"## Recommendations for {topic}\n\n"
+    for i, rec in enumerate(proposed, 1):
+        content += f"{i}. {rec}\n"
+
+    content += "\n*These recommendations are AI-generated suggestions based on your " \
+              "uploaded data and require manager verification before acting on them.*"
+
+    return ChatAnswer(content=content)
 
 
 def _answer(chat: Chat, analysis, text: str) -> ChatAnswer:
@@ -1135,6 +1178,11 @@ def _classify_by_keyword(text: str) -> TurnIntent:
 
     if audience is not None:
         return TurnIntent(intent="set_audience", audience=audience)
+
+    if re.search(r"\b(recommendation\w*|insight\w*|suggestion\w*|what should|what do you recommend)\b|"
+                 r"\b(?:based on|according to).{0,40}(?:data|file|upload|source)\b",
+                 lowered):
+        return TurnIntent(intent="recommendations", audience=audience)
 
     return TurnIntent(intent="unclear")
 

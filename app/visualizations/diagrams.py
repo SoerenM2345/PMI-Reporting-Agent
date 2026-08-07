@@ -290,7 +290,11 @@ def to_pptx(spec: DiagramSpec, brand: BrandSystem, slide, box: Box):
         shapes.append(shape)
         handles[node.node_id] = shape
 
+    # Skip edges where either endpoint is excluded
+    active_node_ids = {node.node_id for node in spec.nodes}
     for edge in spec.edges:
+        if edge.from_id not in active_node_ids or edge.to_id not in active_node_ids:
+            continue
         start, end = positions.get(edge.from_id), positions.get(edge.to_id)
         if start is None or end is None:
             continue
@@ -412,7 +416,11 @@ def to_svg(spec: DiagramSpec, brand: BrandSystem, *, width: int = 720,
                      f'x2="{(box.left + box.width) * scale:.0f}" y2="{y:.0f}" '
                      f'stroke="{brand.semantic["primary"]}" stroke-width="3"/>')
 
+    # Skip edges where either endpoint is excluded
+    active_node_ids = {node.node_id for node in spec.nodes}
     for edge in spec.edges:
+        if edge.from_id not in active_node_ids or edge.to_id not in active_node_ids:
+            continue
         start, end = positions.get(edge.from_id), positions.get(edge.to_id)
         if start is None or end is None:
             continue
@@ -471,7 +479,11 @@ def to_png(spec: DiagramSpec, brand: BrandSystem, out_dir: Path, *,
                   [box.top + box.height / 2] * 2,
                   color=brand.semantic["primary"], linewidth=3)
 
+    # Skip edges where either endpoint is excluded
+    active_node_ids = {node.node_id for node in spec.nodes}
     for edge in spec.edges:
+        if edge.from_id not in active_node_ids or edge.to_id not in active_node_ids:
+            continue
         start, end = positions.get(edge.from_id), positions.get(edge.to_id)
         if start is None or end is None:
             continue

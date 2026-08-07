@@ -270,6 +270,18 @@ class MatrixAxes(BaseModel):
     y_ticks: list[str] = Field(default_factory=list)
 
 
+class ExcludedDiagramNode(BaseModel):
+    """A diagram node taken out at the user's request, kept so the request can be undone.
+
+    Excluded rather than deleted so the exclusion can be reversed.
+    """
+
+    node_id: str = ""
+    label: str = ""
+    #: Where it sat in `nodes`, so restoring puts it back in the right place.
+    position: int = 0
+
+
 class DiagramSpec(BaseModel):
     spec_id: str
     diagram_type: DiagramType = "process_flow"
@@ -283,6 +295,8 @@ class DiagramSpec(BaseModel):
     source_note: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    #: Nodes the user asked to leave out. See `ExcludedDiagramNode`.
+    excluded_nodes: list[ExcludedDiagramNode] = Field(default_factory=list)
 
 
 class ExcludedRow(BaseModel):

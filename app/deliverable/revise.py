@@ -41,6 +41,7 @@ from app.deliverable import column_ops
 from app.deliverable.model import (
     BulletsElement,
     Deliverable,
+    DiagramElement,
     PageDesign,
     TableElement,
     TextElement,
@@ -52,7 +53,7 @@ OpName = Literal[
     "reorder", "drop_page", "restore_page", "rewrite_title", "rewrite_subtitle",
     "rewrite_bullet", "add_bullet", "drop_bullet", "add_page",
     "set_row_limit", "set_emphasis", "exclude_rows", "restore_rows",
-    "exclude_columns", "restore_columns",
+    "exclude_columns", "restore_columns", "exclude_diagram_nodes", "restore_diagram_nodes",
 ]
 
 #: How the §12.5 disclosure page is recognised, whatever the planner titled it.
@@ -583,8 +584,8 @@ def keyword_ops(instruction: str, deliverable: Deliverable
         return renamed
 
     lowered = text.lower()
-    for rule in (_kw_exclude_rows, _kw_drop, _kw_restore, _kw_move_first,
-                 _kw_row_limit):
+    for rule in (_kw_exclude_diagram_nodes, _kw_exclude_rows, _kw_drop, _kw_restore,
+                 _kw_move_first, _kw_row_limit):
         revision = rule(lowered, deliverable)
         if revision is not None:
             return revision
@@ -642,6 +643,34 @@ _EXCLUDE_VERB = (r"exclude|omit|leave out|drop|remove|delete|take out|hide|"
 #: as the thing to delete.
 _SUBSET = re.compile(rf"\bfrom\s+(?P<scope>.+?)\s+(?:{_EXCLUDE_VERB})\b", re.I)
 
+
+def _kw_exclude_diagram_nodes(text: str, deliverable: Deliverable
+                              ) -> Optional[DeliverableRevision]:
+    """``from the risk matrix exclude X and Y`` — remove diagram nodes by name."""
+    if not re.search(rf"\b(?:{_EXCLUDE_VERB})\b", text):
+        return None
+    subset = _SUBSET.search(text)
+    # Try to find a page with a diagram
+    page = _match_page(subset.group("scope") if subset else text,
+                       deliverable.pages)
+    if page is None:
+        return None
+
+    # Check if this page has a diagram
+    has_diagram = any(e.role == "diagram" for e in page.elements
+                     if hasattr(e, 'role'))
+    if not has_diagram:
+        return None
+
+    # Extract node labels to exclude from the text
+    words_to_exclude = _words(text)
+    if not words_to_exclude:
+        return None
+
+    return DeliverableRevision(
+        ops=[PageOp(op="exclude_diagram_nodes", page_id=page.page_id,
+                   rows=list(words_to_exclude))],
+        rationale=f'exclude diagram nodes from "{_label(page)}"')
 
 def _kw_exclude_rows(text: str, deliverable: Deliverable
                      ) -> Optional[DeliverableRevision]:
@@ -829,6 +858,79 @@ def _row_label(cells) -> str:
     return label(cells)
 
 
+def _exclude_diagram_nodes(draft: Deliverable, op: PageOp, _corpus) -> str:
+    """Remove diagram nodes by matching their labels."""
+    if not op.rows or not op.page_id:
+        raise _Refused("no diagram nodes specified to exclude")
+
+    page = _find(draft, op)
+    diagram_element = next(
+        (e for e in page.elements if isinstance(e, DiagramElement)),
+        None
+    )
+    if diagram_element is None:
+        raise _Refused(f"page {op.page_id!r} has no diagram")
+
+    spec = draft.diagrams.get(diagram_element.spec_id)
+    if spec is None:
+        raise _Refused(f"diagram {diagram_element.spec_id!r} not found")
+
+    wanted = _words(" ".join(op.rows or []))
+    excluded_labels = []
+    remaining_nodes = []
+
+    for index, node in enumerate(spec.nodes):
+        node_words = _words(node.label + " " + (node.sublabel or ""))
+        if wanted & node_words:
+            from app.visualizations.specs import ExcludedDiagramNode
+
+            spec.excluded_nodes.append(
+                ExcludedDiagramNode(
+                    node_id=node.node_id,
+                    label=node.label,
+                    position=index
+                )
+            )
+            excluded_labels.append(node.label)
+        else:
+            remaining_nodes.append(node)
+
+    spec.nodes = remaining_nodes
+    return f"Excluded {len(excluded_labels)} node(s): {', '.join(excluded_labels[:3])}"
+
+
+def _restore_diagram_nodes(draft: Deliverable, op: PageOp, _corpus) -> str:
+    """Restore excluded diagram nodes."""
+    if not op.rows or not op.page_id:
+        raise _Refused("no diagram nodes specified to restore")
+
+    page = _find(draft, op)
+    diagram_element = next(
+        (e for e in page.elements if isinstance(e, DiagramElement)),
+        None
+    )
+    if diagram_element is None:
+        raise _Refused(f"page {op.page_id!r} has no diagram")
+
+    spec = draft.diagrams.get(diagram_element.spec_id)
+    if spec is None:
+        raise _Refused(f"diagram {diagram_element.spec_id!r} not found")
+
+    wanted = _words(" ".join(op.rows or []))
+    restored_labels = []
+    still_excluded = []
+
+    for excluded in spec.excluded_nodes:
+        if _mentions(" ".join(wanted), excluded.label):
+            spec.nodes.insert(excluded.position, excluded)
+            restored_labels.append(excluded.label)
+        else:
+            still_excluded.append(excluded)
+
+    spec.excluded_nodes = still_excluded
+    return f"Restored {len(restored_labels)} node(s): {', '.join(restored_labels[:3])}"
+
+
 def _match_row(wanted: str, spec) -> Optional[int]:
     """The row the instruction meant, or `None`.
 
@@ -860,4 +962,6 @@ _HANDLERS = {
     "restore_rows": _restore_rows,
     "exclude_columns": column_ops.exclude_columns,
     "restore_columns": column_ops.restore_columns,
+    "exclude_diagram_nodes": _exclude_diagram_nodes,
+    "restore_diagram_nodes": _restore_diagram_nodes,
 }
